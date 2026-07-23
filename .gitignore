@@ -1,0 +1,11 @@
+/build/
+/build-conversion/
+/*.exe
+/*.dxf
+/lep-out.txt
+/lines.txt
+/Data/leparagliding.dxf
+/Data/lep-3d.dxf
+/Data/lep-out.txt
+/Data/lines.txt
+/Data/fortranResult/fortran-run.log
