@@ -3,7 +3,6 @@
 #include "paraglider_view.h"
 #include "section_help.h"
 
-#include <QCheckBox>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -554,8 +553,6 @@ void MainWindow::buildInterface()
     progressBar_->setValue(0);
     footer->addWidget(progressBar_);
     footer->addStretch();
-    openWhenFinished_ = new QCheckBox(QStringLiteral("Open folder after build"), central);
-    footer->addWidget(openWhenFinished_);
     page->addLayout(footer);
 
     setCentralWidget(central);
@@ -1207,10 +1204,6 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
         loadViewportModel();
         statusLabel_->setText(
             QStringLiteral("Build completed · %1").arg(viewport_->modelSummary()));
-        if (openWhenFinished_->isChecked()) {
-            QDesktopServices::openUrl(
-                QUrl::fromLocalFile(QDir(outputEdit_->text()).absolutePath()));
-        }
     } else {
         statusLabel_->setText(
             QStringLiteral("Build failed · exit %1 · %2/4 files")
@@ -1345,8 +1338,7 @@ void MainWindow::loadSettings()
     const QString output = settings.value(QStringLiteral("paths/output")).toString();
     inputEdit_->setText(input);
     outputEdit_->setText(output);
-    openWhenFinished_->setChecked(
-        settings.value(QStringLiteral("behavior/openWhenFinished"), false).toBool());
+    settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
 void MainWindow::saveSettings() const
@@ -1354,9 +1346,7 @@ void MainWindow::saveSettings() const
     QSettings settings;
     settings.setValue(QStringLiteral("paths/input"), inputEdit_->text());
     settings.setValue(QStringLiteral("paths/output"), outputEdit_->text());
-    settings.setValue(
-        QStringLiteral("behavior/openWhenFinished"),
-        openWhenFinished_->isChecked());
+    settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
 QString MainWindow::enginePath() const

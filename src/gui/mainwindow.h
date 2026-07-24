@@ -7,7 +7,6 @@
 #include <QSet>
 #include <QVector>
 
-class QCheckBox;
 class QCloseEvent;
 class QDragEnterEvent;
 class QDropEvent;
@@ -82,7 +81,6 @@ private:
     QProgressBar *progressBar_ = nullptr;
     QPlainTextEdit *log_ = nullptr;
     QTreeWidget *outputTree_ = nullptr;
-    QCheckBox *openWhenFinished_ = nullptr;
     QTabWidget *diagnosticsTabs_ = nullptr;
     ParagliderView *viewport_ = nullptr;
     QToolButton *projectionButton_ = nullptr;
