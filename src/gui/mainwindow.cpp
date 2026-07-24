@@ -19,6 +19,7 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -46,6 +47,7 @@
 #include <QVBoxLayout>
 
 #include <array>
+#include <functional>
 #include <utility>
 
 namespace {
@@ -80,6 +82,136 @@ QString humanReadableSize(qint64 bytes)
             .arg(bytes / static_cast<double>(kibibyte), 0, 'f', 1);
     }
     return QStringLiteral("%1 B").arg(bytes);
+}
+
+QString glueVentRowsHtml(const QString &sectionText)
+{
+    QStringList records;
+    for (const QString &line : sectionText.split(QLatin1Char('\n'))) {
+        const QString record = line.trimmed();
+        if (!record.isEmpty() && !record.startsWith(QLatin1Char('*'))) {
+            records.append(record);
+        }
+    }
+    if (records.isEmpty()) {
+        return QStringLiteral(
+            "<h3>Current values</h3><p>No data records were found.</p>");
+    }
+
+    bool enabledOk = false;
+    const int enabled = records.constFirst().section(
+        QRegularExpression(QStringLiteral("\\s+")), 0, 0).toInt(&enabledOk);
+    if (!enabledOk) {
+        return QStringLiteral(
+            "<h3>Current values</h3><p>The first data record is not a valid "
+            "<code>0</code>/<code>1</code> mode.</p>");
+    }
+    if (enabled == 0) {
+        return QStringLiteral(
+            "<h3>Current values</h3><p><code>0</code>: old automatic vent "
+            "construction is active; no explicit cell rows are read.</p>");
+    }
+
+    QString html = QStringLiteral(
+        "<h3>Current values</h3>"
+        "<p>Explicit mode is enabled. The editor currently contains %1 cell rows.</p>"
+        "<table cellspacing=\"0\" cellpadding=\"5\" border=\"1\">"
+        "<tr><th>Cell</th><th>Record</th><th>Interpretation</th></tr>")
+                       .arg(records.size() - 1);
+
+    for (qsizetype row = 1; row < records.size(); ++row) {
+        const QStringList fields =
+            records.at(row).split(QRegularExpression(QStringLiteral("\\s+")),
+                                  Qt::SkipEmptyParts);
+        bool cellOk = false;
+        bool typeOk = false;
+        const int cell = fields.value(0).toInt(&cellOk);
+        const int type = fields.value(1).toInt(&typeOk);
+        QString interpretation;
+        int expectedFields = 2;
+
+        if (!cellOk || !typeOk) {
+            interpretation = QStringLiteral(
+                "<b>Invalid:</b> the first two fields must be integer cell and type.");
+        } else {
+            switch (type) {
+            case 0:
+                interpretation = QStringLiteral(
+                    "Separate open inlet; glued to neither skin.");
+                break;
+            case 1:
+                interpretation = QStringLiteral(
+                    "Attached to upper skin (extrados).");
+                break;
+            case -1:
+                interpretation = QStringLiteral(
+                    "Attached to lower skin (intrados), commonly a closed cell.");
+                break;
+            case -2:
+                interpretation = QStringLiteral(
+                    "Fixed lower-skin diagonal, fully open at the left side.");
+                break;
+            case -3:
+                interpretation = QStringLiteral(
+                    "Fixed lower-skin diagonal, fully open at the right side.");
+                break;
+            case 4:
+            case -4:
+                expectedFields = 4;
+                interpretation =
+                    QStringLiteral("%1-skin straight diagonal: left %2%, right %3%.")
+                        .arg(type > 0 ? QStringLiteral("Upper")
+                                      : QStringLiteral("Lower"),
+                             fields.value(2).toHtmlEscaped(),
+                             fields.value(3).toHtmlEscaped());
+                break;
+            case 5:
+            case -5:
+                expectedFields = 5;
+                interpretation =
+                    QStringLiteral(
+                        "%1-skin curved inlet: left %2%, right %3%, arc depth %4%.")
+                        .arg(type > 0 ? QStringLiteral("Upper")
+                                      : QStringLiteral("Lower"),
+                             fields.value(2).toHtmlEscaped(),
+                             fields.value(3).toHtmlEscaped(),
+                             fields.value(4).toHtmlEscaped());
+                break;
+            case 6:
+            case -6:
+                expectedFields = 4;
+                interpretation =
+                    QStringLiteral("%1-skin elliptical inlet: X width %2%, Y width %3%.")
+                        .arg(type > 0 ? QStringLiteral("Upper")
+                                      : QStringLiteral("Lower"),
+                             fields.value(2).toHtmlEscaped(),
+                             fields.value(3).toHtmlEscaped());
+                break;
+            default:
+                interpretation =
+                    QStringLiteral("<b>Unknown vent type %1.</b>").arg(type);
+                break;
+            }
+            if (cell != row) {
+                interpretation.prepend(
+                    QStringLiteral("<b>Expected cell label %1 here.</b> ").arg(row));
+            }
+            if (fields.size() != expectedFields) {
+                interpretation.append(
+                    QStringLiteral(
+                        " <b>This type expects %1 fields, but this row has %2.</b>")
+                        .arg(expectedFields)
+                        .arg(fields.size()));
+            }
+        }
+
+        html += QStringLiteral("<tr><td>%1</td><td><code>%2</code></td><td>%3</td></tr>")
+                    .arg(cellOk ? QString::number(cell) : QStringLiteral("?"),
+                         records.at(row).toHtmlEscaped(),
+                         interpretation);
+    }
+    html += QStringLiteral("</table>");
+    return html;
 }
 
 QFrame *makeCard(QWidget *parent = nullptr)
@@ -142,6 +274,29 @@ private:
     QTextCharFormat commentFormat_;
     QTextCharFormat numberFormat_;
     QTextCharFormat stringFormat_;
+};
+
+class DesignSectionEditor final : public QPlainTextEdit
+{
+public:
+    using QPlainTextEdit::QPlainTextEdit;
+
+    std::function<void()> buildRequested;
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        const bool enter =
+            event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter;
+        if (enter && !event->modifiers().testFlag(Qt::ShiftModifier)) {
+            if (buildRequested) {
+                buildRequested();
+            }
+            event->accept();
+            return;
+        }
+        QPlainTextEdit::keyPressEvent(event);
+    }
 };
 
 } // namespace
@@ -436,6 +591,13 @@ void MainWindow::buildInterface()
         }
         QLabel#subtitle, QLabel#hint, QLabel#emptyState {
             color: #93a4ba;
+        }
+        QLabel#editorHint {
+            color: #70ccef;
+            background: #102537;
+            border: 1px solid #21445d;
+            border-radius: 5px;
+            padding: 5px 8px;
         }
         QLabel#badge {
             background: #132d3a;
@@ -741,6 +903,9 @@ void MainWindow::rebuildSectionEditors()
     loadingEditors_ = true;
     sectionList_->clear();
     sectionEditors_.clear();
+    savedSectionTexts_.clear();
+    undoButtons_.clear();
+    redoButtons_.clear();
     while (sectionPages_->count() > 0) {
         QWidget *page = sectionPages_->widget(0);
         sectionPages_->removeWidget(page);
@@ -779,13 +944,27 @@ void MainWindow::rebuildSectionEditors()
         summary->setObjectName(QStringLiteral("hint"));
         summary->setWordWrap(true);
         layout->addWidget(summary);
+        auto *editorHint = new QLabel(
+            QStringLiteral(
+                "Enter builds and refreshes 3D · Shift+Enter inserts a record · "
+                "Undo/Redo history is independent for this section"),
+            sectionPage);
+        editorHint->setObjectName(QStringLiteral("editorHint"));
+        editorHint->setWordWrap(true);
+        layout->addWidget(editorHint);
 
-        auto *editor = new QPlainTextEdit(sectionPage);
+        auto *editor = new DesignSectionEditor(sectionPage);
         editor->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
         editor->setLineWrapMode(QPlainTextEdit::NoWrap);
         editor->setTabStopDistance(
             QFontMetricsF(editor->font()).horizontalAdvance(QLatin1Char(' ')) * 4.0);
         editor->setPlainText(section.text);
+        editor->setUndoRedoEnabled(true);
+        editor->document()->setMaximumBlockCount(0);
+        editor->document()->clearUndoRedoStacks();
+        editor->setToolTip(
+            QStringLiteral("Enter: build and refresh 3D · Shift+Enter: insert a new record"));
+        editor->buildRequested = [this] { startCalculation(); };
         new DesignSyntaxHighlighter(editor->document());
         layout->addWidget(editor, 1);
 
@@ -798,21 +977,55 @@ void MainWindow::rebuildSectionEditors()
         const int editorIndex = static_cast<int>(index);
         connect(helpButton, &QPushButton::clicked, this,
                 [this, editorIndex] { showSectionHelp(editorIndex); });
+        auto *undoButton = new QPushButton(QStringLiteral("Undo"), sectionPage);
+        undoButton->setObjectName(QStringLiteral("quietButton"));
+        undoButton->setToolTip(
+            QStringLiteral("Undo in this section only (Ctrl+Z)"));
+        undoButton->setEnabled(false);
+        header->insertWidget(header->count() - 1, undoButton);
+        auto *redoButton = new QPushButton(QStringLiteral("Redo"), sectionPage);
+        redoButton->setObjectName(QStringLiteral("quietButton"));
+        redoButton->setToolTip(
+            QStringLiteral("Redo in this section only (Ctrl+Y)"));
+        redoButton->setEnabled(false);
+        header->insertWidget(header->count() - 1, redoButton);
+        connect(undoButton, &QPushButton::clicked, editor, &QPlainTextEdit::undo);
+        connect(redoButton, &QPushButton::clicked, editor, &QPlainTextEdit::redo);
+        connect(editor, &QPlainTextEdit::undoAvailable,
+                this, [this, undoButton](bool available) {
+                    undoButton->setEnabled(
+                        available && process_->state() == QProcess::NotRunning);
+                });
+        connect(editor, &QPlainTextEdit::redoAvailable,
+                this, [this, redoButton](bool available) {
+                    redoButton->setEnabled(
+                        available && process_->state() == QProcess::NotRunning);
+                });
         connect(editor, &QPlainTextEdit::textChanged, this,
                 [this, editor, editorIndex, updateLineCount] {
                     updateLineCount();
                     if (loadingEditors_) {
                         return;
                     }
-                    document_.setSectionText(editorIndex, editor->toPlainText());
-                    documentDirty_ = true;
-                    dirtySections_.insert(editorIndex);
-                    saveButton_->setEnabled(process_->state() == QProcess::NotRunning);
+                    const QString text = editor->toPlainText();
+                    document_.setSectionText(editorIndex, text);
+                    if (savedSectionTexts_.value(editorIndex) == text) {
+                        dirtySections_.remove(editorIndex);
+                    } else {
+                        dirtySections_.insert(editorIndex);
+                    }
+                    documentDirty_ = !dirtySections_.isEmpty();
+                    saveButton_->setEnabled(
+                        documentDirty_
+                        && process_->state() == QProcess::NotRunning);
                     refreshSectionLabels();
                     updateWindowTitle();
                 });
 
         sectionEditors_.append(editor);
+        savedSectionTexts_.append(section.text);
+        undoButtons_.append(undoButton);
+        redoButtons_.append(redoButton);
         sectionPages_->addWidget(sectionPage);
     }
 
@@ -840,6 +1053,10 @@ bool MainWindow::saveDesign(bool showConfirmation)
 
     documentDirty_ = false;
     dirtySections_.clear();
+    savedSectionTexts_.clear();
+    for (QPlainTextEdit *editor : std::as_const(sectionEditors_)) {
+        savedSectionTexts_.append(editor->toPlainText());
+    }
     refreshSectionLabels();
     saveButton_->setEnabled(false);
     updateWindowTitle();
@@ -878,6 +1095,10 @@ void MainWindow::showSectionHelp(int index)
     }
     const DesignSection &section = document_.sections().at(index);
     const SectionHelp help = helpForSection(section.number, section.title);
+    QString details = help.details;
+    if (section.number == 26) {
+        details += glueVentRowsHtml(sectionEditors_.at(index)->toPlainText());
+    }
 
     QDialog dialog(this);
     dialog.setWindowTitle(
@@ -893,12 +1114,20 @@ void MainWindow::showSectionHelp(int index)
             "<h3>Purpose</h3><p>%3</p>"
             "<h3>Format rules</h3><p>%4</p>"
             "<h3>Editing notes</h3><p>%5</p>"
-            "<p><a href=\"%6\">Open the complete LEparagliding manual</a></p>")
+            "%6"
+            "%7"
+            "<p><a href=\"%8\">Open the complete LEparagliding manual</a></p>")
             .arg(section.number)
             .arg(help.title.toHtmlEscaped())
             .arg(help.purpose)
             .arg(help.format)
             .arg(help.notes)
+            .arg(details.isEmpty()
+                     ? QString()
+                     : QStringLiteral("<h3>Field reference</h3>%1").arg(details))
+            .arg(help.experiment.isEmpty()
+                     ? QString()
+                     : QStringLiteral("<h3>Try it</h3>%1").arg(help.experiment))
             .arg(QString::fromLatin1(manualUrl)));
     layout->addWidget(browser);
 
@@ -1053,8 +1282,17 @@ void MainWindow::setRunning(bool running)
     inputEdit_->setEnabled(!running);
     outputEdit_->setEnabled(!running);
     sectionList_->setEnabled(!running);
-    for (QPlainTextEdit *editor : std::as_const(sectionEditors_)) {
+    for (qsizetype index = 0; index < sectionEditors_.size(); ++index) {
+        QPlainTextEdit *editor = sectionEditors_.at(index);
         editor->setReadOnly(running);
+        if (index < undoButtons_.size()) {
+            undoButtons_.at(index)->setEnabled(
+                !running && editor->document()->isUndoAvailable());
+        }
+        if (index < redoButtons_.size()) {
+            redoButtons_.at(index)->setEnabled(
+                !running && editor->document()->isRedoAvailable());
+        }
     }
     saveButton_->setEnabled(!running && documentDirty_);
     buildButton_->setEnabled(!running);

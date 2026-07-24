@@ -15,7 +15,7 @@ files can be written to a separate folder:
 The desktop application is a complete design studio:
 
 - every numbered block in the selected design has its own syntax-highlighted
-  editor;
+  editor and independent unlimited Undo/Redo history;
 - the `?` button on a section opens format guidance and a link to the full
   manual;
 - **Build paraglider** validates and saves the design, runs the compatible C++
@@ -30,6 +30,12 @@ wheel to zoom. `Shift` + left drag also pans; double-click or press `F` to fit
 the model. Number keys `0`–`6` select the preset views and `P` toggles the
 projection. Double-click a completed output file to open it in its associated
 viewer.
+
+While editing a section, press `Enter` to save, build, and refresh the 3D
+viewport. Use `Shift+Enter` when you intentionally need to insert another input
+record. `Ctrl+Z`/`Ctrl+Y` and the section's Undo/Redo buttons affect only the
+currently visible section; switching sections does not merge or clear their
+histories.
 
 The original
 [LEparagliding user manual](https://www.laboratoridenvol.com/leparagliding/manual.en.html)

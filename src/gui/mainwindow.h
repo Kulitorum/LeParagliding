@@ -62,6 +62,9 @@ private:
 
     DesignDocument document_;
     QVector<QPlainTextEdit *> sectionEditors_;
+    QVector<QString> savedSectionTexts_;
+    QVector<QPushButton *> undoButtons_;
+    QVector<QPushButton *> redoButtons_;
     QSet<int> dirtySections_;
     bool documentDirty_ = false;
     bool loadingEditors_ = false;

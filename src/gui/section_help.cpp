@@ -210,11 +210,52 @@ SectionHelp helpForSection(int number, const QString &fallbackTitle)
     case 26:
         help.title = QStringLiteral("Glue vents");
         help.purpose = QStringLiteral(
-            "Adds glue/seam vents and related cut geometry at specified ribs and chordwise "
-            "positions.");
+            "Chooses how the air inlet in every cell is joined to the upper skin "
+            "(extrados), lower skin (intrados), or kept as a separate piece. Advanced "
+            "types make the inlet diagonal, curved, or elliptical.");
+        help.format = QStringLiteral(
+            "The first data record is <code>0</code> for the old automatic vent style, or "
+            "<code>1</code> for the explicit table. With <code>1</code>, provide exactly "
+            "<code>floor(Number of cells / 2) + 1</code> rows (15 rows for the bundled "
+            "29-cell design): "
+            "<code>cell type [left% right% [arc%]]</code>. The row order is significant; "
+            "keep the first column sequential from 1 through that row count.");
         help.notes = QStringLiteral(
-            "Definitions are grouped by vent type and rib range. Dimensions are manufacturing "
-            "parameters.");
+            "Positive types attach the vent to the upper panel; negative types attach it "
+            "to the lower panel. Percentages normally stay between 0 and 100. Section 25 "
+            "must have <code>Vents 1 …</code> if you want the vent edges visible in the "
+            "3D DXF/viewport.");
+        help.details = QStringLiteral(
+            R"(<table cellspacing="0" cellpadding="5" border="1">
+<tr><th>Record/value</th><th>Meaning</th></tr>
+<tr><td><code>0</code> (first record)</td><td>Use the old automatic inlet construction; no per-cell rows follow.</td></tr>
+<tr><td><code>1</code> (first record)</td><td>Enable the explicit table; <code>floor(Number of cells / 2) + 1</code> rows follow.</td></tr>
+<tr><td><code>cell</code></td><td>1-based cell between rib <i>cell-1</i> and rib <i>cell</i>. The parser consumes rows in order, so this label must match the row position.</td></tr>
+<tr><td><code>type 0</code></td><td>Do not glue the vent to either skin; produce it as a separate open-inlet piece.</td></tr>
+<tr><td><code>type 1</code></td><td>Glue the vent to the upper skin (extrados); commonly used for single-skin construction.</td></tr>
+<tr><td><code>type -1</code></td><td>Glue the vent to the lower skin (intrados); commonly used for a closed cell.</td></tr>
+<tr><td><code>type -2</code></td><td>Fixed diagonal: fully open at the left side, glued to the lower skin.</td></tr>
+<tr><td><code>type -3</code></td><td>Fixed diagonal: fully open at the right side, glued to the lower skin.</td></tr>
+<tr><td><code>type ±4 left right</code></td><td>General straight diagonal. <i>left</i> and <i>right</i> locate its two endpoints as percentages across the inlet sides. The sign chooses upper (+) or lower (-) attachment.</td></tr>
+<tr><td><code>type ±5 left right arc</code></td><td>Same endpoints as ±4, joined by an arc. <i>arc</i> is the bow/deflection depth as a percentage of average inlet length.</td></tr>
+<tr><td><code>type ±6 widthX widthY</code></td><td>Elliptical inlet. The two values are ellipse width percentages in the local X and Y directions.</td></tr>
+</table>
+<p><b>Bundled design example:</b></p>
+<ul>
+<li><code>1 -6 70 100</code>: cell 1, elliptical inlet attached to the lower skin, 70% × 100%.</li>
+<li><code>2 -4 0 80</code>: cell 2, lower-skin straight diagonal from 0% on the left to 80% on the right.</li>
+<li><code>9 4 100 0</code>: cell 9, upper-skin straight diagonal in the opposite direction.</li>
+<li><code>10 5 0 0 80</code>: cell 10, upper-skin curved inlet with endpoints at 0% and an 80% bow depth.</li>
+<li><code>12 -5 50 50 50</code>: cell 12, lower-skin curved inlet, both endpoints at 50%, with 50% bow depth.</li>
+<li><code>15 -1</code>: cell 15 is attached directly to the lower skin; no extra parameters are read.</li>
+</ul>)");
+        help.experiment = QStringLiteral(
+            R"(<ol>
+<li>In section 25 change <code>Vents 0 1 red</code> to <code>Vents 1 1 red</code>.</li>
+<li>Change only one cell at a time—for example cell 2 from <code>-4 0 80</code> to <code>-4 20 80</code>.</li>
+<li>Press <b>Enter</b> to build and reload the viewport. Use <b>Shift+Enter</b> only when you need to insert a new record.</li>
+<li>Compare the updated 3D seam and the 2D manufacturing panel before changing another value. Start with small percentage changes.</li>
+</ol>)");
         break;
     case 27:
         help.title = QStringLiteral("Special wingtip");
