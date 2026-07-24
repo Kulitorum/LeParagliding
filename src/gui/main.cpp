@@ -11,6 +11,8 @@
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QStyleFactory>
+#include <QTextCursor>
+#include <QTextDocument>
 #include <QTextStream>
 
 namespace {
@@ -85,6 +87,56 @@ int runStudioSelfTest(const QStringList &arguments)
         QPlainTextEdit editor;
         editor.setPlainText(document.sections().at(index).text);
         document.setSectionText(index, editor.toPlainText());
+    }
+
+    QPlainTextEdit editorA;
+    QPlainTextEdit editorB;
+    QPlainTextEdit editorC;
+    const auto prepareUndoEditor = [](QPlainTextEdit &editor, const QString &text) {
+        editor.setPlainText(text);
+        editor.setUndoRedoEnabled(true);
+        editor.document()->clearUndoRedoStacks();
+    };
+    const auto appendEdit = [](QPlainTextEdit &editor, const QString &text) {
+        editor.moveCursor(QTextCursor::End);
+        editor.insertPlainText(text);
+    };
+    prepareUndoEditor(editorA, QStringLiteral("A"));
+    prepareUndoEditor(editorB, QStringLiteral("B"));
+    prepareUndoEditor(editorC, QStringLiteral("C"));
+    appendEdit(editorA, QStringLiteral("-a1"));
+    appendEdit(editorB, QStringLiteral("-b1"));
+    appendEdit(editorC, QStringLiteral("-c1"));
+    appendEdit(editorA, QStringLiteral("-a2"));
+    appendEdit(editorC, QStringLiteral("-c2"));
+
+    if (!editorA.document()->isUndoRedoEnabled()
+        || editorA.document()->maximumBlockCount() != 0
+        || !editorA.document()->isUndoAvailable()
+        || !editorB.document()->isUndoAvailable()
+        || !editorC.document()->isUndoAvailable()) {
+        QTextStream(stderr) << "Section undo history was not enabled.\n";
+        return 2;
+    }
+
+    const QString editorABeforeUndo = editorA.toPlainText();
+    const QString editorBBeforeUndo = editorB.toPlainText();
+    while (editorC.document()->isUndoAvailable()) {
+        editorC.undo();
+    }
+    if (editorC.toPlainText() != QStringLiteral("C")
+        || editorA.toPlainText() != editorABeforeUndo
+        || editorB.toPlainText() != editorBBeforeUndo) {
+        QTextStream(stderr)
+            << "Undo history leaked between independent section editors.\n";
+        return 2;
+    }
+    while (editorC.document()->isRedoAvailable()) {
+        editorC.redo();
+    }
+    if (editorC.toPlainText() != QStringLiteral("C-c1-c2")) {
+        QTextStream(stderr) << "Section redo did not restore all edits.\n";
+        return 2;
     }
 
     QFile source(arguments.at(0));

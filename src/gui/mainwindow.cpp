@@ -960,7 +960,6 @@ void MainWindow::rebuildSectionEditors()
             QFontMetricsF(editor->font()).horizontalAdvance(QLatin1Char(' ')) * 4.0);
         editor->setPlainText(section.text);
         editor->setUndoRedoEnabled(true);
-        editor->document()->setMaximumBlockCount(0);
         editor->document()->clearUndoRedoStacks();
         editor->setToolTip(
             QStringLiteral("Enter: build and refresh 3D · Shift+Enter: insert a new record"));
