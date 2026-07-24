@@ -12,7 +12,23 @@ files can be written to a separate folder:
 - `lep-out.txt` — calculated design data
 - `lines.txt` — suspension line data
 
-Double-click a completed file in the application to open it in its associated
+The desktop application is a complete design studio:
+
+- every numbered block in the selected design has its own syntax-highlighted
+  editor;
+- the `?` button on a section opens format guidance and a link to the full
+  manual;
+- **Build paraglider** validates and saves the design, runs the compatible C++
+  engine, and reloads the generated 3D geometry;
+- the viewport displays all `LINE` entities from `lep-3d.dxf`, with isometric,
+  front, back, left, right, top, and bottom views plus perspective and
+  orthographic projection.
+
+Viewport navigation follows the slicer convention: drag with the left mouse
+button to orbit, drag with the right or middle mouse button to pan, and use the
+wheel to zoom. `Shift` + left drag also pans; double-click or press `F` to fit
+the model. Number keys `0`–`6` select the preset views and `P` toggles the
+projection. Double-click a completed output file to open it in its associated
 viewer.
 
 The original

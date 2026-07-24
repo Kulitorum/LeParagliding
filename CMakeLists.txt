@@ -70,9 +70,15 @@ if(MSVC)
 endif()
 
 qt_add_executable(LEparagliding WIN32
+    src/gui/design_document.cpp
+    src/gui/design_document.h
     src/gui/main.cpp
     src/gui/mainwindow.cpp
     src/gui/mainwindow.h
+    src/gui/paraglider_view.cpp
+    src/gui/paraglider_view.h
+    src/gui/section_help.cpp
+    src/gui/section_help.h
 )
 target_link_libraries(LEparagliding PRIVATE Qt6::Widgets)
 add_dependencies(LEparagliding leparagliding-engine)
@@ -115,6 +121,15 @@ add_test(NAME engine_rejects_missing_input
 set_tests_properties(engine_rejects_missing_input PROPERTIES WILL_FAIL TRUE)
 add_test(NAME gui_smoke COMMAND LEparagliding --smoke-test)
 set_tests_properties(gui_smoke PROPERTIES
+    TIMEOUT 20
+)
+add_test(NAME studio_model_smoke
+    COMMAND LEparagliding
+        --studio-self-test
+        "${CMAKE_CURRENT_SOURCE_DIR}/Data/leparagliding.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Data/fortranResult/lep-3d.dxf"
+)
+set_tests_properties(studio_model_smoke PROPERTIES
     TIMEOUT 20
 )
 add_test(NAME gui_headless_help COMMAND LEparagliding --headless --help)

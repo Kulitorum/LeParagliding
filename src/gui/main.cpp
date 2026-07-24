@@ -1,9 +1,14 @@
 #include "mainwindow.h"
 
+#include "design_document.h"
+#include "paraglider_view.h"
+
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QFile>
 #include <QFileInfo>
+#include <QPlainTextEdit>
 #include <QProcess>
 #include <QStyleFactory>
 #include <QTextStream>
@@ -47,6 +52,68 @@ bool isHeadlessRequested(int argc, char *argv[])
         }
     }
     return false;
+}
+
+int runStudioSelfTest(const QStringList &arguments)
+{
+    if (arguments.size() != 2) {
+        QTextStream(stderr)
+            << "--studio-self-test requires a design file and a 3D DXF file.\n";
+        return 2;
+    }
+
+    QString error;
+    DesignDocument document;
+    if (!document.load(arguments.at(0), &error)) {
+        QTextStream(stderr) << "Design load failed: " << error << '\n';
+        return 2;
+    }
+    if (!document.validationError().isEmpty()) {
+        QTextStream(stderr)
+            << "Design validation failed: " << document.validationError() << '\n';
+        return 2;
+    }
+    if (document.sections().size() != 30) {
+        QTextStream(stderr)
+            << "Expected 30 sample sections, got "
+            << document.sections().size() << ".\n";
+        return 2;
+    }
+
+    // Exercise the exact widget conversion used by every section page.
+    for (qsizetype index = 0; index < document.sections().size(); ++index) {
+        QPlainTextEdit editor;
+        editor.setPlainText(document.sections().at(index).text);
+        document.setSectionText(index, editor.toPlainText());
+    }
+
+    QFile source(arguments.at(0));
+    if (!source.open(QIODevice::ReadOnly)) {
+        QTextStream(stderr) << "Could not reopen design: " << source.errorString() << '\n';
+        return 2;
+    }
+    const QByteArray original = source.readAll();
+    if (document.assembledText().toUtf8() != original) {
+        QTextStream(stderr) << "Section editor round-trip changed the design file.\n";
+        return 2;
+    }
+
+    ParagliderView viewport;
+    if (!viewport.loadDxf(arguments.at(1), &error)) {
+        QTextStream(stderr) << "3D DXF load failed: " << error << '\n';
+        return 2;
+    }
+    if (viewport.segmentCount() != 5515) {
+        QTextStream(stderr)
+            << "Expected 5515 sample DXF segments, got "
+            << viewport.segmentCount() << ".\n";
+        return 2;
+    }
+
+    QTextStream(stdout)
+        << document.sections().size() << " sections; "
+        << viewport.modelSummary() << '\n';
+    return 0;
 }
 
 int runHeadless(int argc, char *argv[])
@@ -136,13 +203,25 @@ int main(int argc, char *argv[])
     QCommandLineOption smokeTest(QStringLiteral("smoke-test"),
                                  QStringLiteral("Construct the GUI and exit immediately."));
     parser.addOption(smokeTest);
+    QCommandLineOption studioSelfTest(
+        QStringLiteral("studio-self-test"),
+        QStringLiteral("Validate section parsing and 3D DXF loading, then exit."));
+    parser.addOption(studioSelfTest);
+    parser.addPositionalArgument(
+        QStringLiteral("studio-files"),
+        QStringLiteral("Design and DXF files used by --studio-self-test."),
+        QStringLiteral("[design-file] [dxf-file]"));
     parser.process(application);
 
+    if (parser.isSet(studioSelfTest)) {
+        return runStudioSelfTest(parser.positionalArguments());
+    }
+
+    MainWindow window;
     if (smokeTestRequested || parser.isSet(smokeTest)) {
         return 0;
     }
 
-    MainWindow window;
     window.show();
     return application.exec();
 }
