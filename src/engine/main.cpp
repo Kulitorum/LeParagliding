@@ -132,6 +132,9 @@ int runEngine(const std::filesystem::path &inputArgument,
 
         const lep::NurbsWriteResult step =
             lep::writeNurbsStep(output / "lep-3d.step");
+        for (const std::string &warning : step.warnings) {
+            std::cerr << "NURBS model warning: " << warning << '\n';
+        }
         if (!step.success) {
             std::cerr << "NURBS model error: " << step.error << '\n';
             return 2;

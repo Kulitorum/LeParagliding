@@ -39,6 +39,13 @@ void lep_nurbs_capture_panel(const doublereal *u,
                              integer segmentCount,
                              integer includeVentSurface,
                              integer singleSkin);
+void lep_nurbs_capture_rib(const doublereal *u,
+                           const doublereal *v,
+                           const doublereal *w,
+                           const doublereal *holes,
+                           doublereal chordCentimetres,
+                           integer ribIndex,
+                           integer totalPointCount);
 void lep_nurbs_set_line_capture(integer enabled);
 void lep_nurbs_set_line_tag(const char *label,
                             integer labelLength,
@@ -13503,6 +13510,13 @@ L12:
 				s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2) == 0,
 			    s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2) == 0);
 		}
+	    }
+	    /* Rib stations for the OCCT model: planar profile (vector 3),
+	       rigid 3D placement (vector 47), and the airfoil hole table. */
+	    i__1 = nribss;
+	    for (i__ = 0; i__ <= i__1; ++i__) {
+		lep_nurbs_capture_rib(u, v, w, hol, rib[i__ + 404], i__,
+			np[i__]);
 	    }
 	}
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */

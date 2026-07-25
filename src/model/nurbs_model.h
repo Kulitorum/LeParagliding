@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace lep {
 
@@ -18,6 +19,9 @@ struct NurbsWriteResult
     double maximumSourceDeviationMillimetres = 0.0;
     double maximumLegacyAgreementMillimetres = 0.0;
     std::string error;
+    // Non-fatal degradations, e.g. an airfoil hole whose legacy definition
+    // does not fit inside its rib outline and was left uncut.
+    std::vector<std::string> warnings;
 };
 
 void resetNurbsModel();
@@ -44,6 +48,19 @@ void lep_nurbs_capture_panel(const double *u,
                              int segmentCount,
                              int includeVentSurface,
                              int singleSkin);
+
+// Captures one rib station: the chord-scaled planar profile (vector 3), its
+// rigidly placed 3D contour (vector 47), and this rib's airfoil-hole table
+// (the legacy hol array, f2c layout). The model builder uses the exact
+// planar-to-spatial correspondence to export ribs as planar faces with the
+// lightening holes cut out.
+void lep_nurbs_capture_rib(const double *u,
+                           const double *v,
+                           const double *w,
+                           const double *holes,
+                           double chordCentimetres,
+                           int ribIndex,
+                           int totalPointCount);
 
 void lep_nurbs_set_line_capture(int enabled);
 
