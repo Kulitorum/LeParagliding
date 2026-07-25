@@ -26,6 +26,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPlainTextEdit>
@@ -38,6 +39,7 @@
 #include <QSettings>
 #include <QSlider>
 #include <QSplitter>
+#include <QStandardPaths>
 #include <QStackedWidget>
 #include <QSyntaxHighlighter>
 #include <QTabWidget>
@@ -430,6 +432,13 @@ void MainWindow::buildInterface()
     hero->addLayout(titles);
     hero->addStretch();
 
+    auto *presetsButton = new QPushButton(QStringLiteral("Presets"), central);
+    presetsButton->setObjectName(QStringLiteral("quietButton"));
+    presetsButton->setToolTip(
+        QStringLiteral("Load a wing published on laboratoridenvol.com — "
+                       "saving your changes will ask for a location"));
+    buildPresetsMenu(presetsButton);
+    hero->addWidget(presetsButton);
     auto *preferencesButton = new QPushButton(QStringLiteral("Preferences…"), central);
     preferencesButton->setObjectName(QStringLiteral("quietButton"));
     hero->addWidget(preferencesButton);
@@ -981,6 +990,75 @@ void MainWindow::browseForOutput()
     }
 }
 
+namespace {
+
+QString presetsRootPath()
+{
+    return QDir(QCoreApplication::applicationDirPath())
+        .absoluteFilePath(QStringLiteral("presets"));
+}
+
+bool isShippedPreset(const QString &filePath)
+{
+    return QFileInfo(filePath).absoluteFilePath().startsWith(
+        presetsRootPath() + QLatin1Char('/'), Qt::CaseInsensitive);
+}
+
+} // namespace
+
+void MainWindow::buildPresetsMenu(QPushButton *button)
+{
+    presetCatalog_ = loadPresetCatalog(
+        QDir(QCoreApplication::applicationDirPath())
+            .filePath(QStringLiteral("presets")));
+    if (presetCatalog_.isEmpty()) {
+        button->setEnabled(false);
+        button->setToolTip(QStringLiteral(
+            "No presets folder was found next to the executable."));
+        return;
+    }
+
+    auto *menu = new QMenu(button);
+    QHash<QString, QMenu *> categoryMenus;
+    for (const QString &category :
+         {QStringLiteral("Paragliders"), QStringLiteral("Single-skin"),
+          QStringLiteral("Kites")}) {
+        for (const PresetWing &wing : std::as_const(presetCatalog_)) {
+            if (wing.category == category) {
+                categoryMenus.insert(category, menu->addMenu(category));
+                break;
+            }
+        }
+    }
+    for (const PresetWing &wing : std::as_const(presetCatalog_)) {
+        QMenu *categoryMenu = categoryMenus.value(wing.category);
+        if (categoryMenu == nullptr) {
+            categoryMenu = menu->addMenu(wing.category);
+            categoryMenus.insert(wing.category, categoryMenu);
+        }
+        const QString wingTitle =
+            wing.year > 0
+                ? QStringLiteral("%1 (%2)").arg(wing.name).arg(wing.year)
+                : wing.name;
+        QMenu *wingMenu = categoryMenu->addMenu(wingTitle);
+        for (const PresetVariant &variant : wing.variants) {
+            const QString text =
+                variant.label == QStringLiteral("design")
+                    ? QStringLiteral("Open design")
+                    : variant.label;
+            wingMenu->addAction(text, this, [this, variant] {
+                loadDesign(variant.designFile);
+            });
+        }
+        wingMenu->addSeparator();
+        wingMenu->addAction(
+            QStringLiteral("Open wing web page"), this, [wing] {
+                QDesktopServices::openUrl(QUrl(wing.pageUrl));
+            });
+    }
+    button->setMenu(menu);
+}
+
 bool MainWindow::loadDesign(const QString &path, bool confirmUnsaved)
 {
     if (process_->state() != QProcess::NotRunning) {
@@ -1006,7 +1084,8 @@ bool MainWindow::loadDesign(const QString &path, bool confirmUnsaved)
 
     const QFileInfo info(document_.filePath());
     inputEdit_->setText(QDir::toNativeSeparators(info.absoluteFilePath()));
-    if (outputEdit_->text().trimmed().isEmpty()) {
+    if (outputEdit_->text().trimmed().isEmpty()
+        && !isShippedPreset(info.absoluteFilePath())) {
         outputEdit_->setText(QDir::toNativeSeparators(info.absolutePath()));
     }
     refreshInputDetails();
@@ -1199,7 +1278,76 @@ bool MainWindow::saveDesign(bool showConfirmation)
     }
 
     QString error;
-    if (!document_.save(&error)) {
+    bool saved;
+    if (isShippedPreset(document_.filePath())) {
+        // Shipped presets stay read-only masters: saving asks for a location
+        // and brings the airfoil files along, since section 2 references them
+        // by bare file name next to the design.
+        const QFileInfo current(document_.filePath());
+        QString base = QDir(presetsRootPath())
+                           .relativeFilePath(current.absolutePath())
+                           .replace(QLatin1Char('/'), QLatin1Char('-'));
+        if (base.isEmpty() || base.startsWith(QLatin1Char('.'))) {
+            base = current.completeBaseName();
+        }
+        const QString target = QFileDialog::getSaveFileName(
+            this,
+            QStringLiteral("Save a copy of the preset"),
+            QDir(QStandardPaths::writableLocation(
+                     QStandardPaths::DocumentsLocation))
+                .filePath(base + QStringLiteral(".txt")),
+            QStringLiteral("LEparagliding design (*.txt)"));
+        if (target.isEmpty()) {
+            return false;
+        }
+        if (isShippedPreset(target)) {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Choose another folder"),
+                QStringLiteral("Save the copy outside the application's "
+                               "presets folder so the originals stay "
+                               "intact."));
+            return false;
+        }
+        const QDir sourceDirectory = current.absoluteDir();
+        const QDir targetDirectory = QFileInfo(target).absoluteDir();
+        for (const QString &fileName :
+             sourceDirectory.entryList(QDir::Files)) {
+            if (fileName == current.fileName()) {
+                continue;
+            }
+            const QString destination = targetDirectory.filePath(fileName);
+            if (QFile::exists(destination)) {
+                QFile::remove(destination);
+            }
+            if (!QFile::copy(
+                    sourceDirectory.filePath(fileName), destination)) {
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("Design not saved"),
+                    QStringLiteral("Could not copy the airfoil file %1.")
+                        .arg(QDir::toNativeSeparators(destination)));
+                return false;
+            }
+            QFile::setPermissions(
+                destination,
+                QFile::permissions(destination) | QFileDevice::WriteOwner
+                    | QFileDevice::WriteUser);
+        }
+        saved = document_.saveAs(target, &error);
+        if (saved) {
+            inputEdit_->setText(QDir::toNativeSeparators(
+                QFileInfo(target).absoluteFilePath()));
+            if (outputEdit_->text().trimmed().isEmpty()) {
+                outputEdit_->setText(QDir::toNativeSeparators(
+                    targetDirectory.absolutePath()));
+            }
+            saveSettings();
+        }
+    } else {
+        saved = document_.save(&error);
+    }
+    if (!saved) {
         QMessageBox::warning(
             this,
             QStringLiteral("Design not saved"),
@@ -1865,10 +2013,17 @@ void MainWindow::updateRunAvailability()
 
 void MainWindow::updateWindowTitle()
 {
-    const QString fileName =
-        document_.filePath().isEmpty()
-            ? QStringLiteral("No design")
-            : QFileInfo(document_.filePath()).fileName();
+    QString fileName;
+    if (document_.filePath().isEmpty()) {
+        fileName = QStringLiteral("No design");
+    } else if (isShippedPreset(document_.filePath())) {
+        fileName = QDir(presetsRootPath())
+                       .relativeFilePath(
+                           QFileInfo(document_.filePath()).absolutePath())
+                   + QStringLiteral(" · preset");
+    } else {
+        fileName = QFileInfo(document_.filePath()).fileName();
+    }
     setWindowTitle(
         QStringLiteral("%1%2 — LEparagliding Studio")
             .arg(documentDirty_ ? QStringLiteral("● ") : QString())

@@ -1,0 +1,603 @@
+{
+  "source": "https://www.laboratoridenvol.com/pindex.en.html#ales",
+  "retrieved": "2026-07-25",
+  "wings": [
+    {
+      "name": "Alp'Skin 19",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl2-19as/bhl2-19as.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "Alp-Skin-19/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl2-19as/txt/leparagliding.txt"
+        }
+      ],
+      "year": 2017
+    },
+    {
+      "name": "BHL",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl/bhl.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2011
+    },
+    {
+      "name": "BHL-18",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl-18/bhl-18.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL-18/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl-18/leparagliding.txt"
+        }
+      ],
+      "year": 2013
+    },
+    {
+      "name": "BHL-P",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl-p/bhl-p.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL-P/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl-p/leparagliding.txt"
+        }
+      ],
+      "year": 2013
+    },
+    {
+      "name": "BHL-S",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl-s/bhl-s.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL-S/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl-s/leparagliding.txt"
+        }
+      ],
+      "year": 2013
+    },
+    {
+      "name": "BHL2-16",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl2-16/bhl2-16.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL2-16/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl2-16/leparagliding.txt"
+        }
+      ],
+      "year": 2014
+    },
+    {
+      "name": "BHL2-19",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl2-19/bhl2-19.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL2-19/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl2-19/leparagliding.txt"
+        }
+      ],
+      "year": 2013
+    },
+    {
+      "name": "BHL2-21",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl2-21/bhl2-21.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL2-21/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl2-21/leparagliding.txt"
+        }
+      ],
+      "year": 2016
+    },
+    {
+      "name": "BHL2-23",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl2/bhl2.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL2-23/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl2/leparagliding.txt"
+        }
+      ]
+    },
+    {
+      "name": "BHL2-JPS",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/bhl2-jps/bhl2-jps.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL2-JPS/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/bhl2-jps/leparagliding.txt"
+        }
+      ],
+      "year": 2013
+    },
+    {
+      "name": "BHL4",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/BHL4/bhl4.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL4/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/BHL4/data/leparagliding.txt"
+        }
+      ],
+      "year": 2020
+    },
+    {
+      "name": "BHL4-31 \"Hermes\"",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/BHL4-31H/bhl4-31H.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL4-31-Hermes/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/BHL4-31H/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2022
+    },
+    {
+      "name": "BHL5",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/BHL5/bhl5.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL5/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/BHL5/data/leparagliding.txt"
+        }
+      ],
+      "year": 2020
+    },
+    {
+      "name": "BHL7",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/BHL7/bhl7.en.html",
+      "variants": [
+        {
+          "label": "10 m2",
+          "path": "BHL7/10/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/BHL7/data10/leparagliding.txt"
+        },
+        {
+          "label": "15 m2",
+          "path": "BHL7/15/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/BHL7/data15/leparagliding.txt"
+        },
+        {
+          "label": "22 m2",
+          "path": "BHL7/22/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/BHL7/data22/leparagliding.txt"
+        }
+      ],
+      "year": 2022
+    },
+    {
+      "name": "BHL7-19 (Lot)",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/BHL7-19-Lot/bhl7.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL7-19-Lot/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/BHL7-19-Lot/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2023
+    },
+    {
+      "name": "BHL7-19 (lp)",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/BHL7-19-lp/bhl7.fr.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "BHL7-19-lp/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/BHL7-19-lp/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2024
+    },
+    {
+      "name": "Chooca 15",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/Chooca/chooca.fr.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "Chooca-15/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/Chooca/data/leparaglidingchooca15.txt"
+        }
+      ],
+      "year": 2025
+    },
+    {
+      "name": "Hegala",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/Hegala/Hegala.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "Hegala/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/Hegala/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2022
+    },
+    {
+      "name": "Hegala v2",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/Hegala_v2/Hegala-v2.fr.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "Hegala-v2/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/Hegala_v2/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2025
+    },
+    {
+      "name": "JouetBHL",
+      "category": "Kites",
+      "page": "https://www.laboratoridenvol.com/projects/jouetbhl/jouet.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "JouetBHL/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/jouetbhl/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2017
+    },
+    {
+      "name": "KD-01",
+      "category": "Kites",
+      "page": "https://www.laboratoridenvol.com/projects/KD-01/KD-01.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "KD-01/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/KD-01/data/leparagliding.txt"
+        }
+      ],
+      "year": 2020
+    },
+    {
+      "name": "Swoop",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/Swoop/Swoop.en.html",
+      "variants": [
+        {
+          "label": "original",
+          "path": "Swoop/original/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/Swoop/Swoop/lep/leparagliding.txt"
+        },
+        {
+          "label": "22 m2",
+          "path": "Swoop/22/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/Swoop/Swoop22/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2025
+    },
+    {
+      "name": "Tuluaq",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/Tuluaq/Tuluaq.en.html",
+      "variants": [
+        {
+          "label": "19 m2",
+          "path": "Tuluaq/19/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/Tuluaq/data-19/leparagliding.txt"
+        },
+        {
+          "label": "24 m2",
+          "path": "Tuluaq/24/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/Tuluaq/data-24/leparagliding.txt"
+        }
+      ],
+      "year": 2025
+    },
+    {
+      "name": "gkite",
+      "category": "Kites",
+      "page": "https://www.laboratoridenvol.com/projects/gkite/gkite.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gkite/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gkite/LEP/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2015
+    },
+    {
+      "name": "gnuA1",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnu-A/gnu-A.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuA1/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnu-A/leparagliding.txt"
+        }
+      ],
+      "year": 2015
+    },
+    {
+      "name": "gnuA13",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnua13/gnua13.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuA13/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnua13/leparagliding.txt"
+        }
+      ],
+      "year": 2016
+    },
+    {
+      "name": "gnuA13-C",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnua13-C/gnua13C.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuA13-C/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnua13-C/data/leparagliding.txt"
+        }
+      ],
+      "year": 2022
+    },
+    {
+      "name": "gnuA2",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnu-A2/gnu-A2.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuA2/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnu-A2/leparagliding.txt"
+        }
+      ],
+      "year": 2016
+    },
+    {
+      "name": "gnuA3",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnu-A3/gnu-A3.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuA3/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnu-A3/leparagliding.txt"
+        }
+      ],
+      "year": 2017
+    },
+    {
+      "name": "gnuA4",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnu-A+/gnu-A+.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuA4/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnu-A+/data/leparagliding.txt"
+        }
+      ],
+      "year": 2019
+    },
+    {
+      "name": "gnuA5",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnu-A5/gnu-A5.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuA5/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnu-A5/data/leparagliding.txt"
+        }
+      ],
+      "year": 2020
+    },
+    {
+      "name": "gnuA6",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnuA6/gnu-A6.en.html",
+      "variants": [
+        {
+          "label": "22 m2",
+          "path": "gnuA6/22/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA6/data22/leparagliding.txt"
+        },
+        {
+          "label": "24 m2",
+          "path": "gnuA6/24/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA6/data24/leparagliding.txt"
+        },
+        {
+          "label": "26 m2",
+          "path": "gnuA6/26/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA6/data26/leparagliding.txt"
+        },
+        {
+          "label": "33 m2",
+          "path": "gnuA6/33/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA6/data33/leparagliding.txt"
+        }
+      ],
+      "year": 2021
+    },
+    {
+      "name": "gnuA7",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnuA7/gnu-A7.en.html",
+      "variants": [
+        {
+          "label": "22 m2",
+          "path": "gnuA7/22/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA7/data22/leparagliding.txt"
+        },
+        {
+          "label": "24 m2",
+          "path": "gnuA7/24/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA7/data24/leparagliding.txt"
+        },
+        {
+          "label": "26 m2, three risers",
+          "path": "gnuA7/26-3r/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA7/data26/Kit%20three%20risers/leparagliding%20-%203r.txt"
+        },
+        {
+          "label": "26 m2",
+          "path": "gnuA7/26/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA7/data26/leparagliding.txt"
+        },
+        {
+          "label": "30 m2",
+          "path": "gnuA7/30/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuA7/data30/leparagliding.txt"
+        }
+      ],
+      "year": 2023
+    },
+    {
+      "name": "gnuC",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnu-C/gnu-C.en.html",
+      "variants": [
+        {
+          "label": "size L",
+          "path": "gnuC/L/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnu-C/L/leparagliding.txt"
+        },
+        {
+          "label": "size M",
+          "path": "gnuC/M/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnu-C/M/leparagliding.txt"
+        }
+      ],
+      "year": 2021
+    },
+    {
+      "name": "gnuC2",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnuC2/gnuC2.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuC2/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuC2/L/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2026
+    },
+    {
+      "name": "gnuComet",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnuComet/gnuComet.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuComet/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuComet/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2022
+    },
+    {
+      "name": "gnuLAB2.5",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnuLAB2.5/gnuLAB2.5.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuLAB2.5/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuLAB2.5/leparagliding.txt"
+        }
+      ],
+      "year": 2014
+    },
+    {
+      "name": "gnuLAB4",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnuLAB4/gnuLAB4.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuLAB4/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuLAB4/data/leparagliding.txt"
+        }
+      ],
+      "year": 2018
+    },
+    {
+      "name": "gnuPSF",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/gnuPSF/gnuPSF.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuPSF/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuPSF/txt/leparagliding.txt"
+        }
+      ],
+      "year": 2017
+    },
+    {
+      "name": "gnuPSF-evo-19",
+      "category": "Single-skin",
+      "page": "https://www.laboratoridenvol.com/projects/gnuPSF/gnuPSF-evo.en.html",
+      "variants": [
+        {
+          "label": "v3",
+          "path": "gnuPSF-evo-19/v3/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuPSF/evo/leparagliding.txt"
+        },
+        {
+          "label": "v4",
+          "path": "gnuPSF-evo-19/v4/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuPSF/evo/v4/leparagliding.txt"
+        }
+      ],
+      "year": 2018
+    },
+    {
+      "name": "gnuReflex",
+      "category": "Paragliders",
+      "page": "https://www.laboratoridenvol.com/projects/gnuReflex/gnuReflex.en.html",
+      "variants": [
+        {
+          "label": "design",
+          "path": "gnuReflex/leparagliding.txt",
+          "source": "https://www.laboratoridenvol.com/projects/gnuReflex/lep/leparagliding.txt"
+        }
+      ],
+      "year": 2022
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "design_document.h"
+#include "preset_catalog.h"
 
 #include <QMainWindow>
 #include <QProcess>
@@ -46,6 +47,7 @@ private:
     };
 
     void buildInterface();
+    void buildPresetsMenu(QPushButton *button);
     void connectProcess();
     void browseForInput();
     void browseForOutput();
@@ -80,6 +82,7 @@ private:
     QString outputPathFor(const QString &fileName) const;
 
     DesignDocument document_;
+    QList<PresetWing> presetCatalog_;
     QVector<QPlainTextEdit *> sectionEditors_;
     QVector<QString> savedSectionTexts_;
     QVector<QPushButton *> undoButtons_;

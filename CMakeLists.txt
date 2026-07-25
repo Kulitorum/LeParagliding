@@ -166,11 +166,22 @@ qt_add_executable(LEparagliding WIN32
     src/gui/mainwindow.h
     src/gui/paraglider_view.cpp
     src/gui/paraglider_view.h
+    src/gui/preset_catalog.cpp
+    src/gui/preset_catalog.h
     src/gui/section_help.cpp
     src/gui/section_help.h
 )
 target_link_libraries(LEparagliding PRIVATE Qt6::Widgets lep_occt)
 add_dependencies(LEparagliding leparagliding-engine)
+
+# Wing presets from laboratoridenvol.com: shipped next to the executable so
+# the Presets menu (and the installer wildcard) picks them up.
+add_custom_command(TARGET LEparagliding POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/presets"
+        "$<TARGET_FILE_DIR:LEparagliding>/presets"
+    COMMENT "Deploying wing presets"
+)
 
 set_target_properties(
     LEparagliding
@@ -271,6 +282,16 @@ set_tests_properties(studio_model_smoke PROPERTIES
     TIMEOUT 180
 )
 add_test(NAME gui_headless_help COMMAND LEparagliding --headless --help)
+# One representative wing preset must calculate cleanly end to end; catches
+# regressions in the packaged resources/presets tree.
+add_test(NAME preset_gnua7_calculates
+    COMMAND leparagliding-engine
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/presets/gnuA7/24/leparagliding.txt"
+        "${CMAKE_BINARY_DIR}/preset-test-output"
+)
+set_tests_properties(preset_gnua7_calculates PROPERTIES
+    TIMEOUT 120
+)
 set_tests_properties(gui_headless_help PROPERTIES
     TIMEOUT 20
 )
@@ -300,6 +321,9 @@ endif()
 
 install(TARGETS LEparagliding leparagliding-engine
     RUNTIME DESTINATION .
+)
+install(DIRECTORY resources/presets
+    DESTINATION .
 )
 if(WIN32)
     install(FILES ${lep_occt_runtime_files}
