@@ -54,6 +54,40 @@ bool stripEmbeddedHistory(std::string *text)
     return false;
 }
 
+// Blank lines are never data in a 3.28 design, but the translated reader's
+// comment skips are strictly positional and consume them in place of the
+// comment they were meant to skip, silently derailing the parse. Dropping
+// them makes the format tolerate blank lines anywhere.
+bool stripBlankLines(std::string *text)
+{
+    std::string kept;
+    kept.reserve(text->size());
+    bool changed = false;
+    std::size_t begin = 0;
+    while (begin < text->size()) {
+        std::size_t end = text->find('\n', begin);
+        const bool lastLine = end == std::string::npos;
+        if (lastLine) {
+            end = text->size();
+        }
+        const std::string_view line(text->data() + begin, end - begin);
+        const bool blank = line.find_first_not_of(" \t\r") == std::string_view::npos;
+        if (blank) {
+            changed = true;
+        } else {
+            kept.append(line);
+            if (!lastLine) {
+                kept.push_back('\n');
+            }
+        }
+        begin = end + 1;
+    }
+    if (changed) {
+        *text = std::move(kept);
+    }
+    return changed;
+}
+
 int sectionNumber(std::string_view line)
 {
     const std::size_t marker = line.find('*');
@@ -137,10 +171,12 @@ PreparedInput::PreparedInput(PreparedInput &&other) noexcept
     , temporaryPath_(std::move(other.temporaryPath_))
     , addedVersion328Sections_(other.addedVersion328Sections_)
     , strippedEmbeddedHistory_(other.strippedEmbeddedHistory_)
+    , strippedBlankLines_(other.strippedBlankLines_)
 {
     other.temporaryPath_.clear();
     other.addedVersion328Sections_ = false;
     other.strippedEmbeddedHistory_ = false;
+    other.strippedBlankLines_ = false;
 }
 
 PreparedInput &PreparedInput::operator=(PreparedInput &&other) noexcept
@@ -154,9 +190,11 @@ PreparedInput &PreparedInput::operator=(PreparedInput &&other) noexcept
         temporaryPath_ = std::move(other.temporaryPath_);
         addedVersion328Sections_ = other.addedVersion328Sections_;
         strippedEmbeddedHistory_ = other.strippedEmbeddedHistory_;
+        strippedBlankLines_ = other.strippedBlankLines_;
         other.temporaryPath_.clear();
         other.addedVersion328Sections_ = false;
         other.strippedEmbeddedHistory_ = false;
+        other.strippedBlankLines_ = false;
     }
     return *this;
 }
@@ -170,6 +208,7 @@ PreparedInput PreparedInput::forVersion328(
 
     std::string text = readFile(source);
     result.strippedEmbeddedHistory_ = stripEmbeddedHistory(&text);
+    result.strippedBlankLines_ = stripBlankLines(&text);
     const auto found = findSections(text);
 
     bool seenMissing = false;
@@ -184,7 +223,8 @@ PreparedInput PreparedInput::forVersion328(
         }
     }
 
-    if (firstMissing == 38 && !result.strippedEmbeddedHistory_) {
+    if (firstMissing == 38 && !result.strippedEmbeddedHistory_
+        && !result.strippedBlankLines_) {
         return result;
     }
     if (firstMissing != 38 && !found[32]) {
@@ -236,4 +276,9 @@ bool PreparedInput::addedVersion328Sections() const
 bool PreparedInput::strippedEmbeddedHistory() const
 {
     return strippedEmbeddedHistory_;
+}
+
+bool PreparedInput::strippedBlankLines() const
+{
+    return strippedBlankLines_;
 }

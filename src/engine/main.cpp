@@ -112,6 +112,11 @@ int runEngine(const std::filesystem::path &inputArgument,
                 << "Compatibility: excluded embedded Studio version history "
                    "from the calculation input.\n";
         }
+        if (preparedInput.strippedBlankLines()) {
+            std::cout
+                << "Compatibility: removed blank lines from the calculation "
+                   "input (the 3.28 reader cannot tolerate them).\n";
+        }
 
         const std::string inputUtf8 = pathToUtf8(preparedInput.path());
         const std::string outputUtf8 = pathToUtf8(output);
@@ -135,6 +140,10 @@ int runEngine(const std::filesystem::path &inputArgument,
             << "OCCT NURBS model: "
             << step.surfaceCount << " surfaces, "
             << step.splineCount << " spline curves\n"
+            << "Named assembly: "
+            << step.partCount << " parts, "
+            << step.ribCount << " ribs, "
+            << step.lineCount << " labeled lines\n"
             << "Sewn topology: "
             << step.sewnEdgeCount << " shared edges, "
             << step.freeEdgeCount << " designed free edges\n"

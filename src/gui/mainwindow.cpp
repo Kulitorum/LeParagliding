@@ -1,9 +1,12 @@
 #include "mainwindow.h"
 
+#include "geometry_preprocessor_dialog.h"
 #include "paraglider_view.h"
 #include "section_help.h"
 
+#include <QAbstractItemView>
 #include <QCloseEvent>
+#include <QColorDialog>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDialog>
@@ -20,15 +23,18 @@
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QHeaderView>
+#include <QIcon>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QComboBox>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QProgressBar>
@@ -44,6 +50,7 @@
 #include <QSyntaxHighlighter>
 #include <QTabWidget>
 #include <QTextBrowser>
+#include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -113,6 +120,25 @@ constexpr std::array<OutputDescription, 6> outputs{{
 
 constexpr auto manualUrl =
     "https://www.laboratoridenvol.com/leparagliding/manual.en.html";
+
+// Stable QSettings keys per ParagliderView::ColorRole, in enum order.
+constexpr std::array<const char *, ParagliderView::colorRoleCount>
+    colorSettingsKeys{{
+        "viewport/colors/extrados",
+        "viewport/colors/intrados",
+        "viewport/colors/vents",
+        "viewport/colors/wireframe",
+        "viewport/colors/ribs",
+        "viewport/colors/planA",
+        "viewport/colors/planB",
+        "viewport/colors/planC",
+        "viewport/colors/planD",
+        "viewport/colors/planE",
+        "viewport/colors/planF",
+        "viewport/colors/brakes",
+        "viewport/colors/other",
+        "viewport/colors/diagonals",
+    }};
 
 QString humanReadableSize(qint64 bytes)
 {
@@ -439,6 +465,12 @@ void MainWindow::buildInterface()
                        "saving your changes will ask for a location"));
     buildPresetsMenu(presetsButton);
     hero->addWidget(presetsButton);
+    auto *preprocessorButton = new QPushButton(QStringLiteral("Pre-processor…"), central);
+    preprocessorButton->setObjectName(QStringLiteral("quietButton"));
+    preprocessorButton->setToolTip(
+        QStringLiteral("Generate the Section 1 geometry matrix from analytic "
+                       "leading edge, trailing edge, vault, and cell parameters"));
+    hero->addWidget(preprocessorButton);
     auto *preferencesButton = new QPushButton(QStringLiteral("Preferences…"), central);
     preferencesButton->setObjectName(QStringLiteral("quietButton"));
     hero->addWidget(preferencesButton);
@@ -561,7 +593,15 @@ void MainWindow::buildInterface()
     viewHeader->addStretch();
     viewportLayout->addLayout(viewHeader);
 
-    auto *fitButton = makeViewButton(QStringLiteral("Fit"), QStringLiteral("Fit all (F)"), viewportCard);
+    auto *resetViewButton = makeViewButton(
+        QStringLiteral("Reset"),
+        QStringLiteral("Reset camera: isometric, perspective, fit (R)"),
+        viewportCard);
+    auto *fitButton = makeViewButton(
+        QStringLiteral("Fit"),
+        QStringLiteral("Fit the selection, or everything when nothing is "
+                       "selected (F)"),
+        viewportCard);
     auto *isoButton = makeViewButton(QStringLiteral("Iso"), QStringLiteral("Isometric (0)"), viewportCard);
     auto *frontButton = makeViewButton(QStringLiteral("Front"), QStringLiteral("Front (1)"), viewportCard);
     auto *backButton = makeViewButton(QStringLiteral("Back"), QStringLiteral("Back (2)"), viewportCard);
@@ -577,15 +617,94 @@ void MainWindow::buildInterface()
     viewControls->setSpacing(5);
     viewControls->addStretch();
     for (QToolButton *button :
-         {fitButton, isoButton, frontButton, backButton, leftButton,
-          rightButton, topButton, bottomButton, projectionButton_}) {
+         {resetViewButton, fitButton, isoButton, frontButton, backButton,
+          leftButton, rightButton, topButton, bottomButton,
+          projectionButton_}) {
         viewControls->addWidget(button);
     }
     viewControls->addStretch();
     viewportLayout->addLayout(viewControls);
 
-    viewport_ = new ParagliderView(viewportCard);
-    viewportLayout->addWidget(viewport_, 1);
+    measureButton_ = makeViewButton(
+        QStringLiteral("Measure"),
+        QStringLiteral("Measure between two model points (M) · Esc exits"),
+        viewportCard);
+    measureButton_->setCheckable(true);
+    auto *xrayLabel = new QLabel(QStringLiteral("X-ray"), viewportCard);
+    xrayLabel->setObjectName(QStringLiteral("fieldLabel"));
+    xraySlider_ = new QSlider(Qt::Horizontal, viewportCard);
+    xraySlider_->setRange(0, 90);
+    xraySlider_->setFixedWidth(110);
+    xraySlider_->setToolTip(
+        QStringLiteral("Canopy transparency: see the lines and internal "
+                       "structure through the fabric"));
+    auto *clipLabel = new QLabel(QStringLiteral("Clip"), viewportCard);
+    clipLabel->setObjectName(QStringLiteral("fieldLabel"));
+    auto *clipCombo = new QComboBox(viewportCard);
+    clipCombo->addItems(
+        {QStringLiteral("Off"),
+         QStringLiteral("Spanwise (X)"),
+         QStringLiteral("Chordwise (Y)"),
+         QStringLiteral("Vertical (Z)")});
+    clipCombo->setToolTip(
+        QStringLiteral("Section view: cut the model with a capped plane"));
+    auto *clipFlipButton = makeViewButton(
+        QStringLiteral("Flip"),
+        QStringLiteral("Keep the other side of the section plane"),
+        viewportCard);
+    clipFlipButton->setCheckable(true);
+    auto *clipSlider = new QSlider(Qt::Horizontal, viewportCard);
+    clipSlider->setRange(0, 100);
+    clipSlider->setValue(50);
+    clipSlider->setFixedWidth(130);
+    clipSlider->setToolTip(
+        QStringLiteral("Position of the section plane across the model"));
+
+    auto *modeControls = new QHBoxLayout;
+    modeControls->setSpacing(6);
+    modeControls->addWidget(measureButton_);
+    modeControls->addStretch();
+    modeControls->addWidget(xrayLabel);
+    modeControls->addWidget(xraySlider_);
+    modeControls->addSpacing(10);
+    modeControls->addWidget(clipLabel);
+    modeControls->addWidget(clipCombo);
+    modeControls->addWidget(clipFlipButton);
+    modeControls->addWidget(clipSlider);
+    viewportLayout->addLayout(modeControls);
+
+    auto *viewSplitter = new QSplitter(Qt::Horizontal, viewportCard);
+    viewSplitter->setChildrenCollapsible(false);
+
+    auto *partsPanel = new QWidget(viewSplitter);
+    auto *partsLayout = new QVBoxLayout(partsPanel);
+    partsLayout->setContentsMargins(0, 0, 0, 0);
+    partsLayout->setSpacing(6);
+    auto *partsTitle = new QLabel(QStringLiteral("Parts"), partsPanel);
+    partsTitle->setObjectName(QStringLiteral("fieldLabel"));
+    partsLayout->addWidget(partsTitle);
+    partsTree_ = new QTreeWidget(partsPanel);
+    partsTree_->setObjectName(QStringLiteral("partsTree"));
+    partsTree_->setHeaderHidden(true);
+    partsTree_->setMinimumWidth(170);
+    partsTree_->setToolTip(
+        QStringLiteral(
+            "Click: highlight in 3D · Double-click: zoom to part · "
+            "Checkbox: show or hide"));
+    partsLayout->addWidget(partsTree_, 1);
+    partHoverLabel_ = new QLabel(partsPanel);
+    partHoverLabel_->setObjectName(QStringLiteral("hint"));
+    partHoverLabel_->setWordWrap(true);
+    partHoverLabel_->setMinimumHeight(28);
+    partsLayout->addWidget(partHoverLabel_);
+    viewSplitter->addWidget(partsPanel);
+
+    viewport_ = new ParagliderView(viewSplitter);
+    viewSplitter->addWidget(viewport_);
+    viewSplitter->setStretchFactor(0, 0);
+    viewSplitter->setStretchFactor(1, 1);
+    viewSplitter->setSizes({210, 560});
+    viewportLayout->addWidget(viewSplitter, 1);
     mainSplitter->addWidget(viewportCard);
     mainSplitter->setStretchFactor(0, 5);
     mainSplitter->setStretchFactor(1, 6);
@@ -865,6 +984,35 @@ void MainWindow::buildInterface()
     connect(preferencesButton, &QPushButton::clicked, this, [this] {
         showPreferences();
     });
+    connect(preprocessorButton, &QPushButton::clicked, this, [this] {
+        int geometryIndex = -1;
+        for (qsizetype index = 0; index < document_.sections().size(); ++index) {
+            if (document_.sections().at(index).number == 1) {
+                geometryIndex = static_cast<int>(index);
+                break;
+            }
+        }
+        const bool haveEditor =
+            geometryIndex >= 0 && geometryIndex < sectionEditors_.size();
+        showGeometryPreprocessorDialog(
+            this,
+            haveEditor ? sectionEditors_.at(geometryIndex)->toPlainText()
+                       : QString(),
+            [this, geometryIndex, haveEditor](const QString &text,
+                                              bool cellCountChanged) {
+                if (!haveEditor) {
+                    return;
+                }
+                sectionEditors_.at(geometryIndex)->setPlainText(text);
+                if (cellCountChanged) {
+                    statusLabel_->setText(QStringLiteral(
+                        "Geometry applied — update the per-rib rows in the "
+                        "other sections to the new rib count, then build"));
+                } else {
+                    startPreviewCalculation();
+                }
+            });
+    });
     connect(outputBrowseButton_, &QPushButton::clicked, this, [this] {
         browseForOutput();
     });
@@ -893,34 +1041,110 @@ void MainWindow::buildInterface()
     connect(outputTree_, &QTreeWidget::itemDoubleClicked, this,
             [this](QTreeWidgetItem *item) { openOutputItem(item); });
 
-    connect(fitButton, &QToolButton::clicked, viewport_, &ParagliderView::fitAll);
+    viewport_->partPicked = [this](int partId) { revealPartInTree(partId); };
+    viewport_->partHovered = [this](int partId) {
+        if (viewport_->isMeasureMode()) {
+            return;
+        }
+        partHoverLabel_->setText(
+            partId >= 0 ? viewport_->partPath(partId) : QString());
+    };
+    viewport_->measurementChanged = [this](const QString &text) {
+        partHoverLabel_->setText(text);
+    };
+    viewport_->measureModeChanged = [this](bool enabled) {
+        const QSignalBlocker blocker(measureButton_);
+        measureButton_->setChecked(enabled);
+    };
+    connect(measureButton_, &QToolButton::toggled, this, [this](bool on) {
+        viewport_->setMeasureMode(on);
+        viewport_->setFocus(Qt::OtherFocusReason);
+    });
+    connect(xraySlider_, &QSlider::valueChanged, this, [this](int value) {
+        viewport_->setSurfaceTransparency(value / 100.0);
+    });
+    const auto applyClip = [this, clipCombo, clipFlipButton, clipSlider] {
+        ParagliderView::ClipAxis axis = ParagliderView::ClipAxis::None;
+        switch (clipCombo->currentIndex()) {
+        case 1:
+            axis = ParagliderView::ClipAxis::X;
+            break;
+        case 2:
+            axis = ParagliderView::ClipAxis::Y;
+            break;
+        case 3:
+            axis = ParagliderView::ClipAxis::Z;
+            break;
+        default:
+            break;
+        }
+        viewport_->setClipPlane(
+            axis,
+            clipFlipButton->isChecked(),
+            clipSlider->value() / 100.0);
+    };
+    connect(clipCombo, &QComboBox::currentIndexChanged, this,
+            [applyClip](int) { applyClip(); });
+    connect(clipFlipButton, &QToolButton::toggled, this,
+            [applyClip](bool) { applyClip(); });
+    connect(clipSlider, &QSlider::valueChanged, this,
+            [applyClip](int) { applyClip(); });
+
+    partsTree_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(partsTree_, &QTreeWidget::customContextMenuRequested, this,
+            [this](const QPoint &position) {
+                showPartsTreeMenu(position);
+            });
+    connect(partsTree_, &QTreeWidget::currentItemChanged, this,
+            [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
+                if (syncingPartsTree_) {
+                    return;
+                }
+                if (current == nullptr) {
+                    viewport_->clearSelection();
+                    return;
+                }
+                viewport_->selectPart(current->data(0, Qt::UserRole).toInt());
+            });
+    connect(partsTree_, &QTreeWidget::itemDoubleClicked, this,
+            [this](QTreeWidgetItem *item) {
+                if (item != nullptr) {
+                    viewport_->zoomToPart(item->data(0, Qt::UserRole).toInt());
+                }
+            });
+    connect(partsTree_, &QTreeWidget::itemChanged, this,
+            [this](QTreeWidgetItem *item, int column) {
+                if (column == 0) {
+                    handlePartsTreeCheck(item);
+                }
+            });
+
+    connect(resetViewButton, &QToolButton::clicked, this, [this] {
+        viewport_->resetCamera();
+        projectionButton_->setText(QStringLiteral("Perspective"));
+    });
+    connect(fitButton, &QToolButton::clicked,
+            viewport_, &ParagliderView::fitSelection);
     connect(isoButton, &QToolButton::clicked, this, [this] {
-        viewport_->setView(ParagliderView::ViewPreset::Isometric);
-        viewport_->fitAll();
+        viewport_->setView(ParagliderView::ViewPreset::Isometric, true);
     });
     connect(frontButton, &QToolButton::clicked, this, [this] {
-        viewport_->setView(ParagliderView::ViewPreset::Front);
-        viewport_->fitAll();
+        viewport_->setView(ParagliderView::ViewPreset::Front, true);
     });
     connect(backButton, &QToolButton::clicked, this, [this] {
-        viewport_->setView(ParagliderView::ViewPreset::Back);
-        viewport_->fitAll();
+        viewport_->setView(ParagliderView::ViewPreset::Back, true);
     });
     connect(leftButton, &QToolButton::clicked, this, [this] {
-        viewport_->setView(ParagliderView::ViewPreset::Left);
-        viewport_->fitAll();
+        viewport_->setView(ParagliderView::ViewPreset::Left, true);
     });
     connect(rightButton, &QToolButton::clicked, this, [this] {
-        viewport_->setView(ParagliderView::ViewPreset::Right);
-        viewport_->fitAll();
+        viewport_->setView(ParagliderView::ViewPreset::Right, true);
     });
     connect(topButton, &QToolButton::clicked, this, [this] {
-        viewport_->setView(ParagliderView::ViewPreset::Top);
-        viewport_->fitAll();
+        viewport_->setView(ParagliderView::ViewPreset::Top, true);
     });
     connect(bottomButton, &QToolButton::clicked, this, [this] {
-        viewport_->setView(ParagliderView::ViewPreset::Bottom);
-        viewport_->fitAll();
+        viewport_->setView(ParagliderView::ViewPreset::Bottom, true);
     });
     connect(projectionButton_, &QToolButton::clicked, this, [this] {
         viewport_->toggleProjection();
@@ -1059,6 +1283,7 @@ void MainWindow::buildPresetsMenu(QPushButton *button)
     button->setMenu(menu);
 }
 
+
 bool MainWindow::loadDesign(const QString &path, bool confirmUnsaved)
 {
     if (process_->state() != QProcess::NotRunning) {
@@ -1096,8 +1321,10 @@ bool MainWindow::loadDesign(const QString &path, bool confirmUnsaved)
     refreshSectionLabels();
     saveButton_->setEnabled(false);
     historyButton_->setEnabled(true);
-    viewport_->clearModel();
-    modelStats_->setText(QStringLiteral("Preparing current design preview…"));
+    // A different design deserves a fresh camera; preview rebuilds of the
+    // same design keep the current view.
+    viewport_->resetCameraOnNextLoad();
+    clearViewportModel(QStringLiteral("Preparing current design preview…"));
     statusLabel_->setText(QStringLiteral("Design loaded · preview queued"));
     updateWindowTitle();
     updateRunAvailability();
@@ -1522,8 +1749,7 @@ void MainWindow::restoreVersion(int revisionIndex)
     statusLabel_->setText(
         QStringLiteral("Version %1 restored · rebuilding preview")
             .arg(revisionIndex + 1));
-    viewport_->clearModel();
-    modelStats_->setText(QStringLiteral("Building restored version preview…"));
+    clearViewportModel(QStringLiteral("Building restored version preview…"));
     updateWindowTitle();
     QTimer::singleShot(0, this, [this] {
         if (process_->state() == QProcess::NotRunning) {
@@ -1795,8 +2021,7 @@ void MainWindow::startCalculation(
                 QStringLiteral("The temporary preview output folder could not be created."));
             return;
         }
-        viewport_->clearModel();
-        modelStats_->setText(QStringLiteral("Building current editor preview…"));
+        clearViewportModel(QStringLiteral("Building current editor preview…"));
     }
 
     calculationMode_ = mode;
@@ -1836,6 +2061,58 @@ void MainWindow::appendProcessOutput()
     log_->verticalScrollBar()->setValue(log_->verticalScrollBar()->maximum());
 }
 
+namespace {
+
+// Friendly explanations for engine exit codes, shown in the status line and
+// appended to the calculation log so failures can be copied verbatim.
+// Negative codes are Windows NTSTATUS values; the translated Fortran core
+// aborts through the CRT when it cannot parse its input.
+QString engineExitDescription(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    if (exitStatus == QProcess::CrashExit) {
+        return QStringLiteral("The engine process crashed before finishing.");
+    }
+    switch (static_cast<quint32>(exitCode)) {
+    case 0xC0000409u: // CRT fail-fast: the f2c runtime aborts on bad input
+        return QStringLiteral(
+            "The engine aborted while reading the design — almost always a "
+            "parse error in a section (the last engine message above names "
+            "the spot).");
+    case 0xC0000005u:
+        return QStringLiteral(
+            "The engine crashed with an access violation — usually design "
+            "values outside the ranges the legacy core can handle.");
+    case 0xC00000FDu:
+        return QStringLiteral("The engine ran out of stack space.");
+    case 0xC0000135u:
+        return QStringLiteral(
+            "A DLL required by leparagliding-engine.exe was not found next "
+            "to it.");
+    case 0xC000013Au:
+        return QStringLiteral("The engine was interrupted from the console.");
+    default:
+        break;
+    }
+    if (exitCode == 2) {
+        return QStringLiteral(
+            "The engine rejected its command line or could not read or "
+            "write its files.");
+    }
+    return QString();
+}
+
+QString exitCodeText(int exitCode)
+{
+    if (exitCode < 0) {
+        return QStringLiteral("%1 (0x%2)")
+            .arg(exitCode)
+            .arg(QString::number(static_cast<quint32>(exitCode), 16).toUpper());
+    }
+    return QString::number(exitCode);
+}
+
+} // namespace
+
 void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     appendProcessOutput();
@@ -1861,11 +2138,22 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
                             ? QStringLiteral(" · unsaved edits")
                             : QString()));
         } else {
-            statusLabel_->setText(
-                QStringLiteral("Preview failed · exit %1").arg(exitCode));
+            const QString headline = engineSucceeded
+                ? QStringLiteral("Preview failed · the engine finished but the "
+                                 "3D model could not be loaded")
+                : QStringLiteral("Preview failed · exit %1")
+                      .arg(exitCodeText(exitCode));
+            statusLabel_->setText(headline);
+            log_->appendPlainText(QStringLiteral("\n") + headline);
+            const QString reason = engineSucceeded
+                ? QString()
+                : engineExitDescription(exitCode, exitStatus);
+            if (!reason.isEmpty()) {
+                log_->appendPlainText(reason);
+            }
             log_->appendPlainText(
                 QStringLiteral(
-                    "\nThe preview did not complete. Check the section data, "
+                    "The preview did not complete. Check the section data, "
                     "referenced airfoil files, and last engine message above."));
             diagnosticsTabs_->setCurrentWidget(log_);
         }
@@ -1896,14 +2184,22 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
                              ? QString()
                              : QStringLiteral(" · preview unavailable")));
         } else {
-            statusLabel_->setText(
+            const QString headline =
                 QStringLiteral("Export failed · exit %1 · %2/%3 files")
-                    .arg(exitCode)
+                    .arg(exitCodeText(exitCode))
                     .arg(generatedCount)
-                    .arg(static_cast<int>(outputs.size())));
+                    .arg(static_cast<int>(outputs.size()));
+            statusLabel_->setText(headline);
+            log_->appendPlainText(QStringLiteral("\n") + headline);
+            const QString reason = engineSucceeded
+                ? QString()
+                : engineExitDescription(exitCode, exitStatus);
+            if (!reason.isEmpty()) {
+                log_->appendPlainText(reason);
+            }
             log_->appendPlainText(
                 QStringLiteral(
-                    "\nThe export did not complete. Check the section data, "
+                    "The export did not complete. Check the section data, "
                     "referenced airfoil files, and last engine message above."));
             diagnosticsTabs_->setCurrentWidget(log_);
         }
@@ -1951,21 +2247,395 @@ void MainWindow::openOutputItem(QTreeWidgetItem *item)
 bool MainWindow::loadViewportModel(const QString &path)
 {
     if (!QFileInfo(path).isFile()) {
-        viewport_->clearModel();
-        modelStats_->setText(QStringLiteral("No model loaded"));
+        clearViewportModel(QStringLiteral("No model loaded"));
         return false;
     }
 
     QString error;
     if (!viewport_->loadStep(path, &error)) {
-        viewport_->clearModel();
-        modelStats_->setText(QStringLiteral("Model could not be loaded"));
+        clearViewportModel(QStringLiteral("Model could not be loaded"));
         log_->appendPlainText(
             QStringLiteral("\n3D viewport: %1").arg(error));
         return false;
     }
     modelStats_->setText(viewport_->modelSummary());
+    rebuildPartsTree();
     return true;
+}
+
+void MainWindow::clearViewportModel(const QString &statusText)
+{
+    viewport_->clearModel();
+    rebuildPartsTree();
+    modelStats_->setText(statusText);
+}
+
+void MainWindow::rebuildPartsTree()
+{
+    if (partsTree_ == nullptr) {
+        return;
+    }
+    syncingPartsTree_ = true;
+    partsTree_->clear();
+    partsTreeItems_.clear();
+    partHoverLabel_->clear();
+
+    const QVector<ParagliderView::PartInfo> parts = viewport_->partTree();
+    for (const ParagliderView::PartInfo &part : parts) {
+        QTreeWidgetItem *parent = partsTreeItems_.value(part.parentId, nullptr);
+        auto *item = parent != nullptr
+                         ? new QTreeWidgetItem(parent)
+                         : new QTreeWidgetItem(partsTree_);
+        item->setText(0, part.name);
+        item->setData(0, Qt::UserRole, part.id);
+        item->setData(0, Qt::UserRole + 1, static_cast<int>(part.role));
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(0, part.visible ? Qt::Checked : Qt::Unchecked);
+        partsTreeItems_.insert(part.id, item);
+    }
+    refreshPartsTreeIcons();
+    for (int index = 0; index < partsTree_->topLevelItemCount(); ++index) {
+        partsTree_->topLevelItem(index)->setExpanded(true);
+    }
+    syncingPartsTree_ = false;
+}
+
+void MainWindow::refreshPartsTreeIcons()
+{
+    for (auto it = partsTreeItems_.cbegin(); it != partsTreeItems_.cend();
+         ++it) {
+        const auto role = static_cast<ParagliderView::ColorRole>(
+            it.value()->data(0, Qt::UserRole + 1).toInt());
+        QPixmap swatch(10, 10);
+        swatch.fill(viewport_->color(role));
+        it.value()->setIcon(0, QIcon(swatch));
+    }
+}
+
+void MainWindow::revealPartInTree(int partId)
+{
+    if (partsTree_ == nullptr) {
+        return;
+    }
+    syncingPartsTree_ = true;
+    if (partId < 0) {
+        partsTree_->setCurrentItem(nullptr);
+        partsTree_->clearSelection();
+    } else if (QTreeWidgetItem *item =
+                   partsTreeItems_.value(partId, nullptr)) {
+        for (QTreeWidgetItem *parent = item->parent();
+             parent != nullptr;
+             parent = parent->parent()) {
+            parent->setExpanded(true);
+        }
+        partsTree_->setCurrentItem(item);
+        partsTree_->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+        partHoverLabel_->setText(viewport_->partPath(partId));
+    }
+    syncingPartsTree_ = false;
+}
+
+void MainWindow::handlePartsTreeCheck(QTreeWidgetItem *item)
+{
+    if (syncingPartsTree_ || item == nullptr) {
+        return;
+    }
+    const Qt::CheckState state = item->checkState(0);
+
+    // Mirror the new state onto descendant checkboxes without re-entering;
+    // the viewport applies the visibility to the whole subtree itself.
+    syncingPartsTree_ = true;
+    const std::function<void(QTreeWidgetItem *)> apply =
+        [&apply, state](QTreeWidgetItem *node) {
+            node->setCheckState(0, state);
+            for (int index = 0; index < node->childCount(); ++index) {
+                apply(node->child(index));
+            }
+        };
+    for (int index = 0; index < item->childCount(); ++index) {
+        apply(item->child(index));
+    }
+    syncingPartsTree_ = false;
+
+    viewport_->setPartVisible(
+        item->data(0, Qt::UserRole).toInt(),
+        state == Qt::Checked);
+}
+
+void MainWindow::showPartsTreeMenu(const QPoint &position)
+{
+    QTreeWidgetItem *item = partsTree_->itemAt(position);
+    QMenu menu(partsTree_);
+    if (item != nullptr) {
+        const int partId = item->data(0, Qt::UserRole).toInt();
+        menu.addAction(QStringLiteral("Show only this"), this,
+                       [this, partId] {
+                           viewport_->showOnlyPart(partId);
+                           syncPartsTreeChecks();
+                       });
+        menu.addAction(QStringLiteral("Zoom to"), this, [this, partId] {
+            viewport_->zoomToPart(partId);
+        });
+        menu.addAction(QStringLiteral("Go to design section"), this,
+                       [this, partId] { jumpToPartDefinition(partId); });
+        menu.addSeparator();
+    }
+    menu.addAction(QStringLiteral("Show all"), this, [this] {
+        viewport_->showAllParts();
+        syncPartsTreeChecks();
+    });
+    menu.exec(partsTree_->viewport()->mapToGlobal(position));
+}
+
+void MainWindow::syncPartsTreeChecks()
+{
+    syncingPartsTree_ = true;
+    const QVector<ParagliderView::PartInfo> parts = viewport_->partTree();
+    for (const ParagliderView::PartInfo &part : parts) {
+        if (QTreeWidgetItem *item =
+                partsTreeItems_.value(part.id, nullptr)) {
+            item->setCheckState(
+                0,
+                part.visible ? Qt::Checked : Qt::Unchecked);
+        }
+    }
+    syncingPartsTree_ = false;
+}
+
+namespace {
+
+struct SectionDataRow
+{
+    int lineIndex = -1;
+    QStringList tokens;
+};
+
+QVector<SectionDataRow> sectionDataRows(const QString &sectionText)
+{
+    static const QRegularExpression whitespace(QStringLiteral("\\s+"));
+    QVector<SectionDataRow> rows;
+    int lineIndex = 0;
+    for (const QString &line : sectionText.split(QLatin1Char('\n'))) {
+        const QString trimmed = line.trimmed();
+        if (!trimmed.isEmpty() && !trimmed.startsWith(QLatin1Char('*'))) {
+            rows.append(
+                {lineIndex,
+                 trimmed.split(whitespace, Qt::SkipEmptyParts)});
+        }
+        ++lineIndex;
+    }
+    return rows;
+}
+
+// Rows of one line-plan block in section 9 (per-plan blocks) or section 10
+// (single brake block). Returns an empty list when the layout is unexpected.
+QVector<SectionDataRow> linePlanBlock(
+    const QVector<SectionDataRow> &rows,
+    int planOrdinal,
+    bool brakes)
+{
+    if (rows.size() < 3) {
+        return {};
+    }
+    if (brakes) {
+        const int count = rows.at(1).tokens.value(0).toInt();
+        if (count <= 0 || 2 + count > rows.size()) {
+            return {};
+        }
+        return rows.mid(2, count);
+    }
+    const int planCount = rows.at(1).tokens.value(0).toInt();
+    int cursor = 2;
+    for (int plan = 1; plan <= planCount; ++plan) {
+        if (cursor >= rows.size()) {
+            return {};
+        }
+        const int count = rows.at(cursor).tokens.value(0).toInt();
+        if (count <= 0 || cursor + count >= rows.size() + 1) {
+            return {};
+        }
+        if (plan == planOrdinal) {
+            return rows.mid(cursor + 1, count);
+        }
+        cursor += count + 1;
+    }
+    return {};
+}
+
+} // namespace
+
+void MainWindow::jumpToPartDefinition(int partId)
+{
+    using ColorRole = ParagliderView::ColorRole;
+    const QVector<ParagliderView::PartInfo> parts = viewport_->partTree();
+    if (partId < 0 || partId >= parts.size()) {
+        return;
+    }
+    const ParagliderView::PartInfo &part = parts.at(partId);
+
+    const auto sectionTextFor = [this](int sectionNumber) -> QString {
+        for (qsizetype index = 0;
+             index < document_.sections().size()
+             && index < sectionEditors_.size();
+             ++index) {
+            if (document_.sections().at(index).number == sectionNumber) {
+                return sectionEditors_.at(index)->toPlainText();
+            }
+        }
+        return {};
+    };
+
+    // Ribs and panels are both defined by the section 1 rib matrix: the
+    // row's first column is the rib number, and panel N ends at rib N.
+    static const QRegularExpression ribOrPanel(
+        QStringLiteral("^(?:Rib|Panel) (\\d+)$"));
+    const auto ribMatch = ribOrPanel.match(part.name);
+    if (ribMatch.hasMatch()) {
+        const int rib = ribMatch.captured(1).toInt();
+        int row = -1;
+        for (const SectionDataRow &dataRow :
+             sectionDataRows(sectionTextFor(1))) {
+            if (dataRow.tokens.size() >= 8
+                && dataRow.tokens.at(0).toInt() == rib) {
+                row = dataRow.lineIndex;
+                break;
+            }
+        }
+        showSectionRow(1, row, row);
+        return;
+    }
+
+    // Diagonal parts are the numbered rows of the H/V rib table.
+    static const QRegularExpression diagonal(
+        QStringLiteral("^[HV]+-rib (\\d+)$"));
+    const auto diagonalMatch = diagonal.match(part.name);
+    if (part.role == ColorRole::Diagonals) {
+        int row = -1;
+        if (diagonalMatch.hasMatch()) {
+            const int index = diagonalMatch.captured(1).toInt();
+            const QVector<SectionDataRow> rows =
+                sectionDataRows(sectionTextFor(12));
+            for (qsizetype cursor = 2; cursor < rows.size(); ++cursor) {
+                if (rows.at(cursor).tokens.value(0).toInt() == index) {
+                    row = rows.at(cursor).lineIndex;
+                    break;
+                }
+            }
+        }
+        showSectionRow(12, row, row);
+        return;
+    }
+
+    const bool brakes = part.role == ColorRole::BrakeLines;
+    const bool planLine =
+        part.role >= ColorRole::PlanA && part.role <= ColorRole::PlanF;
+    if (!brakes && !planLine) {
+        return;
+    }
+
+    const int sectionNumber = brakes ? 10 : 9;
+    const int planOrdinal =
+        planLine
+            ? static_cast<int>(part.role) - static_cast<int>(ColorRole::PlanA)
+                  + 1
+            : 0;
+    const QVector<SectionDataRow> block = linePlanBlock(
+        sectionDataRows(sectionTextFor(sectionNumber)),
+        planOrdinal,
+        brakes);
+    if (block.isEmpty()) {
+        showSectionRow(sectionNumber, -1, -1);
+        return;
+    }
+
+    int firstRow = block.first().lineIndex;
+    int lastRow = block.last().lineIndex;
+
+    // Leaf labels like "3A5": level 3, plan A, line 5. Upper-level lines
+    // are numbered by their final rib (the row's last column); lower levels
+    // by the branch index of that level (the row's level/branch pairs).
+    static const QRegularExpression lineLabel(
+        QStringLiteral("^(\\d)([A-F])(\\d+)$"));
+    const auto labelMatch = lineLabel.match(part.name);
+    if (labelMatch.hasMatch()) {
+        const int level = labelMatch.captured(1).toInt();
+        const int number = labelMatch.captured(3).toInt();
+
+        int exactRow = -1;
+        for (const SectionDataRow &dataRow : block) {
+            if (!dataRow.tokens.isEmpty()
+                && static_cast<int>(dataRow.tokens.last().toDouble())
+                       == number) {
+                exactRow = dataRow.lineIndex;
+                break;
+            }
+        }
+        if (exactRow >= 0) {
+            firstRow = exactRow;
+            lastRow = exactRow;
+        } else {
+            int matchFirst = -1;
+            int matchLast = -1;
+            for (const SectionDataRow &dataRow : block) {
+                const int levels = dataRow.tokens.value(0).toInt();
+                for (int pair = 1; pair <= levels; ++pair) {
+                    if (dataRow.tokens.value(2 * pair - 1).toInt() == level
+                        && dataRow.tokens.value(2 * pair).toInt()
+                               == number) {
+                        if (matchFirst < 0) {
+                            matchFirst = dataRow.lineIndex;
+                        }
+                        matchLast = dataRow.lineIndex;
+                        break;
+                    }
+                }
+            }
+            if (matchFirst >= 0) {
+                firstRow = matchFirst;
+                lastRow = matchLast;
+            }
+        }
+    }
+    showSectionRow(sectionNumber, firstRow, lastRow);
+}
+
+void MainWindow::showSectionRow(int sectionNumber, int firstRow, int lastRow)
+{
+    int editorIndex = -1;
+    for (qsizetype index = 0;
+         index < document_.sections().size()
+         && index < sectionEditors_.size();
+         ++index) {
+        if (document_.sections().at(index).number == sectionNumber) {
+            editorIndex = static_cast<int>(index);
+            break;
+        }
+    }
+    if (editorIndex < 0) {
+        return;
+    }
+    sectionList_->setCurrentRow(editorIndex);
+    QPlainTextEdit *editor = sectionEditors_.at(editorIndex);
+    if (firstRow >= 0) {
+        const QTextBlock startBlock =
+            editor->document()->findBlockByNumber(firstRow);
+        const QTextBlock endBlock =
+            editor->document()->findBlockByNumber(
+                lastRow >= firstRow ? lastRow : firstRow);
+        if (startBlock.isValid()) {
+            QTextCursor cursor(startBlock);
+            const QTextBlock effectiveEnd =
+                endBlock.isValid() ? endBlock : startBlock;
+            cursor.setPosition(startBlock.position());
+            cursor.setPosition(
+                effectiveEnd.position()
+                    + qMax(0, effectiveEnd.length() - 1),
+                QTextCursor::KeepAnchor);
+            editor->setTextCursor(cursor);
+            editor->centerCursor();
+        }
+    }
+    editor->setFocus();
 }
 
 void MainWindow::setRunning(bool running)
@@ -2120,6 +2790,84 @@ void MainWindow::showPreferences()
                 resolutionValue->setText(describeStep(index));
             });
 
+    auto *colorsGroup = new QGroupBox(QStringLiteral("Part colors"), &dialog);
+    auto *colorsLayout = new QGridLayout(colorsGroup);
+    colorsLayout->setContentsMargins(14, 18, 14, 12);
+    colorsLayout->setHorizontalSpacing(10);
+    colorsLayout->setVerticalSpacing(6);
+    colorsLayout->setColumnStretch(0, 1);
+    colorsLayout->setColumnStretch(2, 1);
+
+    const auto applySwatch = [](QPushButton *button, const QColor &color) {
+        button->setStyleSheet(
+            QStringLiteral(
+                "background:%1;border:1px solid #26354a;border-radius:4px;")
+                .arg(color.name()));
+    };
+
+    // The dialog is executed modally below, so the button list outlives
+    // every use inside the connected lambdas.
+    QVector<QPushButton *> swatches(ParagliderView::colorRoleCount, nullptr);
+    for (int roleIndex = 0;
+         roleIndex < ParagliderView::colorRoleCount;
+         ++roleIndex) {
+        const auto role = static_cast<ParagliderView::ColorRole>(roleIndex);
+        const int row = roleIndex % 7;
+        const int column = (roleIndex / 7) * 2;
+        auto *label =
+            new QLabel(ParagliderView::colorRoleLabel(role), colorsGroup);
+        colorsLayout->addWidget(label, row, column);
+        auto *swatch = new QPushButton(colorsGroup);
+        swatch->setFixedSize(46, 22);
+        swatch->setCursor(Qt::PointingHandCursor);
+        applySwatch(swatch, viewport_->color(role));
+        colorsLayout->addWidget(swatch, row, column + 1);
+        swatches[roleIndex] = swatch;
+        connect(swatch, &QPushButton::clicked, &dialog,
+                [this, &dialog, applySwatch, swatch, role] {
+                    const QColor chosen = QColorDialog::getColor(
+                        viewport_->color(role),
+                        &dialog,
+                        QStringLiteral("Color for %1")
+                            .arg(ParagliderView::colorRoleLabel(role)));
+                    if (chosen.isValid()) {
+                        viewport_->setColor(role, chosen);
+                        applySwatch(swatch, chosen);
+                        refreshPartsTreeIcons();
+                        saveSettings();
+                    }
+                });
+    }
+
+    auto *resetColors =
+        new QPushButton(QStringLiteral("Reset colors"), colorsGroup);
+    resetColors->setObjectName(QStringLiteral("quietButton"));
+    colorsLayout->addWidget(
+        resetColors,
+        7,
+        0,
+        1,
+        4,
+        Qt::AlignRight);
+    connect(resetColors, &QPushButton::clicked, &dialog,
+            [this, applySwatch, &swatches] {
+                for (int roleIndex = 0;
+                     roleIndex < ParagliderView::colorRoleCount;
+                     ++roleIndex) {
+                    const auto role =
+                        static_cast<ParagliderView::ColorRole>(roleIndex);
+                    viewport_->setColor(
+                        role,
+                        ParagliderView::defaultColor(role));
+                    applySwatch(
+                        swatches.at(roleIndex),
+                        viewport_->color(role));
+                }
+                refreshPartsTreeIcons();
+                saveSettings();
+            });
+    layout->addWidget(colorsGroup);
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
@@ -2137,6 +2885,26 @@ void MainWindow::loadSettings()
     viewport_->setTriangulationResolution(
         settings.value(QStringLiteral("viewport/meshResolutionScale"), 1.0)
             .toDouble());
+    for (int roleIndex = 0;
+         roleIndex < ParagliderView::colorRoleCount;
+         ++roleIndex) {
+        const QColor color(
+            settings
+                .value(QString::fromLatin1(colorSettingsKeys.at(roleIndex)))
+                .toString());
+        if (color.isValid()) {
+            viewport_->setColor(
+                static_cast<ParagliderView::ColorRole>(roleIndex),
+                color);
+        }
+    }
+    const double xray =
+        settings.value(QStringLiteral("viewport/xray"), 0.0).toDouble();
+    viewport_->setSurfaceTransparency(xray);
+    if (xraySlider_ != nullptr) {
+        const QSignalBlocker blocker(xraySlider_);
+        xraySlider_->setValue(qRound(xray * 100.0));
+    }
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
@@ -2148,6 +2916,18 @@ void MainWindow::saveSettings() const
     settings.setValue(
         QStringLiteral("viewport/meshResolutionScale"),
         viewport_->triangulationResolution());
+    for (int roleIndex = 0;
+         roleIndex < ParagliderView::colorRoleCount;
+         ++roleIndex) {
+        settings.setValue(
+            QString::fromLatin1(colorSettingsKeys.at(roleIndex)),
+            viewport_
+                ->color(static_cast<ParagliderView::ColorRole>(roleIndex))
+                .name());
+    }
+    settings.setValue(
+        QStringLiteral("viewport/xray"),
+        viewport_->surfaceTransparency());
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 

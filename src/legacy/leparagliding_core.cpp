@@ -40,6 +40,13 @@ void lep_nurbs_capture_panel(const doublereal *u,
                              integer includeVentSurface,
                              integer singleSkin);
 void lep_nurbs_set_line_capture(integer enabled);
+void lep_nurbs_set_line_tag(const char *label,
+                            integer labelLength,
+                            integer planIndex,
+                            integer isBrake);
+void lep_nurbs_tag_diagonal(const char *kind,
+                            integer kindLength,
+                            integer index);
 void lep_nurbs_capture_line(doublereal x1,
                             doublereal y1,
                             doublereal z1,
@@ -34678,6 +34685,8 @@ L12:
 		5) * 10 - 61];
 	p1z = z1line[corda[i__ - 1] + (corda[i__ + 499] + corda[i__ + 999] *
 		5) * 10 - 61];
+/*      Tag captured OCCT line with its lines.txt label and plan */
+	lep_nurbs_set_line_tag(ln4 + ((i__ - 1) << 2), 4, corda[i__ - 1], 0);
 	if (i37c == 0) {
 /* colors by risers */
 	    line3d_(&p1x, &p1y, &p1z, &p2x, &p2y, &p2z, &iccolor[corda[i__ -
@@ -34712,6 +34721,8 @@ L12:
 		5) * 10 - 61];
 	p1z = z1line[corda[i__ - 1] + (corda[i__ + 499] + corda[i__ + 999] *
 		5) * 10 - 61];
+/*      Tag captured OCCT brake line with its lines.txt label */
+	lep_nurbs_set_line_tag(ln4 + ((i__ - 1) << 2), 4, 6, 1);
 	if (i37c == 0) {
 /* colors by risers */
 	    line3d_(&p1x, &p1y, &p1z, &p2x, &p2y, &p2z, &iccolor[15]);
@@ -34734,6 +34745,8 @@ L12:
 /*      21.8 H-V-ribs 3D drawing */
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
     i__1 = nhvr;
+/*      Capture the diagonal ribs into the OCCT model */
+    lep_nurbs_set_line_capture(1);
     for (k = 1; k <= i__1; ++k) {
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      21.8.1 H-ribs */
@@ -34742,6 +34755,7 @@ L12:
 	    i__ = (integer) hvr[k + 402];
 /*      warning */
 	    ii = (integer) hvr[k + 603];
+	    lep_nurbs_tag_diagonal("H-rib", 5, k);
 	    for (j = 1; j <= 21; ++j) {
 		p1x = hx3[i__ + (j + ii * 50) * 101 - 5151];
 		p1y = hy3[i__ + (j + ii * 50) * 101 - 5151];
@@ -34888,6 +34902,7 @@ L12:
 	    }
 	}
     }
+    lep_nurbs_set_line_capture(0);
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      21.9 Draw the intermediate and ovalized airfoil in 3D */
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */

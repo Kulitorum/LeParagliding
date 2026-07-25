@@ -278,12 +278,41 @@ int runStudioSelfTest(const QStringList &arguments)
     }
     if (viewport.surfaceCount() < 50
         || viewport.rationalSurfaceCount() < 1
-        || viewport.shellCount() < 1
+        || viewport.partCount() < 100
         || viewport.splineCount() < 500
         || viewport.triangleCount() < 1000) {
         QTextStream(stderr)
             << "Expected a non-trivial OCCT NURBS model, got "
             << viewport.modelSummary() << ".\n";
+        return 2;
+    }
+
+    // The engine exports a named assembly; the viewport must reconstruct
+    // the part structure from it.
+    bool hasExtrados = false;
+    bool hasRibs = false;
+    bool hasLinePlan = false;
+    bool hasPanelLeaf = false;
+    for (const ParagliderView::PartInfo &part : viewport.partTree()) {
+        if (part.isGroup && part.name == QStringLiteral("Extrados")) {
+            hasExtrados = true;
+        }
+        if (part.isGroup && part.name == QStringLiteral("Ribs")) {
+            hasRibs = true;
+        }
+        if (part.isGroup && part.name.startsWith(QStringLiteral("Plan "))) {
+            hasLinePlan = true;
+        }
+        if (!part.isGroup
+            && part.name.startsWith(QStringLiteral("Panel "))
+            && part.role == ParagliderView::ColorRole::Extrados) {
+            hasPanelLeaf = true;
+        }
+    }
+    if (!hasExtrados || !hasRibs || !hasLinePlan || !hasPanelLeaf) {
+        QTextStream(stderr)
+            << "The STEP assembly part tree is missing expected groups "
+            << "(Extrados/Ribs/Plan */Panel leaves).\n";
         return 2;
     }
 

@@ -21,10 +21,12 @@ public:
     bool wasMigrated() const;
     bool addedVersion328Sections() const;
     bool strippedEmbeddedHistory() const;
+    bool strippedBlankLines() const;
 
 private:
     std::filesystem::path path_;
     std::filesystem::path temporaryPath_;
     bool addedVersion328Sections_ = false;
     bool strippedEmbeddedHistory_ = false;
+    bool strippedBlankLines_ = false;
 };

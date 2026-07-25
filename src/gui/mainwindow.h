@@ -3,6 +3,7 @@
 #include "design_document.h"
 #include "preset_catalog.h"
 
+#include <QHash>
 #include <QMainWindow>
 #include <QProcess>
 #include <QSet>
@@ -19,6 +20,7 @@ class QListWidget;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
+class QSlider;
 class QStackedWidget;
 class QTabWidget;
 class QToolButton;
@@ -72,6 +74,15 @@ private:
     void refreshOutputFiles();
     void openOutputItem(QTreeWidgetItem *item);
     bool loadViewportModel(const QString &path);
+    void clearViewportModel(const QString &statusText);
+    void rebuildPartsTree();
+    void refreshPartsTreeIcons();
+    void revealPartInTree(int partId);
+    void handlePartsTreeCheck(QTreeWidgetItem *item);
+    void showPartsTreeMenu(const QPoint &position);
+    void syncPartsTreeChecks();
+    void jumpToPartDefinition(int partId);
+    void showSectionRow(int sectionNumber, int firstRow, int lastRow);
     void setRunning(bool running);
     void updateRunAvailability();
     void updateWindowTitle();
@@ -116,5 +127,11 @@ private:
     QTabWidget *diagnosticsTabs_ = nullptr;
     ParagliderView *viewport_ = nullptr;
     QToolButton *projectionButton_ = nullptr;
+    QTreeWidget *partsTree_ = nullptr;
+    QLabel *partHoverLabel_ = nullptr;
+    QToolButton *measureButton_ = nullptr;
+    QSlider *xraySlider_ = nullptr;
+    QHash<int, QTreeWidgetItem *> partsTreeItems_;
+    bool syncingPartsTree_ = false;
     QProcess *process_ = nullptr;
 };

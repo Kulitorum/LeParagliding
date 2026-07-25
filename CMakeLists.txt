@@ -77,6 +77,10 @@ set(LEP_OCCT_TOOLKITS
     TKDE
     TKXSBase
     TKDESTEP
+    TKCDF
+    TKLCAF
+    TKCAF
+    TKXCAF
 )
 
 add_library(lep_occt INTERFACE)
@@ -158,9 +162,21 @@ add_executable(reference-report-compare
     tests/reference_report_compare.cpp
 )
 
+add_executable(preprocessor-reference-compare
+    tests/preprocessor_reference_compare.cpp
+    src/gui/geometry_preprocessor.cpp
+)
+target_include_directories(preprocessor-reference-compare PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
+)
+
 qt_add_executable(LEparagliding WIN32
     src/gui/design_document.cpp
     src/gui/design_document.h
+    src/gui/geometry_preprocessor.cpp
+    src/gui/geometry_preprocessor.h
+    src/gui/geometry_preprocessor_dialog.cpp
+    src/gui/geometry_preprocessor_dialog.h
     src/gui/main.cpp
     src/gui/mainwindow.cpp
     src/gui/mainwindow.h
@@ -187,6 +203,7 @@ set_target_properties(
     LEparagliding
     leparagliding-engine
     reference-report-compare
+    preprocessor-reference-compare
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -196,6 +213,7 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         LEparagliding
         leparagliding-engine
         reference-report-compare
+        preprocessor-reference-compare
         PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
     )
@@ -292,6 +310,26 @@ add_test(NAME preset_gnua7_calculates
 set_tests_properties(preset_gnua7_calculates PROPERTIES
     TIMEOUT 120
 )
+add_test(NAME engine_tolerates_blank_lines
+    COMMAND leparagliding-engine
+        --resource-dir "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/3.28"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/3.28/leparagliding-blank-lines.txt"
+        "${CMAKE_BINARY_DIR}/blank-lines-test-output"
+)
+set_tests_properties(engine_tolerates_blank_lines PROPERTIES
+    TIMEOUT 90
+)
+foreach(preprocessor_case
+        basic
+        vault1-cells1-odd
+        vault2-cells2-even
+        vault2-cells4)
+    add_test(NAME "preprocessor_matches_fortran_${preprocessor_case}"
+        COMMAND preprocessor-reference-compare
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pre-1.6/${preprocessor_case}/pre-data.txt"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pre-1.6/${preprocessor_case}/geometry-out.txt"
+    )
+endforeach()
 set_tests_properties(gui_headless_help PROPERTIES
     TIMEOUT 20
 )

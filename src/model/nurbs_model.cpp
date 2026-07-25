@@ -6,6 +6,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GeomConvert.hxx>
 #include <GeomFill_NSections.hxx>
@@ -17,14 +18,25 @@
 #include <NCollection_Array1.hxx>
 #include <NCollection_Sequence.hxx>
 #include <Precision.hxx>
+#include <Quantity_Color.hxx>
+#include <STEPCAFControl_Writer.hxx>
 #include <STEPControl_StepModelType.hxx>
-#include <STEPControl_Writer.hxx>
 #include <Standard_ConstructionError.hxx>
 #include <Standard_Failure.hxx>
+#include <TCollection_ExtendedString.hxx>
+#include <TDF_Label.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDocStd_Document.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS.hxx>
+#include <XCAFApp_Application.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_ColorType.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
@@ -35,7 +47,8 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
-#include <limits>
+#include <list>
+#include <map>
 #include <numbers>
 #include <sstream>
 #include <string>
@@ -52,17 +65,119 @@ constexpr double millimetresPerCentimetre = 10.0;
 constexpr double pointToleranceMillimetres = 0.005;
 constexpr double maximumSourceDeviationMillimetres = 0.01;
 constexpr double maximumLegacyAgreementMillimetres = 0.00001;
+// A curve whose points all stay this close to the symmetry plane is on the
+// wing centre; its mirror copy would coincide with it.
+constexpr double symmetryPlaneToleranceMillimetres = 0.5;
 // Face boundaries are already exact B-spline edges. These sample counts add
 // only a clear interior surface wireframe, without duplicating boundaries or
 // bloating the STEP presentation.
 constexpr int maximumDisplayedSpanSamples = 5;
 constexpr int maximumDisplayedChordSamples = 10;
 
+// Stable part-tree vocabulary. The viewport recognises these exact names in
+// the STEP assembly, so change them only together with the GUI.
+constexpr const char *wingGroupName = "Wing";
+constexpr const char *extradosGroupName = "Extrados";
+constexpr const char *ventsGroupName = "Vents";
+constexpr const char *intradosGroupName = "Intrados";
+constexpr const char *ribsGroupName = "Ribs";
+constexpr const char *linesGroupName = "Lines";
+constexpr const char *brakeGroupName = "Brake lines";
+constexpr const char *diagonalsGroupName = "Diagonals";
+constexpr const char *otherCurvesName = "Other curves";
+constexpr const char *rightSideName = "Right";
+constexpr const char *leftSideName = "Left";
+constexpr const char *centerSideName = "Center";
+
+enum class Region
+{
+    Extrados,
+    Vent,
+    Intrados,
+};
+
+const char *regionGroupName(Region region)
+{
+    switch (region) {
+    case Region::Extrados:
+        return extradosGroupName;
+    case Region::Vent:
+        return ventsGroupName;
+    case Region::Intrados:
+        return intradosGroupName;
+    }
+    return extradosGroupName;
+}
+
+// Region names as used in diagnostics; these match the historical engine
+// messages ("upper"/"vent"/"lower").
+const char *regionDiagnosticName(Region region)
+{
+    switch (region) {
+    case Region::Extrados:
+        return "upper";
+    case Region::Vent:
+        return "vent";
+    case Region::Intrados:
+        return "lower";
+    }
+    return "upper";
+}
+
+struct PartColor
+{
+    double red = 0.0;
+    double green = 0.0;
+    double blue = 0.0;
+
+    Quantity_Color color() const
+    {
+        return {red, green, blue, Quantity_TOC_RGB};
+    }
+};
+
+// Default part colours embedded in the STEP file so external CAD tools show
+// a structured wing. The Studio viewport applies its own user-configurable
+// palette on top of these.
+constexpr PartColor extradosColor{0.20, 0.57, 0.88};
+constexpr PartColor intradosColor{0.45, 0.69, 0.90};
+constexpr PartColor ventColor{0.93, 0.60, 0.23};
+constexpr PartColor wireframeColor{0.37, 0.82, 1.0};
+constexpr PartColor ribColor{0.78, 0.80, 0.84};
+constexpr PartColor brakeColor{0.95, 0.83, 0.28};
+constexpr PartColor otherCurveColor{0.62, 0.66, 0.72};
+constexpr PartColor diagonalColor{0.83, 0.45, 0.74};
+constexpr PartColor planColors[6] = {
+    {0.89, 0.29, 0.29}, // Plan A
+    {0.95, 0.62, 0.19}, // Plan B
+    {0.35, 0.79, 0.42}, // Plan C
+    {0.29, 0.74, 0.86}, // Plan D
+    {0.72, 0.47, 0.90}, // Plan E
+    {0.62, 0.66, 0.72}, // Plan F
+};
+
+PartColor regionColor(Region region)
+{
+    switch (region) {
+    case Region::Extrados:
+        return extradosColor;
+    case Region::Vent:
+        return ventColor;
+    case Region::Intrados:
+        return intradosColor;
+    }
+    return extradosColor;
+}
+
 struct CapturedLine
 {
     gp_Pnt start;
     gp_Pnt end;
     int colorIndex = 0;
+    int planIndex = 0;
+    bool brake = false;
+    std::string group;
+    std::string label;
 };
 
 struct SourcePanel
@@ -74,6 +189,17 @@ struct SourcePanel
     const double *legacyTessellation = nullptr;
     int panelIndex = 0;
     int segmentCount = 0;
+};
+
+struct PanelSurface
+{
+    Region region = Region::Extrados;
+    int panelIndex = 0;
+    occ::handle<Geom_BSplineSurface> surface;
+    TopoDS_Face rightFace;
+    TopoDS_Face leftFace;
+    std::vector<TopoDS_Edge> rightWireframe;
+    std::vector<TopoDS_Edge> leftWireframe;
 };
 
 struct QuantizedPoint
@@ -174,16 +300,99 @@ bool isFinite(const gp_Pnt &point)
            && std::isfinite(point.Z());
 }
 
+std::string trimmedLabel(const char *label, int labelLength)
+{
+    std::string result;
+    for (int index = 0; index < labelLength; ++index) {
+        const char character = label[index];
+        if (character != ' ' && character != '\0') {
+            result.push_back(character);
+        }
+    }
+    return result;
+}
+
+bool curveOnSymmetryPlane(const occ::handle<Geom_Curve> &curve)
+{
+    if (curve.IsNull()) {
+        return false;
+    }
+    constexpr int sampleCount = 9;
+    const double first = curve->FirstParameter();
+    const double last = curve->LastParameter();
+    for (int sample = 0; sample <= sampleCount; ++sample) {
+        const double parameter =
+            first
+            + (last - first) * static_cast<double>(sample)
+                  / static_cast<double>(sampleCount);
+        if (std::abs(curve->Value(parameter).X())
+            > symmetryPlaneToleranceMillimetres) {
+            return false;
+        }
+    }
+    return true;
+}
+
+TopoDS_Shape mirrored(const TopoDS_Shape &shape)
+{
+    BRepBuilderAPI_Transform mirror(shape, mirrorTransform(), true);
+    if (!mirror.IsDone()) {
+        return {};
+    }
+    return mirror.Shape();
+}
+
+// One leaf part of the exported assembly: a named shape with default
+// surface/curve display colours.
+struct AssemblyPart
+{
+    std::string name;
+    TopoDS_Shape shape;
+    PartColor faceColor;
+    PartColor curveColor;
+    bool hasFaces = false;
+};
+
+// A named group of leaf parts (one level of the assembly tree). Children
+// live in a std::list so references and pointers to a group stay valid
+// while sibling groups are still being created.
+struct AssemblyGroup
+{
+    std::string name;
+    std::list<AssemblyGroup> groups;
+    std::vector<AssemblyPart> parts;
+
+    AssemblyGroup &group(const std::string &groupName)
+    {
+        for (AssemblyGroup &child : groups) {
+            if (child.name == groupName) {
+                return child;
+            }
+        }
+        groups.push_back({groupName, {}, {}});
+        return groups.back();
+    }
+
+    bool empty() const
+    {
+        return parts.empty()
+               && std::all_of(
+                   groups.begin(),
+                   groups.end(),
+                   [](const AssemblyGroup &child) { return child.empty(); });
+    }
+};
+
 class NurbsModel
 {
 public:
     void reset()
     {
-        surfaces_.clear();
-        surfaceSplines_.clear();
+        panels_.clear();
         capturedLines_.clear();
         errors_.clear();
         captureLines_ = false;
+        currentLineTag_ = {};
         maximumSourceDeviation_ = 0.0;
         maximumLegacyAgreement_ = 0.0;
     }
@@ -242,24 +451,24 @@ public:
                   panelIndex,
                   1,
                   upperPointCount,
-                  "upper");
+                  Region::Extrados);
         if (includeVentSurface) {
             addRegion(source,
                       panelIndex,
                       upperPointCount,
                       ventLast,
-                      "vent");
+                      Region::Vent);
         }
         if (!singleSkin && ventLast < totalPointCount) {
             addRegion(source,
                       panelIndex,
                       ventLast,
                       totalPointCount,
-                      "lower");
+                      Region::Intrados);
         }
     }
 
-    void captureLine(const CapturedLine &line)
+    void captureLine(CapturedLine line)
     {
         if (!captureLines_
             || !isFinite(line.start)
@@ -267,18 +476,49 @@ public:
             || line.start.Distance(line.end) <= Precision::Confusion()) {
             return;
         }
-        capturedLines_.push_back(line);
+        line.planIndex = currentLineTag_.planIndex;
+        line.brake = currentLineTag_.brake;
+        line.group = currentLineTag_.group;
+        line.label = currentLineTag_.label;
+        capturedLines_.push_back(std::move(line));
     }
 
     void setLineCapture(bool enabled)
     {
         captureLines_ = enabled;
+        if (!enabled) {
+            currentLineTag_ = {};
+        }
+    }
+
+    void setLineTag(const char *label,
+                    int labelLength,
+                    int planIndex,
+                    bool brake)
+    {
+        currentLineTag_.label =
+            label != nullptr && labelLength > 0
+                ? trimmedLabel(label, labelLength)
+                : std::string();
+        currentLineTag_.planIndex = std::clamp(planIndex, 0, 6);
+        currentLineTag_.brake = brake;
+        currentLineTag_.group.clear();
+    }
+
+    void tagDiagonal(const char *kind, int kindLength, int index)
+    {
+        currentLineTag_ = {};
+        currentLineTag_.group = diagonalsGroupName;
+        currentLineTag_.label =
+            (kind != nullptr && kindLength > 0
+                 ? trimmedLabel(kind, kindLength)
+                 : std::string("Diagonal"))
+            + " " + std::to_string(index);
     }
 
     lep::NurbsWriteResult writeStep(const std::filesystem::path &path)
     {
         lep::NurbsWriteResult result;
-        result.surfaceCount = static_cast<int>(surfaces_.size());
         result.maximumSourceDeviationMillimetres =
             maximumSourceDeviation_;
         result.maximumLegacyAgreementMillimetres =
@@ -288,76 +528,27 @@ public:
             result.error = errors_.front();
             return result;
         }
-        if (surfaces_.empty()) {
+        if (panels_.empty()) {
             result.error = "The calculation produced no NURBS surfaces.";
             return result;
         }
 
         try {
-            BRep_Builder topologyBuilder;
-            TopoDS_Compound model;
-            TopoDS_Compound splines;
-            topologyBuilder.MakeCompound(model);
-            topologyBuilder.MakeCompound(splines);
-
-            BRepBuilderAPI_Sewing sewing(
-                pointToleranceMillimetres,
-                true,
-                true,
-                true,
-                false);
-            for (const TopoDS_Face &surface : surfaces_) {
-                sewing.Add(surface);
-            }
-            sewing.Perform();
-            const TopoDS_Shape skins = sewing.SewedShape();
-            if (skins.IsNull()
-                || !BRepCheck_Analyzer(skins, true).IsValid()) {
-                result.error =
-                    "OCCT could not sew the NURBS faces into valid skin topology.";
-                return result;
-            }
-            result.sewnEdgeCount = sewing.NbContigousEdges();
-            result.freeEdgeCount = sewing.NbFreeEdges();
-
-            for (const TopoDS_Edge &spline : surfaceSplines_) {
-                topologyBuilder.Add(splines, spline);
-            }
-
-            const int capturedSplineCount =
-                addCapturedLineSplines(topologyBuilder, splines);
-            result.splineCount =
-                static_cast<int>(surfaceSplines_.size())
-                + capturedSplineCount;
-
-            topologyBuilder.Add(model, skins);
-            topologyBuilder.Add(model, splines);
-
-            // AP242 preserves exact B-spline geometry and is the current STEP
-            // schema. All model coordinates are already represented in mm.
-            STEPControl_Writer writer;
-            // STEPControl_Writer initializes the shared STEP parameters in
-            // its constructor, so select the schema only after constructing
-            // it and recreate the model with those parameters.
-            Interface_Static::SetIVal("write.step.schema", 5); // AP242DIS
-            Interface_Static::SetCVal("write.step.unit", "MM");
-            Interface_Static::SetIVal("write.surfacecurve.mode", 1);
-            writer.Model(true);
-            writer.SetTolerance(pointToleranceMillimetres);
-            if (writer.Transfer(model, STEPControl_AsIs)
-                != IFSelect_RetDone) {
-                result.error = "OCCT could not transfer the NURBS model to STEP.";
+            validateSewing(result);
+            if (!result.error.empty()) {
                 return result;
             }
 
-            const auto encoded = path.u8string();
-            const std::string encodedPath{
-                reinterpret_cast<const char *>(encoded.data()),
-                encoded.size()};
-            if (writer.Write(encodedPath.c_str()) != IFSelect_RetDone) {
-                result.error = "OCCT could not write the STEP file.";
+            AssemblyGroup wing{wingGroupName, {}, {}};
+            addPanelParts(wing, result);
+            addRibParts(wing, result);
+            if (!errors_.empty()) {
+                result.error = errors_.front();
                 return result;
             }
+            addLineParts(wing, result);
+
+            writeAssembly(wing, path, result);
         } catch (const Standard_Failure &failure) {
             result.error =
                 std::string("OCCT STEP export failed: ")
@@ -371,11 +562,19 @@ public:
             return result;
         }
 
-        result.success = true;
+        result.success = result.error.empty();
         return result;
     }
 
 private:
+    struct LineTag
+    {
+        std::string group;
+        std::string label;
+        int planIndex = 0;
+        bool brake = false;
+    };
+
     static std::size_t sourceFieldIndex(int panelIndex,
                                         int pointIndex,
                                         int fieldIndex)
@@ -595,7 +794,7 @@ private:
                    int panelIndex,
                    int firstPoint,
                    int lastPoint,
-                   const char *regionName)
+                   Region region)
     {
         if (lastPoint - firstPoint + 1 < 2) {
             return;
@@ -605,15 +804,16 @@ private:
                    panelIndex,
                    firstPoint,
                    lastPoint,
-                   regionName);
+                   region);
     }
 
     void addSurface(const SourcePanel &source,
                     int panelIndex,
                     int firstPoint,
                     int lastPoint,
-                    const char *regionName)
+                    Region region)
     {
+        const char *regionName = regionDiagnosticName(region);
         const int chordPointCount = lastPoint - firstPoint + 1;
 
         try {
@@ -697,27 +897,29 @@ private:
                     + std::to_string(panelIndex));
                 return;
             }
-            surfaces_.push_back(face);
 
-            BRepBuilderAPI_Transform mirror(
-                face,
-                mirrorTransform(),
-                true);
-            if (!mirror.IsDone()
-                || mirror.Shape().ShapeType() != TopAbs_FACE) {
+            const TopoDS_Shape mirroredFace = mirrored(face);
+            if (mirroredFace.IsNull()
+                || mirroredFace.ShapeType() != TopAbs_FACE) {
                 errors_.push_back(
                     "Could not mirror the "
                     + std::string(regionName)
                     + " face for panel "
                     + std::to_string(panelIndex));
-                surfaces_.pop_back();
                 return;
             }
-            surfaces_.push_back(TopoDS::Face(mirror.Shape()));
+
+            PanelSurface panel;
+            panel.region = region;
+            panel.panelIndex = panelIndex;
+            panel.surface = surface;
+            panel.rightFace = face;
+            panel.leftFace = TopoDS::Face(mirroredFace);
             addIsoparametricSplines(
-                surface,
+                panel,
                 maximumDisplayedSpanSamples,
                 std::min(chordPointCount, maximumDisplayedChordSamples));
+            panels_.push_back(std::move(panel));
         } catch (const Standard_Failure &failure) {
             std::ostringstream message;
             message << "OCCT failed to fit the " << regionName
@@ -844,7 +1046,7 @@ private:
     }
 
     void addIsoparametricSplines(
-        const occ::handle<Geom_BSplineSurface> &surface,
+        PanelSurface &panel,
         int spanPointCount,
         int chordPointCount)
     {
@@ -852,24 +1054,21 @@ private:
         double uLast = 0.0;
         double vFirst = 0.0;
         double vLast = 0.0;
-        surface->Bounds(uFirst, uLast, vFirst, vLast);
+        panel.surface->Bounds(uFirst, uLast, vFirst, vLast);
 
-        auto addCurve = [this](const occ::handle<Geom_Curve> &curve) {
+        auto addCurve = [&panel](const occ::handle<Geom_Curve> &curve) {
             if (curve.IsNull()) {
                 return;
             }
             BRepBuilderAPI_MakeEdge makeEdge(curve);
             if (makeEdge.IsDone()) {
                 const TopoDS_Edge edge = makeEdge.Edge();
-                surfaceSplines_.push_back(edge);
-                BRepBuilderAPI_Transform mirror(
-                    edge,
-                    mirrorTransform(),
-                    true);
-                if (mirror.IsDone()
-                    && mirror.Shape().ShapeType() == TopAbs_EDGE) {
-                    surfaceSplines_.push_back(
-                        TopoDS::Edge(mirror.Shape()));
+                panel.rightWireframe.push_back(edge);
+                const TopoDS_Shape mirroredEdge = mirrored(edge);
+                if (!mirroredEdge.IsNull()
+                    && mirroredEdge.ShapeType() == TopAbs_EDGE) {
+                    panel.leftWireframe.push_back(
+                        TopoDS::Edge(mirroredEdge));
                 }
             }
         };
@@ -881,7 +1080,7 @@ private:
                 + (uLast - uFirst)
                       * static_cast<double>(index)
                       / static_cast<double>(spanPointCount - 1);
-            addCurve(surface->UIso(parameter));
+            addCurve(panel.surface->UIso(parameter));
         }
         for (int index = 1; index + 1 < chordPointCount; ++index) {
             const double parameter =
@@ -889,7 +1088,7 @@ private:
                 + (vLast - vFirst)
                       * static_cast<double>(index)
                       / static_cast<double>(chordPointCount - 1);
-            addCurve(surface->VIso(parameter));
+            addCurve(panel.surface->VIso(parameter));
         }
     }
 
@@ -917,10 +1116,231 @@ private:
             false);
     }
 
-    int addCapturedLineSplines(BRep_Builder &builder, TopoDS_Compound &compound)
+    // Sewing remains the topology-quality gate for the lofted skins even
+    // though the export is now a structured assembly of individual panels:
+    // adjacent panels must still meet on shared boundary curves.
+    void validateSewing(lep::NurbsWriteResult &result) const
     {
+        BRepBuilderAPI_Sewing sewing(
+            pointToleranceMillimetres,
+            true,
+            true,
+            true,
+            false);
+        for (const PanelSurface &panel : panels_) {
+            sewing.Add(panel.rightFace);
+            sewing.Add(panel.leftFace);
+        }
+        sewing.Perform();
+        const TopoDS_Shape skins = sewing.SewedShape();
+        if (skins.IsNull()
+            || !BRepCheck_Analyzer(skins, true).IsValid()) {
+            result.error =
+                "OCCT could not sew the NURBS faces into valid skin topology.";
+            return;
+        }
+        result.sewnEdgeCount = sewing.NbContigousEdges();
+        result.freeEdgeCount = sewing.NbFreeEdges();
+    }
+
+    static TopoDS_Compound makeCompound(
+        const std::vector<TopoDS_Shape> &shapes)
+    {
+        BRep_Builder builder;
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Shape &shape : shapes) {
+            builder.Add(compound, shape);
+        }
+        return compound;
+    }
+
+    void addPanelParts(AssemblyGroup &wing,
+                       lep::NurbsWriteResult &result) const
+    {
+        for (const PanelSurface &panel : panels_) {
+            AssemblyGroup &regionGroup =
+                wing.group(regionGroupName(panel.region));
+            const std::string partName =
+                "Panel " + std::to_string(panel.panelIndex);
+            const PartColor faceColor = regionColor(panel.region);
+
+            const auto makePanelShape =
+                [](const TopoDS_Face &face,
+                   const std::vector<TopoDS_Edge> &wireframe) {
+                    std::vector<TopoDS_Shape> shapes;
+                    shapes.reserve(wireframe.size() + 1);
+                    shapes.push_back(face);
+                    shapes.insert(
+                        shapes.end(), wireframe.begin(), wireframe.end());
+                    return makeCompound(shapes);
+                };
+
+            regionGroup.group(rightSideName).parts.push_back(
+                {partName,
+                 makePanelShape(panel.rightFace, panel.rightWireframe),
+                 faceColor,
+                 wireframeColor,
+                 true});
+            regionGroup.group(leftSideName).parts.push_back(
+                {partName,
+                 makePanelShape(panel.leftFace, panel.leftWireframe),
+                 faceColor,
+                 wireframeColor,
+                 true});
+            result.surfaceCount += 2;
+            result.splineCount += static_cast<int>(
+                panel.rightWireframe.size() + panel.leftWireframe.size());
+        }
+    }
+
+    // Rib outlines are the exact chordwise boundary curves of the lofted
+    // panel surfaces: panel i spans rib i (u = uFirst) to rib i-1
+    // (u = uLast), so every captured panel contributes rib i, and rib i-1
+    // is taken from panel i only when panel i-1 was not built (which also
+    // yields the centre rib 0 from panel 1).
+    void addRibParts(AssemblyGroup &wing,
+                     lep::NurbsWriteResult &result) const
+    {
+        std::unordered_set<int> capturedPanels;
+        for (const PanelSurface &panel : panels_) {
+            capturedPanels.insert(panel.panelIndex);
+        }
+
+        std::map<int, std::vector<TopoDS_Edge>> ribEdges;
+        for (const PanelSurface &panel : panels_) {
+            double uFirst = 0.0;
+            double uLast = 0.0;
+            double vFirst = 0.0;
+            double vLast = 0.0;
+            panel.surface->Bounds(uFirst, uLast, vFirst, vLast);
+
+            const auto addRibCurve = [this, &ribEdges](
+                                         int ribIndex,
+                                         const occ::handle<Geom_Curve> &curve) {
+                if (curve.IsNull()) {
+                    errors_.push_back(
+                        "Could not extract the outline curve for rib "
+                        + std::to_string(ribIndex));
+                    return;
+                }
+                BRepBuilderAPI_MakeEdge makeEdge(curve);
+                if (!makeEdge.IsDone()) {
+                    errors_.push_back(
+                        "Could not build the outline edge for rib "
+                        + std::to_string(ribIndex));
+                    return;
+                }
+                ribEdges[ribIndex].push_back(makeEdge.Edge());
+            };
+
+            addRibCurve(panel.panelIndex, panel.surface->UIso(uFirst));
+            if (!capturedPanels.contains(panel.panelIndex - 1)) {
+                addRibCurve(panel.panelIndex - 1,
+                            panel.surface->UIso(uLast));
+            }
+        }
+        if (!errors_.empty()) {
+            return;
+        }
+
+        AssemblyGroup &ribs = wing.group(ribsGroupName);
+        for (const auto &[ribIndex, edges] : ribEdges) {
+            const std::string partName = "Rib " + std::to_string(ribIndex);
+            const bool onCenter = std::all_of(
+                edges.begin(),
+                edges.end(),
+                [](const TopoDS_Edge &edge) {
+                    double first = 0.0;
+                    double last = 0.0;
+                    return curveOnSymmetryPlane(
+                        BRep_Tool::Curve(edge, first, last));
+                });
+
+            std::vector<TopoDS_Shape> rightShapes(edges.begin(), edges.end());
+            if (onCenter) {
+                ribs.group(centerSideName).parts.push_back(
+                    {partName,
+                     makeCompound(rightShapes),
+                     ribColor,
+                     ribColor,
+                     false});
+            } else {
+                std::vector<TopoDS_Shape> leftShapes;
+                for (const TopoDS_Edge &edge : edges) {
+                    const TopoDS_Shape mirroredEdge = mirrored(edge);
+                    if (!mirroredEdge.IsNull()) {
+                        leftShapes.push_back(mirroredEdge);
+                    }
+                }
+                ribs.group(rightSideName).parts.push_back(
+                    {partName,
+                     makeCompound(rightShapes),
+                     ribColor,
+                     ribColor,
+                     false});
+                ribs.group(leftSideName).parts.push_back(
+                    {partName,
+                     makeCompound(leftShapes),
+                     ribColor,
+                     ribColor,
+                     false});
+            }
+            ++result.ribCount;
+            result.splineCount +=
+                static_cast<int>(edges.size() * (onCenter ? 1 : 2));
+        }
+    }
+
+    void addLineParts(AssemblyGroup &wing,
+                      lep::NurbsWriteResult &result) const
+    {
+        if (capturedLines_.empty()) {
+            return;
+        }
+
+        AssemblyGroup &lines = wing.group(linesGroupName);
         std::unordered_set<QuantizedSegment, QuantizedSegmentHash> added;
-        int count = 0;
+
+        struct LabelPart
+        {
+            AssemblyGroup *group = nullptr;
+            std::string label;
+            PartColor color;
+            std::vector<TopoDS_Shape> segments;
+        };
+        std::vector<LabelPart> labelParts;
+
+        const auto labelPartFor = [&](const CapturedLine &line) -> LabelPart & {
+            AssemblyGroup *group = nullptr;
+            PartColor color = otherCurveColor;
+            std::string label = line.label;
+            if (!line.group.empty()) {
+                // Custom top-level groups such as the H/V rib diagonals.
+                group = &wing.group(line.group);
+                color = diagonalColor;
+            } else if (line.brake) {
+                group = &lines.group(brakeGroupName);
+                color = brakeColor;
+            } else if (line.planIndex >= 1 && line.planIndex <= 6) {
+                group = &lines.group(
+                    std::string("Plan ")
+                    + static_cast<char>('A' + line.planIndex - 1));
+                color = planColors[line.planIndex - 1];
+            } else {
+                group = &lines.group(otherCurvesName);
+            }
+            if (label.empty()) {
+                label = "Curve";
+            }
+            for (LabelPart &part : labelParts) {
+                if (part.group == group && part.label == label) {
+                    return part;
+                }
+            }
+            labelParts.push_back({group, label, color, {}});
+            return labelParts.back();
+        };
 
         for (const CapturedLine &line : capturedLines_) {
             const QuantizedSegment key =
@@ -928,22 +1348,147 @@ private:
             if (!added.insert(key).second) {
                 continue;
             }
-
             BRepBuilderAPI_MakeEdge makeEdge(
                 makeLinearSpline(line.start, line.end));
-            if (makeEdge.IsDone()) {
-                builder.Add(compound, makeEdge.Edge());
-                ++count;
+            if (!makeEdge.IsDone()) {
+                continue;
             }
+            labelPartFor(line).segments.push_back(makeEdge.Edge());
         }
-        return count;
+
+        for (const LabelPart &part : labelParts) {
+            if (part.segments.empty()) {
+                continue;
+            }
+            part.group->parts.push_back(
+                {part.label,
+                 makeCompound(part.segments),
+                 part.color,
+                 part.color,
+                 false});
+            ++result.lineCount;
+            result.splineCount += static_cast<int>(part.segments.size());
+        }
     }
 
-    std::vector<TopoDS_Face> surfaces_;
-    std::vector<TopoDS_Edge> surfaceSplines_;
+    void writeAssembly(const AssemblyGroup &wing,
+                       const std::filesystem::path &path,
+                       lep::NurbsWriteResult &result) const
+    {
+        const occ::handle<TDocStd_Document> document = newDocument();
+        if (document.IsNull()) {
+            result.error = "OCCT could not create the XCAF document.";
+            return;
+        }
+        const occ::handle<XCAFDoc_ShapeTool> shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const occ::handle<XCAFDoc_ColorTool> colorTool =
+            XCAFDoc_DocumentTool::ColorTool(document->Main());
+        XCAFDoc_ShapeTool::SetAutoNaming(false);
+
+        const TDF_Label wingLabel = shapeTool->NewShape();
+        setLabelName(wingLabel, wing.name);
+        addGroupContents(shapeTool, colorTool, wingLabel, wing, result);
+        shapeTool->UpdateAssemblies();
+
+        // AP242 preserves exact B-spline geometry, carries the assembly
+        // names and colours, and is the current STEP schema. All model
+        // coordinates are already represented in mm.
+        STEPCAFControl_Writer writer;
+        // The writer initializes the shared STEP parameters in its
+        // constructor, so select the schema only after constructing it and
+        // recreate the model with those parameters.
+        Interface_Static::SetIVal("write.step.schema", 5); // AP242DIS
+        Interface_Static::SetCVal("write.step.unit", "MM");
+        Interface_Static::SetIVal("write.surfacecurve.mode", 1);
+        writer.ChangeWriter().Model(true);
+        writer.ChangeWriter().SetTolerance(pointToleranceMillimetres);
+        writer.SetColorMode(true);
+        writer.SetNameMode(true);
+        if (!writer.Transfer(document, STEPControl_AsIs)) {
+            result.error = "OCCT could not transfer the NURBS model to STEP.";
+            return;
+        }
+
+        const auto encoded = path.u8string();
+        const std::string encodedPath{
+            reinterpret_cast<const char *>(encoded.data()),
+            encoded.size()};
+        if (writer.Write(encodedPath.c_str()) != IFSelect_RetDone) {
+            result.error = "OCCT could not write the STEP file.";
+        }
+    }
+
+    static occ::handle<TDocStd_Document> newDocument()
+    {
+        occ::handle<TDocStd_Document> document;
+        XCAFApp_Application::GetApplication()->NewDocument(
+            "MDTV-XCAF",
+            document);
+        return document;
+    }
+
+    static void setLabelName(const TDF_Label &label, const std::string &name)
+    {
+        TDataStd_Name::Set(
+            label,
+            TCollection_ExtendedString(name.c_str(), true));
+    }
+
+    void addGroupContents(const occ::handle<XCAFDoc_ShapeTool> &shapeTool,
+                          const occ::handle<XCAFDoc_ColorTool> &colorTool,
+                          const TDF_Label &groupLabel,
+                          const AssemblyGroup &group,
+                          lep::NurbsWriteResult &result) const
+    {
+        for (const AssemblyGroup &child : group.groups) {
+            if (child.empty()) {
+                continue;
+            }
+            const TDF_Label childLabel = shapeTool->NewShape();
+            setLabelName(childLabel, child.name);
+            const TDF_Label instance =
+                shapeTool->AddComponent(
+                    groupLabel,
+                    childLabel,
+                    TopLoc_Location());
+            setLabelName(instance, child.name);
+            addGroupContents(shapeTool, colorTool, childLabel, child, result);
+        }
+        for (const AssemblyPart &part : group.parts) {
+            const TDF_Label partLabel =
+                shapeTool->AddShape(part.shape, false);
+            setLabelName(partLabel, part.name);
+            const TDF_Label instance =
+                shapeTool->AddComponent(
+                    groupLabel,
+                    partLabel,
+                    TopLoc_Location());
+            setLabelName(instance, part.name);
+            colorTool->SetColor(
+                partLabel,
+                part.hasFaces ? part.faceColor.color()
+                              : part.curveColor.color(),
+                XCAFDoc_ColorGen);
+            if (part.hasFaces) {
+                colorTool->SetColor(
+                    partLabel,
+                    part.faceColor.color(),
+                    XCAFDoc_ColorSurf);
+            }
+            colorTool->SetColor(
+                partLabel,
+                part.curveColor.color(),
+                XCAFDoc_ColorCurv);
+            ++result.partCount;
+        }
+    }
+
+    std::vector<PanelSurface> panels_;
     std::vector<CapturedLine> capturedLines_;
-    std::vector<std::string> errors_;
+    mutable std::vector<std::string> errors_;
     bool captureLines_ = false;
+    LineTag currentLineTag_;
     double maximumSourceDeviation_ = 0.0;
     double maximumLegacyAgreement_ = 0.0;
 };
@@ -1001,6 +1546,21 @@ extern "C" void lep_nurbs_capture_panel(const double *u,
 extern "C" void lep_nurbs_set_line_capture(int enabled)
 {
     model().setLineCapture(enabled != 0);
+}
+
+extern "C" void lep_nurbs_set_line_tag(const char *label,
+                                        int labelLength,
+                                        int planIndex,
+                                        int isBrake)
+{
+    model().setLineTag(label, labelLength, planIndex, isBrake != 0);
+}
+
+extern "C" void lep_nurbs_tag_diagonal(const char *kind,
+                                        int kindLength,
+                                        int index)
+{
+    model().tagDiagonal(kind, kindLength, index);
 }
 
 extern "C" void lep_nurbs_capture_line(double x1,
