@@ -306,3 +306,23 @@ if(WIN32)
         DESTINATION .
     )
 endif()
+
+# The Inno Setup script includes installer/version.iss, regenerated on every
+# configure so the installer filename embeds the HEAD commit. Commit before
+# building a release installer or the hash will be stale.
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE LEP_GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT LEP_GIT_HASH)
+    set(LEP_GIT_HASH "unknown")
+endif()
+set(LEP_INSTALLER_VERSION "${PROJECT_VERSION}-${LEP_GIT_HASH}")
+configure_file(
+    installer/version.iss.in
+    "${CMAKE_CURRENT_SOURCE_DIR}/installer/version.iss"
+    @ONLY
+)

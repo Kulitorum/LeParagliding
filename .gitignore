@@ -1,5 +1,7 @@
 /build/
 /build-conversion/
+/installer/version.iss
+/installer/Output/
 /*.exe
 /*.dxf
 /lep-out.txt

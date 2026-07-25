@@ -1,0 +1,5 @@
+#define VersionNumber "@LEP_INSTALLER_VERSION@"
+#define TargetName "LEparagliding"
+#define TargetArch "x64"
+#define TargetProduct "LEparagliding Studio"
+#define TargetPublisher "Michael Holm"
