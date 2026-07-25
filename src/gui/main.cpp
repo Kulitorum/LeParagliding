@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QPlainTextEdit>
@@ -59,9 +60,9 @@ bool isHeadlessRequested(int argc, char *argv[])
 
 int runStudioSelfTest(const QStringList &arguments)
 {
-    if (arguments.size() != 2) {
+    if (arguments.size() != 1) {
         QTextStream(stderr)
-            << "--studio-self-test requires a design file and a 3D DXF file.\n";
+            << "--studio-self-test requires a design file.\n";
         return 2;
     }
 
@@ -231,17 +232,70 @@ int runStudioSelfTest(const QStringList &arguments)
         return 2;
     }
 
-    ParagliderView viewport;
-    if (!viewport.loadDxf(arguments.at(1), &error)) {
-        QTextStream(stderr) << "3D DXF load failed: " << error << '\n';
+    QTemporaryDir modelDirectory;
+    if (!modelDirectory.isValid()) {
+        QTextStream(stderr) << "Could not create STEP model test directory.\n";
         return 2;
     }
-    if (viewport.segmentCount() < 1000) {
+    const QString outputDirectory =
+        modelDirectory.filePath(QStringLiteral("output"));
+    if (!QDir().mkpath(outputDirectory)) {
+        QTextStream(stderr) << "Could not create STEP model output directory.\n";
+        return 2;
+    }
+
+    QProcess engine;
+    engine.setProgram(enginePath());
+    engine.setArguments({arguments.at(0), outputDirectory});
+    engine.setProcessChannelMode(QProcess::MergedChannels);
+    engine.start();
+    if (!engine.waitForStarted()
+        || !engine.waitForFinished(150000)
+        || engine.exitStatus() != QProcess::NormalExit
+        || engine.exitCode() != 0) {
         QTextStream(stderr)
-            << "Expected a non-trivial sample DXF model, got "
-            << viewport.segmentCount() << ".\n";
+            << "NURBS engine self-test failed:\n"
+            << QString::fromLocal8Bit(engine.readAll()) << '\n';
         return 2;
     }
+
+    const QString stepPath =
+        QDir(outputDirectory).filePath(QStringLiteral("lep-3d.step"));
+    QFile stepFile(stepPath);
+    if (!stepFile.open(QIODevice::ReadOnly)
+        || !stepFile.read(8192).contains(
+            "AP242_MANAGED_MODEL_BASED_3D_ENGINEERING")) {
+        QTextStream(stderr)
+            << "Generated model is not an AP242 STEP file.\n";
+        return 2;
+    }
+    stepFile.close();
+
+    ParagliderView viewport;
+    if (!viewport.loadStep(stepPath, &error)) {
+        QTextStream(stderr) << "3D STEP load failed: " << error << '\n';
+        return 2;
+    }
+    if (viewport.surfaceCount() < 50
+        || viewport.rationalSurfaceCount() < 1
+        || viewport.shellCount() < 1
+        || viewport.splineCount() < 500
+        || viewport.triangleCount() < 1000) {
+        QTextStream(stderr)
+            << "Expected a non-trivial OCCT NURBS model, got "
+            << viewport.modelSummary() << ".\n";
+        return 2;
+    }
+
+    // Exercise the native OCCT WNT/OpenGL presentation as well as STEP
+    // import and meshing. This catches viewer/runtime deployment failures
+    // that a shape-only test would miss.
+    viewport.resize(800, 600);
+    viewport.show();
+    QApplication::processEvents();
+    viewport.fitAll();
+    QApplication::processEvents();
+    viewport.hide();
 
     QTextStream(stdout)
         << document.sections().size() << " sections; "
@@ -338,12 +392,12 @@ int main(int argc, char *argv[])
     parser.addOption(smokeTest);
     QCommandLineOption studioSelfTest(
         QStringLiteral("studio-self-test"),
-        QStringLiteral("Validate section parsing and 3D DXF loading, then exit."));
+        QStringLiteral("Build, reload, and validate the OCCT NURBS model, then exit."));
     parser.addOption(studioSelfTest);
     parser.addPositionalArgument(
         QStringLiteral("studio-files"),
-        QStringLiteral("Design and DXF files used by --studio-self-test."),
-        QStringLiteral("[design-file] [dxf-file]"));
+        QStringLiteral("Design file used by --studio-self-test."),
+        QStringLiteral("[design-file]"));
     parser.process(application);
 
     if (parser.isSet(studioSelfTest)) {

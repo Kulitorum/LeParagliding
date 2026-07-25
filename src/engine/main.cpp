@@ -1,5 +1,6 @@
 #include "engine_paths.h"
 #include "input_migration.h"
+#include "nurbs_model.h"
 
 #include <array>
 #include <cstdio>
@@ -13,9 +14,10 @@ extern "C" void f_exit();
 
 namespace {
 
-constexpr std::array<std::string_view, 4> outputFiles{
+constexpr std::array<std::string_view, 5> outputFiles{
     "leparagliding.dxf",
     "lep-3d.dxf",
+    "lep-3d.step",
     "lep-out.txt",
     "lines.txt",
 };
@@ -116,8 +118,32 @@ int runEngine(const std::filesystem::path &inputArgument,
         lep_configure_paths(inputUtf8.c_str(), outputUtf8.c_str());
         std::filesystem::current_path(resourceDirectory);
 
+        lep::resetNurbsModel();
         const int result = MAIN__();
         f_exit();
+        if (result != 0) {
+            return result;
+        }
+
+        const lep::NurbsWriteResult step =
+            lep::writeNurbsStep(output / "lep-3d.step");
+        if (!step.success) {
+            std::cerr << "NURBS model error: " << step.error << '\n';
+            return 2;
+        }
+        std::cout
+            << "OCCT NURBS model: "
+            << step.surfaceCount << " surfaces, "
+            << step.splineCount << " spline curves\n"
+            << "Sewn topology: "
+            << step.sewnEdgeCount << " shared edges, "
+            << step.freeEdgeCount << " designed free edges\n"
+            << "Maximum NURBS/source deviation: "
+            << step.maximumSourceDeviationMillimetres << " mm\n"
+            << "Maximum source/legacy-grid deviation: "
+            << step.maximumLegacyAgreementMillimetres << " mm\n"
+            << "STEP model: "
+            << pathToUtf8(output / "lep-3d.step") << '\n';
         return result;
     } catch (const std::exception &exception) {
         std::cerr << "Engine error: " << exception.what() << '\n';

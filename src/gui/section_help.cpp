@@ -204,8 +204,8 @@ SectionHelp helpForSection(int number, const QString &fallbackTitle)
             "Controls the entities drawn into <code>lep-3d.dxf</code>, including profiles, "
             "ribs, panels, suspension lines and reference geometry.");
         help.notes = QStringLiteral(
-            "Enable the geometry needed in the viewport while avoiding unnecessary detail "
-            "for very large designs.");
+            "These switches affect only the legacy DXF reference output. The OCCT STEP "
+            "model and viewport always use the complete calculated NURBS geometry.");
         break;
     case 26:
         help.title = QStringLiteral("Glue vents");
@@ -224,7 +224,7 @@ SectionHelp helpForSection(int number, const QString &fallbackTitle)
             "Positive types attach the vent to the upper panel; negative types attach it "
             "to the lower panel. Percentages normally stay between 0 and 100. Section 25 "
             "must have <code>Vents 1 …</code> if you want the vent edges visible in the "
-            "3D DXF/viewport.");
+            "legacy 3D DXF; the STEP viewport is independent of DXF visibility settings.");
         help.details = QStringLiteral(
             R"(<table cellspacing="0" cellpadding="5" border="1">
 <tr><th>Record/value</th><th>Meaning</th></tr>

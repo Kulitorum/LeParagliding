@@ -20,6 +20,34 @@ extern "C" {
 #include "f2c.h"
 #include "engine_paths.h"
 
+/*
+ * OCCT model boundary. The translated numerical core still calculates the
+ * authoritative transformed airfoils and shaping law and retains every
+ * legacy DXF/STL writer. These hooks expose that source shape to OCCT without
+ * changing any numerical result used by the reference outputs. The old
+ * tessellation is supplied only as a numerical validation oracle.
+ */
+void lep_nurbs_capture_panel(const doublereal *u,
+                             const doublereal *v,
+                             const doublereal *w,
+                             const doublereal *shapingHeight,
+                             const doublereal *legacyTessellation,
+                             integer panelIndex,
+                             integer totalPointCount,
+                             integer upperPointCount,
+                             integer ventPointCount,
+                             integer segmentCount,
+                             integer includeVentSurface,
+                             integer singleSkin);
+void lep_nurbs_set_line_capture(integer enabled);
+void lep_nurbs_capture_line(doublereal x1,
+                            doublereal y1,
+                            doublereal z1,
+                            doublereal x2,
+                            doublereal y2,
+                            doublereal z2,
+                            integer colorIndex);
+
 /* Common Block Declarations */
 
 struct {
@@ -13451,13 +13479,22 @@ L12:
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      Call 3D tessellation */
 /*      nsegments=12 ! increment for more detail */
-/*      Tessellation active cases DXF, DXF ext, STL */
-	if (pp29[2] == 1 || pp29[3] == 1 || pp29[4] == 1) {
+/*
+ * The OCCT NURBS model is now an unconditional primary output. The legacy
+ * drawing switches continue to control only DXF/STL reference writers.
+ */
+	{
 	    i__1 = nribss;
 	    for (i__ = 1; i__ <= i__1; ++i__) {
 		if (rib[i__ + 101] >= .01f) {
 		    tessella_(&i__, rib, np, u, v, w, hautok, &nsegments,
 			    tesse3d);
+		    lep_nurbs_capture_panel(u, v, w, hautok, tesse3d, i__,
+			    np[i__],
+			    np[i__ + 101], np[i__ + 202], nsegments,
+			    rib[i__ + 1313] == 0. ||
+				s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2) == 0,
+			    s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2) == 0);
 		}
 	    }
 	}
@@ -34626,6 +34663,7 @@ L12:
 /*      21.6 lines 3D */
 /*      Lines A,B,C,D,... */
 /* k26d=1 */
+    lep_nurbs_set_line_capture(1);
     i__1 = cordam;
     for (i__ = 1; i__ <= i__1; ++i__) {
 	p2x = x2line[corda[i__ - 1] + (corda[i__ + 499] + corda[i__ + 999] *
@@ -34691,6 +34729,7 @@ L12:
 		    ;
 	}
     }
+    lep_nurbs_set_line_capture(0);
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      21.8 H-V-ribs 3D drawing */
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
@@ -38870,6 +38909,8 @@ L12:
 
 
 /*      line P1-P2 */
+    lep_nurbs_capture_line(*p1x, *p1y, *p1z, *p2x, *p2y, *p2z,
+	    *linecolor);
     s_wsfe(&io___2534);
     do_fio(&c__1, "LINE", (ftnlen)4);
     do_fio(&c__1, (char *)&c__8, (ftnlen)sizeof(integer));

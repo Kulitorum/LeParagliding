@@ -1,17 +1,16 @@
 #pragma once
 
-#include <QColor>
 #include <QPoint>
-#include <QPointF>
-#include <QVector>
-#include <QVector3D>
 #include <QWidget>
 
+#include <memory>
+
 class QKeyEvent;
-class QMatrix4x4;
 class QMouseEvent;
-class QPainter;
+class QPaintEngine;
 class QPaintEvent;
+class QResizeEvent;
+class QShowEvent;
 class QWheelEvent;
 
 class ParagliderView final : public QWidget
@@ -29,8 +28,9 @@ public:
     };
 
     explicit ParagliderView(QWidget *parent = nullptr);
+    ~ParagliderView() override;
 
-    bool loadDxf(const QString &path, QString *errorMessage);
+    bool loadStep(const QString &path, QString *errorMessage);
     void clearModel();
     void fitAll();
     void setView(ViewPreset preset);
@@ -39,13 +39,20 @@ public:
 
     bool isPerspective() const;
     bool hasModel() const;
-    qsizetype segmentCount() const;
+    qsizetype surfaceCount() const;
+    qsizetype rationalSurfaceCount() const;
+    qsizetype shellCount() const;
+    qsizetype splineCount() const;
+    qsizetype triangleCount() const;
     QString modelSummary() const;
 
     QSize sizeHint() const override;
 
 protected:
+    QPaintEngine *paintEngine() const override;
+    void showEvent(QShowEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -54,42 +61,12 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
 
 private:
-    struct ModelLine
-    {
-        QVector3D start;
-        QVector3D end;
-        QColor color;
-    };
+    class Impl;
+    std::unique_ptr<Impl> impl_;
 
-    struct ProjectedPoint
-    {
-        QPointF point;
-        float depth = 0.0F;
-        bool visible = false;
-    };
-
-    QVector3D cameraPosition() const;
-    ProjectedPoint project(const QVector3D &point, const QMatrix4x4 &matrix) const;
-    QMatrix4x4 viewProjectionMatrix() const;
-    void drawGrid(QPainter &painter, const QMatrix4x4 &matrix) const;
-    void drawAxes(QPainter &painter, const QMatrix4x4 &matrix) const;
-    void drawHud(QPainter &painter) const;
-    void panByPixels(const QPoint &delta);
+    void ensureNativeWindow();
+    void redraw();
     void updateCursor();
-    float sceneRadius() const;
-
-    QVector<ModelLine> lines_;
-    QVector3D boundsMin_;
-    QVector3D boundsMax_;
-    int layerCount_ = 0;
-    QString modelPath_;
-
-    QVector3D target_;
-    float azimuthDegrees_ = -45.0F;
-    float elevationDegrees_ = 28.0F;
-    float distance_ = 1000.0F;
-    float orthographicScale_ = 1000.0F;
-    bool perspective_ = true;
 
     QPoint previousMousePosition_;
     Qt::MouseButton dragButton_ = Qt::NoButton;

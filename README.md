@@ -8,7 +8,8 @@ Airfoil file references remain relative to the selected design file. Generated
 files can be written to a separate folder:
 
 - `leparagliding.dxf` — 2D manufacturing plans
-- `lep-3d.dxf` — 3D wing geometry
+- `lep-3d.step` — exact OCCT NURBS wing model
+- `lep-3d.dxf` — legacy 3D wireframe retained as a reference
 - `lep-out.txt` — calculated design data
 - `lines.txt` — suspension line data
 - `run-log.txt` — calculation progress and diagnostics
@@ -25,15 +26,16 @@ The desktop application is a complete design studio:
   can restore the whole wing to any saved state;
 - the `?` button on a section opens format guidance and a link to the full
   manual;
-- opening a design automatically calculates a fresh 3D preview in a temporary
-  folder, preventing an older exported DXF from being shown;
+- opening a design automatically calculates a fresh OCCT NURBS model in a
+  temporary folder, preventing an older exported model from being shown;
 - **Build paraglider** validates the current editors and refreshes that
   temporary preview without saving the design or writing user output files;
 - **Export files...** writes the manufacturing plans, 3D geometry, reports,
   and line data to the selected Output folder;
-- the viewport displays all `LINE` entities from `lep-3d.dxf`, with isometric,
-  front, back, left, right, top, and bottom views plus perspective and
-  orthographic projection.
+- the viewport reads `lep-3d.step` with OCCT, triangulates its exact NURBS
+  surfaces with OCCT, and renders them with the native OCCT OpenGL viewer;
+  isometric, front, back, left, right, top, and bottom views are available in
+  perspective or orthographic projection.
 
 Viewport navigation follows the slicer convention: drag with the left mouse
 button to orbit, drag with the right or middle mouse button to pan, and use the
@@ -68,9 +70,11 @@ blank lines are not valid records.
 
 ## Build on Windows
 
-The CMake preset mirrors the compiler and Qt setup used by
-`C:\CODE\cobod-slicer`: Visual Studio 2022 and the newest compatible Qt 6
-MSVC kit under `C:\Qt`.
+The CMake preset mirrors the compiler, Qt, and Open CASCADE setup used by
+`C:\CODE\cobod-slicer`: Visual Studio 2022, the newest compatible Qt 6 MSVC kit
+under `C:\Qt`, and OCCT under `C:\OpenCASCADE-8.0\build2`. CMake auto-detects
+that OCCT installation. A different compatible build can be selected with
+`-DLEP_OCCT_ROOT=C:\path\to\occt`.
 
 ```powershell
 cmake --preset windows
@@ -84,8 +88,9 @@ Run:
 .\build\bin\Release\LEparagliding.exe
 ```
 
-`windeployqt` runs after the GUI build, so the build output is directly
-runnable on the development machine.
+`windeployqt` and the OCCT runtime deployment run after the build, so the build
+output is directly runnable. The install target includes the required OCCT
+toolkit and third-party DLLs as well.
 
 The calculation engine can also be used without the GUI:
 
@@ -100,9 +105,9 @@ The main Qt executable exposes the same operation in headless mode:
 ```
 
 Both commands return the engine's exit code and generate `leparagliding.dxf`,
-`lep-3d.dxf`, `lep-out.txt`, `lines.txt`, and `run-log.txt` in the selected
-output directory. Relative airfoil paths are resolved from the design file's
-directory.
+`lep-3d.step`, the reference `lep-3d.dxf`, `lep-out.txt`, `lines.txt`, and
+`run-log.txt` in the selected output directory. Relative airfoil paths are
+resolved from the design file's directory.
 
 The 3.28 input format adds sections 33–37 for detailed risers, line
 characteristics, equilibrium calculations, XFLR5 export, and special
@@ -117,9 +122,17 @@ temporary input file. It never rewrites the selected design.
   retained for compatibility.
 - `src/engine` supplies a small typed C++ boundary, input/output path handling,
   validation, and a command-line entry point.
+- `src/model` interprets the fully transformed airfoil stations and analytical
+  circular ballooning law directly. It converts each span arc to an exact
+  rational B-spline, lofts semantic upper/vent/lower panel faces with OCCT,
+  mirrors the calculated half wing, sews matching faces into shared shell
+  topology while preserving designed intake openings, and writes an AP242
+  STEP model in millimetres. The old tessellation is used only as a numerical
+  regression oracle and remains available to the legacy DXF/STL exporters.
 - `src/gui` is the Qt Widgets application. It runs the engine in a child
   process so the interface stays responsive and legacy input failures are
-  isolated.
+  isolated. Its viewport uses OCCT for STEP import, triangulation, and OpenGL
+  presentation; it contains no application-side polygon model builder.
 - `third_party/libf2c` is the portable runtime required by the translated I/O
   statements. Its original notice is included in that directory.
 

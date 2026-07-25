@@ -27,6 +27,86 @@ endif()
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
 
+# Open CASCADE Technology is the authoritative 3D kernel for model creation,
+# STEP serialization, tessellation, and viewport rendering. The Windows
+# default mirrors C:\CODE\cobod-slicer and can be overridden for another OCCT
+# build with -DLEP_OCCT_ROOT=<path>.
+set(LEP_OCCT_ROOT "" CACHE PATH "Open CASCADE build or installation root")
+if(WIN32)
+    if(NOT LEP_OCCT_ROOT)
+        foreach(occt_candidate
+                "C:/OpenCASCADE-8.0/build2"
+                "C:/OpenCASCADE-8.0/build"
+                "C:/OpenCASCADE-7.9.0-vc14-64/opencascade-7.9.0")
+            if(EXISTS "${occt_candidate}/inc/Standard.hxx")
+                set(LEP_OCCT_ROOT "${occt_candidate}" CACHE PATH
+                    "Open CASCADE build or installation root" FORCE)
+                break()
+            endif()
+        endforeach()
+    endif()
+    set(LEP_OCCT_INCLUDE_DIR "${LEP_OCCT_ROOT}/inc")
+    set(LEP_OCCT_LIBRARY_DIR "${LEP_OCCT_ROOT}/win64/vc14/lib")
+    set(LEP_OCCT_BINARY_DIR "${LEP_OCCT_ROOT}/win64/vc14/bin")
+else()
+    find_package(OpenCASCADE REQUIRED)
+    set(LEP_OCCT_INCLUDE_DIR "${OpenCASCADE_INCLUDE_DIR}")
+    set(LEP_OCCT_LIBRARY_DIR "${OpenCASCADE_LIBRARY_DIR}")
+    set(LEP_OCCT_BINARY_DIR "${OpenCASCADE_BINARY_DIR}")
+endif()
+
+if(NOT EXISTS "${LEP_OCCT_INCLUDE_DIR}/Standard.hxx")
+    message(FATAL_ERROR
+        "Open CASCADE headers were not found. Set LEP_OCCT_ROOT to an OCCT "
+        "build/install root (current value: '${LEP_OCCT_ROOT}').")
+endif()
+
+set(LEP_OCCT_TOOLKITS
+    TKernel
+    TKMath
+    TKG2d
+    TKG3d
+    TKGeomBase
+    TKBRep
+    TKGeomAlgo
+    TKTopAlgo
+    TKMesh
+    TKService
+    TKV3d
+    TKOpenGl
+    TKDE
+    TKXSBase
+    TKDESTEP
+)
+
+add_library(lep_occt INTERFACE)
+target_include_directories(lep_occt SYSTEM BEFORE INTERFACE
+    "${LEP_OCCT_INCLUDE_DIR}"
+)
+target_compile_definitions(lep_occt INTERFACE
+    OCCT_NO_DEBUG
+    OCCT_NO_DEPRECATED
+)
+foreach(occt_toolkit IN LISTS LEP_OCCT_TOOLKITS)
+    if(WIN32)
+        set(occt_library
+            "${LEP_OCCT_LIBRARY_DIR}/${occt_toolkit}.lib")
+    else()
+        find_library(occt_library
+            NAMES "${occt_toolkit}"
+            HINTS "${LEP_OCCT_LIBRARY_DIR}"
+            REQUIRED
+            NO_CACHE
+        )
+    endif()
+    if(NOT EXISTS "${occt_library}")
+        message(FATAL_ERROR
+            "Required Open CASCADE toolkit not found: ${occt_library}")
+    endif()
+    target_link_libraries(lep_occt INTERFACE "${occt_library}")
+endforeach()
+message(STATUS "Using Open CASCADE at ${LEP_OCCT_ROOT}")
+
 file(GLOB F2C_RUNTIME_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libf2c/*.c"
 )
@@ -60,11 +140,14 @@ add_executable(leparagliding-engine
     src/engine/input_migration.h
     src/engine/main.cpp
     src/legacy/leparagliding_core.cpp
+    src/model/nurbs_model.cpp
+    src/model/nurbs_model.h
 )
 target_include_directories(leparagliding-engine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/engine"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/model"
 )
-target_link_libraries(leparagliding-engine PRIVATE f2c_runtime)
+target_link_libraries(leparagliding-engine PRIVATE f2c_runtime lep_occt)
 if(MSVC)
     set_source_files_properties(src/legacy/leparagliding_core.cpp PROPERTIES
         COMPILE_OPTIONS "/bigobj;/W0;/Zc:strictStrings-"
@@ -86,7 +169,7 @@ qt_add_executable(LEparagliding WIN32
     src/gui/section_help.cpp
     src/gui/section_help.h
 )
-target_link_libraries(LEparagliding PRIVATE Qt6::Widgets)
+target_link_libraries(LEparagliding PRIVATE Qt6::Widgets lep_occt)
 add_dependencies(LEparagliding leparagliding-engine)
 
 set_target_properties(
@@ -123,6 +206,48 @@ if(WIN32)
             COMMENT "Deploying Qt runtime"
         )
     endif()
+
+    # Runtime dependencies are broader than link-time imports: STEP and the
+    # OpenGL viewer load several OCCT support toolkits transitively.
+    set(LEP_OCCT_RUNTIME_TOOLKITS
+        ${LEP_OCCT_TOOLKITS}
+        TKBO
+        TKCAF
+        TKCDF
+        TKHLR
+        TKLCAF
+        TKPrim
+        TKShHealing
+        TKVCAF
+        TKXCAF
+    )
+    list(REMOVE_DUPLICATES LEP_OCCT_RUNTIME_TOOLKITS)
+    set(lep_occt_runtime_files)
+    foreach(occt_toolkit IN LISTS LEP_OCCT_RUNTIME_TOOLKITS)
+        list(APPEND lep_occt_runtime_files
+            "${LEP_OCCT_BINARY_DIR}/${occt_toolkit}.dll")
+    endforeach()
+    foreach(occt_dependency
+            freetype.dll
+            brotlicommon.dll
+            brotlidec.dll
+            bz2.dll
+            libpng16.dll
+            zlib1.dll)
+        if(EXISTS "${LEP_OCCT_BINARY_DIR}/${occt_dependency}")
+            list(APPEND lep_occt_runtime_files
+                "${LEP_OCCT_BINARY_DIR}/${occt_dependency}")
+        endif()
+    endforeach()
+    foreach(runtime_target LEparagliding leparagliding-engine)
+        add_custom_command(TARGET ${runtime_target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                ${lep_occt_runtime_files}
+                "$<TARGET_FILE_DIR:${runtime_target}>"
+            COMMENT "Deploying Open CASCADE runtime for ${runtime_target}"
+            COMMAND_EXPAND_LISTS
+        )
+    endforeach()
 endif()
 
 enable_testing()
@@ -141,10 +266,9 @@ add_test(NAME studio_model_smoke
     COMMAND LEparagliding
         --studio-self-test
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/3.28/leparagliding.txt"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Data/fortranResult/lep-3d.dxf"
 )
 set_tests_properties(studio_model_smoke PROPERTIES
-    TIMEOUT 20
+    TIMEOUT 180
 )
 add_test(NAME gui_headless_help COMMAND LEparagliding --headless --help)
 set_tests_properties(gui_headless_help PROPERTIES
@@ -177,3 +301,8 @@ endif()
 install(TARGETS LEparagliding leparagliding-engine
     RUNTIME DESTINATION .
 )
+if(WIN32)
+    install(FILES ${lep_occt_runtime_files}
+        DESTINATION .
+    )
+endif()

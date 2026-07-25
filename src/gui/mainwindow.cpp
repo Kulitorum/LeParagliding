@@ -61,9 +61,10 @@ struct OutputDescription
     const char *description;
 };
 
-constexpr std::array<OutputDescription, 5> outputs{{
+constexpr std::array<OutputDescription, 6> outputs{{
     {"leparagliding.dxf", "2D manufacturing plans"},
-    {"lep-3d.dxf", "3D wing geometry"},
+    {"lep-3d.step", "OCCT NURBS 3D model"},
+    {"lep-3d.dxf", "Legacy 3D wireframe (reference)"},
     {"lep-out.txt", "Design calculations"},
     {"lines.txt", "Suspension line data"},
     {"run-log.txt", "Calculation progress and diagnostics"},
@@ -1622,7 +1623,7 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
     const CalculationMode completedMode = calculationMode_;
     const QString completedOutput = calculationOutputDirectory_;
     const QString modelPath =
-        QDir(completedOutput).filePath(QStringLiteral("lep-3d.dxf"));
+        QDir(completedOutput).filePath(QStringLiteral("lep-3d.step"));
     const bool engineSucceeded =
         exitStatus == QProcess::NormalExit && exitCode == 0;
 
@@ -1736,7 +1737,7 @@ bool MainWindow::loadViewportModel(const QString &path)
     }
 
     QString error;
-    if (!viewport_->loadDxf(path, &error)) {
+    if (!viewport_->loadStep(path, &error)) {
         viewport_->clearModel();
         modelStats_->setText(QStringLiteral("Model could not be loaded"));
         log_->appendPlainText(
