@@ -68,6 +68,40 @@ QString occFailureMessage(const Standard_Failure &failure)
                : QStringLiteral("Unknown Open CASCADE error");
 }
 
+double meshDeflectionMillimetres(double diagonalMillimetres, double deflectionScale)
+{
+    const double base = std::clamp(diagonalMillimetres * 0.00035, 0.025, 1.0);
+    return std::clamp(base * deflectionScale, 0.005, 50.0);
+}
+
+bool triangulateShape(const TopoDS_Shape &shape, double deflectionMillimetres)
+{
+    BRepTools::Clean(shape);
+    BRepMesh_IncrementalMesh mesher(
+        shape,
+        deflectionMillimetres,
+        false,
+        0.20,
+        true);
+    return mesher.IsDone();
+}
+
+int countTriangles(const TopoDS_Shape &shape)
+{
+    int triangles = 0;
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE);
+         explorer.More();
+         explorer.Next()) {
+        TopLoc_Location location;
+        const occ::handle<Poly_Triangulation> triangulation =
+            BRep_Tool::Triangulation(TopoDS::Face(explorer.Current()), location);
+        if (!triangulation.IsNull()) {
+            triangles += triangulation->NbTriangles();
+        }
+    }
+    return triangles;
+}
+
 } // namespace
 
 class ParagliderView::Impl
@@ -80,11 +114,14 @@ public:
         viewer = new V3d_Viewer(graphicDriver);
         viewer->SetDefaultLights();
         viewer->SetLightOn();
-        viewer->SetDefaultComputedMode(true);
 
         context = new AIS_InteractiveContext(viewer);
+        // The explicit BRepMesh pass owns the render mesh; the presentation
+        // must not re-triangulate behind the resolution preference. Computed
+        // (hidden-line) view mode stays off — it re-runs CPU HLR over every
+        // NURBS face on each redraw, which takes seconds per frame.
+        context->DefaultDrawer()->SetAutoTriangulation(false);
         view = viewer->CreateView();
-        view->SetComputedMode(true);
         view->SetBgGradientColors(
             Quantity_Color(0.063, 0.106, 0.169, Quantity_TOC_RGB),
             Quantity_Color(0.027, 0.055, 0.094, Quantity_TOC_RGB),
@@ -131,6 +168,8 @@ public:
     double widthMillimetres = 0.0;
     double depthMillimetres = 0.0;
     double heightMillimetres = 0.0;
+    double diagonalMillimetres = 0.0;
+    double resolutionScale = 1.0;
     bool perspective = true;
 };
 
@@ -209,19 +248,12 @@ bool ParagliderView::loadStep(const QString &path, QString *errorMessage)
             std::pow(xMax - xMin, 2.0)
             + std::pow(yMax - yMin, 2.0)
             + std::pow(zMax - zMin, 2.0));
-        const double linearDeflection =
-            std::clamp(diagonal * 0.00035, 0.025, 1.0);
 
         // OCCT owns the render mesh. No application-side polygonization or
         // triangulation is used by the viewport.
-        BRepTools::Clean(shape);
-        BRepMesh_IncrementalMesh mesher(
-            shape,
-            linearDeflection,
-            false,
-            0.20,
-            true);
-        if (!mesher.IsDone()) {
+        if (!triangulateShape(
+                shape,
+                meshDeflectionMillimetres(diagonal, impl_->resolutionScale))) {
             if (errorMessage != nullptr) {
                 *errorMessage =
                     QStringLiteral("OCCT could not triangulate the NURBS model.");
@@ -233,7 +265,7 @@ bool ParagliderView::loadStep(const QString &path, QString *errorMessage)
         int rationalSurfaceCount = 0;
         int shellCount = 0;
         int splineCount = 0;
-        int triangleCount = 0;
+        const int triangleCount = countTriangles(shape);
 
         for (TopExp_Explorer explorer(shape, TopAbs_FACE);
              explorer.More();
@@ -248,13 +280,6 @@ bool ParagliderView::loadStep(const QString &path, QString *errorMessage)
                 if (nurbs->IsURational() || nurbs->IsVRational()) {
                     ++rationalSurfaceCount;
                 }
-            }
-
-            TopLoc_Location location;
-            const occ::handle<Poly_Triangulation> triangulation =
-                BRep_Tool::Triangulation(face, location);
-            if (!triangulation.IsNull()) {
-                triangleCount += triangulation->NbTriangles();
             }
         }
         for (TopExp_Explorer explorer(shape, TopAbs_EDGE);
@@ -316,6 +341,7 @@ bool ParagliderView::loadStep(const QString &path, QString *errorMessage)
         impl_->widthMillimetres = xMax - xMin;
         impl_->depthMillimetres = yMax - yMin;
         impl_->heightMillimetres = zMax - zMin;
+        impl_->diagonalMillimetres = diagonal;
 
         setView(ViewPreset::Isometric);
         fitAll();
@@ -345,7 +371,35 @@ void ParagliderView::clearModel()
     impl_->widthMillimetres = 0.0;
     impl_->depthMillimetres = 0.0;
     impl_->heightMillimetres = 0.0;
+    impl_->diagonalMillimetres = 0.0;
     redraw();
+}
+
+void ParagliderView::setTriangulationResolution(double deflectionScale)
+{
+    const double scale = std::clamp(deflectionScale, 0.05, 32.0);
+    if (qFuzzyCompare(scale, impl_->resolutionScale)) {
+        return;
+    }
+    impl_->resolutionScale = scale;
+    if (!hasModel()) {
+        return;
+    }
+
+    triangulateShape(
+        impl_->shape,
+        meshDeflectionMillimetres(impl_->diagonalMillimetres, scale));
+    impl_->triangles = countTriangles(impl_->shape);
+    if (!impl_->presentation.IsNull()) {
+        impl_->presentation->SetToUpdate();
+        impl_->context->Redisplay(impl_->presentation, false);
+    }
+    redraw();
+}
+
+double ParagliderView::triangulationResolution() const
+{
+    return impl_->resolutionScale;
 }
 
 void ParagliderView::fitAll()

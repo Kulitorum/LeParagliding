@@ -32,6 +32,8 @@ public:
 
     bool loadStep(const QString &path, QString *errorMessage);
     void clearModel();
+    void setTriangulationResolution(double deflectionScale);
+    double triangulationResolution() const;
     void fitAll();
     void setView(ViewPreset preset);
     void setPerspective(bool enabled);

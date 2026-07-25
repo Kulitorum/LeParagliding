@@ -54,6 +54,7 @@ private:
     bool saveDesign(bool showConfirmation = true);
     bool maybeSaveChanges();
     void showSectionHelp(int index);
+    void showPreferences();
     void showVersionHistory();
     void restoreVersion(int revisionIndex);
     void syncPersistedSectionHistories();

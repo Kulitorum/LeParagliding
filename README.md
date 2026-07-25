@@ -35,7 +35,10 @@ The desktop application is a complete design studio:
 - the viewport reads `lep-3d.step` with OCCT, triangulates its exact NURBS
   surfaces with OCCT, and renders them with the native OCCT OpenGL viewer;
   isometric, front, back, left, right, top, and bottom views are available in
-  perspective or orthographic projection.
+  perspective or orthographic projection;
+- **Preferences…** adjusts the viewport triangulation resolution from very
+  coarse to ultra fine; the setting applies immediately, is remembered between
+  sessions, and never affects exported files.
 
 Viewport navigation follows the slicer convention: drag with the left mouse
 button to orbit, drag with the right or middle mouse button to pan, and use the

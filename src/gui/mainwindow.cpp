@@ -17,6 +17,8 @@
 #include <QFontMetricsF>
 #include <QFrame>
 #include <QGridLayout>
+#include <QGroupBox>
+#include <QGuiApplication>
 #include <QHeaderView>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -34,6 +36,7 @@
 #include <QScrollBar>
 #include <QSaveFile>
 #include <QSettings>
+#include <QSlider>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QSyntaxHighlighter>
@@ -50,7 +53,9 @@
 #include <QVBoxLayout>
 
 #include <array>
+#include <cmath>
 #include <functional>
+#include <limits>
 #include <utility>
 
 namespace {
@@ -60,6 +65,40 @@ struct OutputDescription
     const char *fileName;
     const char *description;
 };
+
+struct MeshResolutionStep
+{
+    const char *label;
+    double deflectionScale;
+};
+
+// Multipliers on the viewport's base triangulation deflection; larger scale
+// means coarser mesh. Each step halves the deflection of the previous one.
+constexpr std::array<MeshResolutionStep, 7> meshResolutionSteps{{
+    {"Very coarse", 8.0},
+    {"Coarse", 4.0},
+    {"Reduced", 2.0},
+    {"Standard", 1.0},
+    {"Fine", 0.5},
+    {"Very fine", 0.25},
+    {"Ultra fine", 0.125},
+}};
+
+int nearestMeshResolutionIndex(double deflectionScale)
+{
+    int best = 0;
+    double bestDistance = std::numeric_limits<double>::max();
+    for (std::size_t index = 0; index < meshResolutionSteps.size(); ++index) {
+        const double distance = std::abs(
+            std::log(meshResolutionSteps.at(index).deflectionScale)
+            - std::log(deflectionScale));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = static_cast<int>(index);
+        }
+    }
+    return best;
+}
 
 constexpr std::array<OutputDescription, 6> outputs{{
     {"leparagliding.dxf", "2D manufacturing plans"},
@@ -391,6 +430,9 @@ void MainWindow::buildInterface()
     hero->addLayout(titles);
     hero->addStretch();
 
+    auto *preferencesButton = new QPushButton(QStringLiteral("Preferences…"), central);
+    preferencesButton->setObjectName(QStringLiteral("quietButton"));
+    hero->addWidget(preferencesButton);
     auto *manualButton = new QPushButton(QStringLiteral("Manual"), central);
     manualButton->setObjectName(QStringLiteral("quietButton"));
     hero->addWidget(manualButton);
@@ -713,6 +755,33 @@ void MainWindow::buildInterface()
             width: 6px;
             height: 6px;
         }
+        QGroupBox {
+            border: 1px solid #26354a;
+            border-radius: 8px;
+            margin-top: 10px;
+            font-weight: 600;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 4px;
+            color: #f7fbff;
+        }
+        QSlider::groove:horizontal {
+            background: #172235;
+            border: 1px solid #2c3c51;
+            height: 6px;
+            border-radius: 3px;
+        }
+        QSlider::handle:horizontal {
+            background: #38bdf8;
+            width: 14px;
+            margin: -5px 0;
+            border-radius: 7px;
+        }
+        QSlider::handle:horizontal:hover {
+            background: #63cdf8;
+        }
         QPushButton, QToolButton {
             border-radius: 6px;
             padding: 7px 11px;
@@ -783,6 +852,9 @@ void MainWindow::buildInterface()
     });
     connect(manualButton, &QPushButton::clicked, this, [] {
         QDesktopServices::openUrl(QUrl(QString::fromLatin1(manualUrl)));
+    });
+    connect(preferencesButton, &QPushButton::clicked, this, [this] {
+        showPreferences();
     });
     connect(outputBrowseButton_, &QPushButton::clicked, this, [this] {
         browseForOutput();
@@ -1817,6 +1889,89 @@ void MainWindow::refreshSectionLabels()
     }
 }
 
+void MainWindow::showPreferences()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Preferences"));
+    dialog.setMinimumWidth(480);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->setSpacing(12);
+
+    auto *viewportGroup = new QGroupBox(QStringLiteral("3D viewport"), &dialog);
+    auto *viewportLayout = new QGridLayout(viewportGroup);
+    viewportLayout->setContentsMargins(14, 18, 14, 12);
+    viewportLayout->setHorizontalSpacing(10);
+    viewportLayout->setVerticalSpacing(8);
+    viewportLayout->setColumnStretch(1, 1);
+
+    auto *resolutionLabel =
+        new QLabel(QStringLiteral("Triangulation resolution"), viewportGroup);
+    resolutionLabel->setObjectName(QStringLiteral("fieldLabel"));
+    viewportLayout->addWidget(resolutionLabel, 0, 0);
+
+    auto *resolutionSlider = new QSlider(Qt::Horizontal, viewportGroup);
+    resolutionSlider->setRange(
+        0,
+        static_cast<int>(meshResolutionSteps.size()) - 1);
+    resolutionSlider->setPageStep(1);
+    resolutionSlider->setTickPosition(QSlider::TicksBelow);
+    resolutionSlider->setTickInterval(1);
+    // Remeshing is expensive, so only apply once the drag is released.
+    resolutionSlider->setTracking(false);
+    resolutionSlider->setValue(
+        nearestMeshResolutionIndex(viewport_->triangulationResolution()));
+    viewportLayout->addWidget(resolutionSlider, 0, 1);
+
+    auto *resolutionValue = new QLabel(viewportGroup);
+    resolutionValue->setMinimumWidth(150);
+    viewportLayout->addWidget(resolutionValue, 0, 2);
+
+    auto *resolutionHint = new QLabel(
+        QStringLiteral(
+            "Controls how closely the viewport triangulates the exact NURBS "
+            "surfaces. Finer settings look smoother but take longer to mesh; "
+            "exported files are not affected."),
+        viewportGroup);
+    resolutionHint->setObjectName(QStringLiteral("hint"));
+    resolutionHint->setWordWrap(true);
+    viewportLayout->addWidget(resolutionHint, 1, 0, 1, 3);
+    layout->addWidget(viewportGroup);
+
+    const auto describeStep = [this](int index) {
+        QString text =
+            QString::fromLatin1(meshResolutionSteps.at(index).label);
+        if (viewport_->hasModel()) {
+            text += QStringLiteral(" · %L1 triangles")
+                        .arg(viewport_->triangleCount());
+        }
+        return text;
+    };
+    resolutionValue->setText(describeStep(resolutionSlider->value()));
+
+    connect(resolutionSlider, &QSlider::sliderMoved, resolutionValue,
+            [resolutionValue](int index) {
+                resolutionValue->setText(
+                    QString::fromLatin1(meshResolutionSteps.at(index).label));
+            });
+    connect(resolutionSlider, &QSlider::valueChanged, &dialog,
+            [this, describeStep, resolutionValue](int index) {
+                QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+                viewport_->setTriangulationResolution(
+                    meshResolutionSteps.at(index).deflectionScale);
+                QGuiApplication::restoreOverrideCursor();
+                if (viewport_->hasModel()) {
+                    modelStats_->setText(viewport_->modelSummary());
+                }
+                resolutionValue->setText(describeStep(index));
+            });
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    dialog.exec();
+}
+
 void MainWindow::loadSettings()
 {
     QSettings settings;
@@ -1824,6 +1979,9 @@ void MainWindow::loadSettings()
     const QString output = settings.value(QStringLiteral("paths/output")).toString();
     inputEdit_->setText(input);
     outputEdit_->setText(output);
+    viewport_->setTriangulationResolution(
+        settings.value(QStringLiteral("viewport/meshResolutionScale"), 1.0)
+            .toDouble());
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
@@ -1832,6 +1990,9 @@ void MainWindow::saveSettings() const
     QSettings settings;
     settings.setValue(QStringLiteral("paths/input"), inputEdit_->text());
     settings.setValue(QStringLiteral("paths/output"), outputEdit_->text());
+    settings.setValue(
+        QStringLiteral("viewport/meshResolutionScale"),
+        viewport_->triangulationResolution());
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
