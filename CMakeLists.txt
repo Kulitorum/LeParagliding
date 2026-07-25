@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
     LEparagliding
-    VERSION 3.17.0
-    DESCRIPTION "Qt C++ port of LEparagliding 3.17"
+    VERSION 3.28.0
+    DESCRIPTION "Qt C++ port of LEparagliding 3.28"
     LANGUAGES C CXX
 )
 
@@ -56,6 +56,8 @@ endif()
 add_executable(leparagliding-engine
     src/engine/engine_paths.cpp
     src/engine/engine_paths.h
+    src/engine/input_migration.cpp
+    src/engine/input_migration.h
     src/engine/main.cpp
     src/legacy/leparagliding_core.cpp
 )
@@ -68,6 +70,10 @@ if(MSVC)
         COMPILE_OPTIONS "/bigobj;/W0;/Zc:strictStrings-"
     )
 endif()
+
+add_executable(reference-report-compare
+    tests/reference_report_compare.cpp
+)
 
 qt_add_executable(LEparagliding WIN32
     src/gui/design_document.cpp
@@ -83,12 +89,20 @@ qt_add_executable(LEparagliding WIN32
 target_link_libraries(LEparagliding PRIVATE Qt6::Widgets)
 add_dependencies(LEparagliding leparagliding-engine)
 
-set_target_properties(LEparagliding leparagliding-engine PROPERTIES
+set_target_properties(
+    LEparagliding
+    leparagliding-engine
+    reference-report-compare
+    PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
     string(TOUPPER "${configuration}" configuration_upper)
-    set_target_properties(LEparagliding leparagliding-engine PROPERTIES
+    set_target_properties(
+        LEparagliding
+        leparagliding-engine
+        reference-report-compare
+        PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
     )
 endforeach()
@@ -126,7 +140,7 @@ set_tests_properties(gui_smoke PROPERTIES
 add_test(NAME studio_model_smoke
     COMMAND LEparagliding
         --studio-self-test
-        "${CMAKE_CURRENT_SOURCE_DIR}/Data/leparagliding.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/3.28/leparagliding.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/Data/fortranResult/lep-3d.dxf"
 )
 set_tests_properties(studio_model_smoke PROPERTIES
@@ -137,17 +151,19 @@ set_tests_properties(gui_headless_help PROPERTIES
     TIMEOUT 20
 )
 
-set(reference_input "${CMAKE_CURRENT_SOURCE_DIR}/Data/leparagliding.txt")
-set(reference_directory "${CMAKE_CURRENT_SOURCE_DIR}/Data/fortranResult")
+set(reference_input
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/3.28/leparagliding.txt")
+set(reference_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/reference/3.28")
 if(WIN32
    AND EXISTS "${reference_input}"
-   AND EXISTS "${reference_directory}/leparagliding.dxf"
-   AND EXISTS "${reference_directory}/lep-3d.dxf"
    AND EXISTS "${reference_directory}/lep-out.txt"
-   AND EXISTS "${reference_directory}/lines.txt")
+   AND EXISTS "${reference_directory}/lines.txt"
+   AND EXISTS "${reference_directory}/run-log.txt")
     add_test(NAME engine_matches_fortran_reference
         COMMAND "${CMAKE_COMMAND}"
             "-DENGINE=$<TARGET_FILE:leparagliding-engine>"
+            "-DREPORT_COMPARATOR=$<TARGET_FILE:reference-report-compare>"
             "-DINPUT=${reference_input}"
             "-DOUTPUT_DIR=${CMAKE_BINARY_DIR}/reference-test-output"
             "-DREFERENCE_DIR=${reference_directory}"

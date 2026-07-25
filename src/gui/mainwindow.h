@@ -44,6 +44,13 @@ private:
     bool saveDesign(bool showConfirmation = true);
     bool maybeSaveChanges();
     void showSectionHelp(int index);
+    void showVersionHistory();
+    void restoreVersion(int revisionIndex);
+    void syncPersistedSectionHistories();
+    void undoSection(int index);
+    void redoSection(int index);
+    void updateUndoRedoAvailability(int index);
+    void refreshInputDetails();
     void startCalculation();
     void appendProcessOutput();
     void calculationFinished(int exitCode, QProcess::ExitStatus exitStatus);
@@ -64,6 +71,8 @@ private:
     QVector<QString> savedSectionTexts_;
     QVector<QPushButton *> undoButtons_;
     QVector<QPushButton *> redoButtons_;
+    QVector<QStringList> persistedSectionHistories_;
+    QVector<int> persistedSectionHistoryPositions_;
     QSet<int> dirtySections_;
     bool documentDirty_ = false;
     bool loadingEditors_ = false;
@@ -75,6 +84,7 @@ private:
     QLabel *modelStats_ = nullptr;
     QListWidget *sectionList_ = nullptr;
     QStackedWidget *sectionPages_ = nullptr;
+    QPushButton *historyButton_ = nullptr;
     QPushButton *saveButton_ = nullptr;
     QPushButton *buildButton_ = nullptr;
     QPushButton *openFolderButton_ = nullptr;

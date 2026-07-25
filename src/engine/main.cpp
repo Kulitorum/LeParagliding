@@ -1,4 +1,5 @@
 #include "engine_paths.h"
+#include "input_migration.h"
 
 #include <array>
 #include <cstdio>
@@ -19,10 +20,20 @@ constexpr std::array<std::string_view, 4> outputFiles{
     "lines.txt",
 };
 
+constexpr std::array<std::string_view, 7> additionalOutputFiles{
+    "run-log.txt",
+    "lep-3d-surfaces.dxf",
+    "stl/lep-3d-surfaces.scad",
+    "stl/lep-3d-surfaces.stl",
+    "stl/Upper-surface.stl",
+    "stl/Vents-surface.stl",
+    "stl/Lower-surface.stl",
+};
+
 void printUsage()
 {
     std::cout
-        << "LEparagliding C++ engine 3.17\n"
+        << "LEparagliding C++ engine 3.28\n"
         << "Usage: leparagliding-engine <design-file> <output-directory>\n"
         << "\n"
         << "Relative airfoil paths are resolved from the design file's directory.\n";
@@ -55,17 +66,40 @@ int runEngine(const std::filesystem::path &inputArgument,
             return 2;
         }
 
-        for (const auto fileName : outputFiles) {
+        const auto removeOutput = [&output](std::string_view fileName) {
             std::error_code error;
             std::filesystem::remove(output / fileName, error);
             if (error) {
                 std::cerr << "Cannot replace output file "
                           << pathToUtf8(output / fileName) << ": " << error.message() << '\n';
+                return false;
+            }
+            return true;
+        };
+        for (const auto fileName : outputFiles) {
+            if (!removeOutput(fileName)) {
+                return 2;
+            }
+        }
+        for (const auto fileName : additionalOutputFiles) {
+            if (!removeOutput(fileName)) {
                 return 2;
             }
         }
 
-        const std::string inputUtf8 = pathToUtf8(input);
+        PreparedInput preparedInput = PreparedInput::forVersion328(input, output);
+        if (preparedInput.addedVersion328Sections()) {
+            std::cout
+                << "Compatibility: added disabled defaults for sections 33-37 "
+                   "to a temporary LEparagliding 3.28 input.\n";
+        }
+        if (preparedInput.strippedEmbeddedHistory()) {
+            std::cout
+                << "Compatibility: excluded embedded Studio version history "
+                   "from the calculation input.\n";
+        }
+
+        const std::string inputUtf8 = pathToUtf8(preparedInput.path());
         const std::string outputUtf8 = pathToUtf8(output);
         lep_configure_paths(inputUtf8.c_str(), outputUtf8.c_str());
         std::filesystem::current_path(input.parent_path());

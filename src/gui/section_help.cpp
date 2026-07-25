@@ -313,43 +313,135 @@ SectionHelp helpForSection(int number, const QString &fallbackTitle)
     case 33:
         help.title = QStringLiteral("Detailed risers");
         help.purpose = QStringLiteral(
-            "Defines detailed riser geometry and connection points for newer file versions.");
+            "Overrides the common riser length from section 8 with an individual length "
+            "for each riser group.");
+        help.format = QStringLiteral(
+            "The first data record enables the module. With <code>0</code>, every riser "
+            "uses <code>clengr</code> from section 8. With <code>1</code>, the next record "
+            "is the riser-layout type, followed by one <code>label length</code> record "
+            "per riser group declared by section 9.");
         help.notes = QStringLiteral(
-            "This section is version-specific; retain the counted structure from a current "
-            "template.");
+            "Lengths are centimetres. Type <code>1</code> (normal separate risers) is the "
+            "implemented 3.28 layout. Types 2–4 are reserved placeholders and currently "
+            "read no geometry.");
+        help.details = QStringLiteral(
+            R"(<table cellspacing="0" cellpadding="5" border="1">
+<tr><th>Record</th><th>Meaning</th></tr>
+<tr><td><code>0</code></td><td>Disable detailed risers; copy the section 8 riser length to A–E.</td></tr>
+<tr><td><code>1</code></td><td>Enable detailed risers.</td></tr>
+<tr><td><code>1</code> (layout type)</td><td>Normal risers. One following row is required for each riser group.</td></tr>
+<tr><td><code>A 47.0 cm</code></td><td>Label A and its 47.0 cm length. Text after the number is ignored, so the unit is documentary.</td></tr>
+</table>)");
         break;
     case 34:
         help.title = QStringLiteral("Line characteristics");
         help.purpose = QStringLiteral(
-            "Assigns line types, diameters, colors and material characteristics used in "
-            "reports and optional colored 3D line drawings.");
+            "Defines the physical line/riser catalogue used to calculate length, mass, "
+            "frontal area, drag, strength labels and CAD colors.");
+        help.format = QStringLiteral(
+            "Use <code>0</code> for the six built-in types. For a custom catalogue use "
+            "<code>1</code>, then the number of types, followed by that many rows. "
+            "Cylindrical rows use "
+            "<code>id c diameter label strength daN material mass g loop loopLength cm color</code>. "
+            "Rectangular riser rows use <code>id r width thickness</code> before the label.");
         help.notes = QStringLiteral(
-            "Line type identifiers must match the suspension topology and declared table.");
+            "Diameter/width and thickness are millimetres; strength is daN; mass is grams "
+            "per metre; loop length is centimetres. The final integer is the AutoCAD color "
+            "index. Type IDs referenced by the section 9 line matrix must exist here.");
+        help.details = QStringLiteral(
+            R"(<table cellspacing="0" cellpadding="5" border="1">
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>id</code></td><td>Line type number used by the suspension-line matrix.</td></tr>
+<tr><td><code>c</code> / <code>r</code></td><td>Cylindrical line/riser with one diameter, or rectangular riser with width and thickness.</td></tr>
+<tr><td><code>label</code></td><td>Short human-readable product/type name printed in reports.</td></tr>
+<tr><td><code>strength</code></td><td>Rated breaking strength in daN.</td></tr>
+<tr><td><code>material</code></td><td>Material label printed in the line report.</td></tr>
+<tr><td><code>mass</code></td><td>Linear mass in g/m, used for total line-system mass.</td></tr>
+<tr><td><code>loop</code></td><td>Loop construction code (<code>s</code> or <code>p</code>); it changes the drag-area correction.</td></tr>
+<tr><td><code>loopLength</code></td><td>Extra length at each end in centimetres.</td></tr>
+<tr><td><code>color</code></td><td>AutoCAD color index, used when special code 1341 enables per-type colors.</td></tr>
+</table>)");
         break;
     case 35:
         help.title = QStringLiteral("Equilibrium equations");
         help.purpose = QStringLiteral(
-            "Configures the optional force and equilibrium calculation for wing, pilot and "
-            "line-system loads.");
+            "Solves an informative longitudinal force balance for the wing, line system "
+            "and pilot, and writes estimated speed, glide angle, loads and drag.");
+        help.format = QStringLiteral(
+            "Use <code>0</code> to disable the solver. With <code>1</code>, supply exactly "
+            "18 named values in this order: <code>g ro mu V Alpha Cl cle Cd cde Cm "
+            "Spilot Cdpilot Mw Mp Pmc Mql Ycp Zcp</code>. The names and trailing unit text "
+            "are labels; record order determines what is read.");
         help.notes = QStringLiteral(
-            "Mass, drag and center-of-pressure inputs require validated engineering data.");
+            "Alpha is degrees; masses are kg except quick-link mass <code>Mql</code> in "
+            "grams; areas and center coordinates are metres. Coefficients normally come "
+            "from XFLR5/CFD or measured data. This is an estimate, not structural or "
+            "flight-safety validation.");
+        help.details = QStringLiteral(
+            R"(<table cellspacing="0" cellpadding="5" border="1">
+<tr><th>Field</th><th>Meaning / unit</th></tr>
+<tr><td><code>g</code></td><td>Gravity, m/s².</td></tr>
+<tr><td><code>ro</code>, <code>mu</code></td><td>Air density in kg/m³ and dynamic viscosity in µPa·s.</td></tr>
+<tr><td><code>V</code>, <code>Alpha</code></td><td>Initial flow speed in m/s and wing angle of attack in degrees.</td></tr>
+<tr><td><code>Cl</code>, <code>Cd</code>, <code>Cm</code></td><td>Wing lift, drag and moment coefficients.</td></tr>
+<tr><td><code>cle</code>, <code>cde</code></td><td>Multipliers for the lift and drag coefficients.</td></tr>
+<tr><td><code>Spilot</code>, <code>Cdpilot</code></td><td>Pilot/harness frontal area in m² and drag coefficient.</td></tr>
+<tr><td><code>Mw</code>, <code>Mp</code></td><td>Wing and pilot-plus-harness masses in kg.</td></tr>
+<tr><td><code>Pmc</code></td><td>Pilot mass-center distance below the main carabiners, m.</td></tr>
+<tr><td><code>Mql</code></td><td>Mass of one quick link, grams.</td></tr>
+<tr><td><code>Ycp</code>, <code>Zcp</code></td><td>Wing center-of-pressure coordinates, m, in LEparagliding's Y/Z axes.</td></tr>
+</table>)");
         break;
     case 36:
         help.title = QStringLiteral("XFLR5 export");
         help.purpose = QStringLiteral(
-            "Creates panel and airfoil files for an optional XFLR5 aerodynamic analysis.");
+            "Exports an XFLR5 wing-import file and one normalized <code>.dat</code> airfoil "
+            "per rib into the output folder's <code>xflr5</code> subdirectory.");
+        help.format = QStringLiteral(
+            "Use <code>0</code> to disable export. With <code>1</code>, provide a comment "
+            "record, then four integer panel controls: chordwise panels, panels per cell, "
+            "chordwise distribution, spanwise distribution; provide another comment "
+            "record and the billowed-airfoil switch.");
         help.notes = QStringLiteral(
-            "Use zero to disable it. XFLR5 cannot represent every paraglider geometry, "
-            "especially rotated or single-skin configurations.");
+            "Distribution <code>0</code> is uniform and <code>1</code> requests cosine "
+            "spacing. The final billowed-airfoil value is read but not used by the 3.28 "
+            "exporter. XFLR5 cannot represent every paraglider or single-skin detail.");
+        help.details = QStringLiteral(
+            R"(<table cellspacing="0" cellpadding="5" border="1">
+<tr><th>Example</th><th>Meaning</th></tr>
+<tr><td><code>10</code></td><td>10 panels along the chord.</td></tr>
+<tr><td><code>5</code></td><td>5 spanwise panels per cell.</td></tr>
+<tr><td><code>1</code></td><td>Cosine distribution along the chord.</td></tr>
+<tr><td><code>0</code></td><td>Uniform distribution along the span.</td></tr>
+<tr><td><code>0</code></td><td>Billowed-airfoil option; reserved/unused in 3.28.</td></tr>
+</table>)");
         break;
     case 37:
         help.title = QStringLiteral("Special parameters");
         help.purpose = QStringLiteral(
-            "A versioned extension table for special control codes that do not fit earlier "
-            "sections.");
+            "Holds optional versioned feature switches that alter STL resolution, line "
+            "colors, equilibrium reporting, mass-center assumptions and minirib shaping.");
+        help.format = QStringLiteral(
+            "Use <code>0</code> for all 3.28 defaults. With <code>1</code>, the next record "
+            "is the number of code rows, followed by exactly that many "
+            "<code>code value...</code> records.");
         help.notes = QStringLiteral(
-            "Use zero unless a documented control code is required. Unknown codes can alter "
-            "unrelated calculations.");
+            "Unknown codes are consumed but ignored. Keep the declared row count exact. "
+            "These are low-level controls; change one at a time and inspect both the report "
+            "and generated geometry.");
+        help.details = QStringLiteral(
+            R"(<table cellspacing="0" cellpadding="5" border="1">
+<tr><th>Code</th><th>Value</th></tr>
+<tr><td><code>1291 n</code></td><td>Transverse segment count for tessellated STL surfaces; default 12.</td></tr>
+<tr><td><code>1341 0|1</code></td><td>Use the section 34 AutoCAD color for each line type.</td></tr>
+<tr><td><code>1146 percent</code></td><td>Typical section center of mass as percent chord; default 36.</td></tr>
+<tr><td><code>1351 method</code></td><td>Equilibrium solver method. Method 1 is the normal Casellas method; other experimental methods are retained by upstream.</td></tr>
+<tr><td><code>1352 1|2</code></td><td>Use flat (1) or projected (2) wing area in the equilibrium solver; default 2.</td></tr>
+<tr><td><code>1353 0|1|2</code></td><td>Normal (0), detailed (1), or extended detailed (2) report output.</td></tr>
+<tr><td><code>2000 "date"</code></td><td>Edition date printed into output metadata.</td></tr>
+<tr><td><code>2003 angle</code></td><td>Force the assiette angle in degrees for local angle calculations.</td></tr>
+<tr><td><code>3001 mode a b</code></td><td>Minirib transition: 0 disabled, 1 linear, 2 parabolic, 3 cosinusoidal, with two shaping parameters.</td></tr>
+</table>)");
         break;
     default:
         help.purpose = QStringLiteral(

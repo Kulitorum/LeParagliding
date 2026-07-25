@@ -27,6 +27,51 @@ std::string pathToUtf8(const std::filesystem::path &path)
     return {reinterpret_cast<const char *>(encoded.data()), encoded.size()};
 }
 
+std::string trimFortranString(const char *text, int length)
+{
+    if (text == nullptr || length <= 0) {
+        return {};
+    }
+
+    std::string result(text, static_cast<std::size_t>(length));
+    while (!result.empty()
+           && (result.back() == ' ' || result.back() == '\0'
+               || result.back() == '\r' || result.back() == '\n')) {
+        result.pop_back();
+    }
+    return result;
+}
+
+std::filesystem::path safeRelativeOutputPath(std::string name)
+{
+    std::replace(name.begin(), name.end(), '\\', '/');
+
+    std::filesystem::path result;
+    for (const auto &component : std::filesystem::u8path(name)) {
+        if (component.empty() || component == "." || component == ".."
+            || component == component.root_name()
+            || component == component.root_directory()) {
+            continue;
+        }
+        result /= component;
+    }
+    return result;
+}
+
+char *cacheOutputPath(const std::filesystem::path &relativePath)
+{
+    const std::filesystem::path fullPath = outputDirectory / relativePath;
+    if (fullPath.has_parent_path()) {
+        std::filesystem::create_directories(fullPath.parent_path());
+    }
+
+    const std::string key = pathToUtf8(relativePath);
+    const auto [iterator, inserted] =
+        outputPaths.try_emplace(key, pathToUtf8(fullPath));
+    (void)inserted;
+    return iterator->second.data();
+}
+
 #ifdef _WIN32
 std::wstring utf8ToWide(const char *text)
 {
@@ -73,11 +118,25 @@ extern "C" char *lep_output_path(const char *fileName)
         return nullptr;
     }
 
-    const std::string key(fileName);
-    const auto [iterator, inserted] = outputPaths.try_emplace(
-        key, pathToUtf8(outputDirectory / std::filesystem::u8path(key)));
-    (void)inserted;
-    return iterator->second.data();
+    return cacheOutputPath(safeRelativeOutputPath(fileName));
+}
+
+extern "C" char *lep_output_path_fortran(const char *fileName, int length)
+{
+    const std::string name = trimFortranString(fileName, length);
+    if (name.empty()) {
+        return nullptr;
+    }
+    return cacheOutputPath(safeRelativeOutputPath(name));
+}
+
+extern "C" void lep_ensure_output_subdirectory(const char *directoryName)
+{
+    if (directoryName == nullptr) {
+        return;
+    }
+    std::filesystem::create_directories(
+        outputDirectory / safeRelativeOutputPath(directoryName));
 }
 
 extern "C" int lep_path_length(const char *path)
@@ -97,11 +156,19 @@ extern "C" int lep_count_fields(const char *text, int length)
         return 0;
     }
 
-    std::istringstream input(std::string(text, static_cast<std::size_t>(length)));
-    double value = 0.0;
     int count = 0;
-    while (input >> value) {
-        ++count;
+    bool inField = false;
+    for (int index = 0; index < length; ++index) {
+        const unsigned char character = static_cast<unsigned char>(text[index]);
+        const bool whitespace =
+            character == '\0' || character == ' ' || character == '\t'
+            || character == '\r' || character == '\n' || character == '\f';
+        if (whitespace) {
+            inField = false;
+        } else if (!inField) {
+            ++count;
+            inField = true;
+        }
     }
     return count;
 }

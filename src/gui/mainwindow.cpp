@@ -19,6 +19,7 @@
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -57,11 +58,12 @@ struct OutputDescription
     const char *description;
 };
 
-constexpr std::array<OutputDescription, 4> outputs{{
+constexpr std::array<OutputDescription, 5> outputs{{
     {"leparagliding.dxf", "2D manufacturing plans"},
     {"lep-3d.dxf", "3D wing geometry"},
     {"lep-out.txt", "Design calculations"},
     {"lines.txt", "Suspension line data"},
+    {"run-log.txt", "Calculation progress and diagnostics"},
 }};
 
 constexpr auto manualUrl =
@@ -281,10 +283,27 @@ public:
     using QPlainTextEdit::QPlainTextEdit;
 
     std::function<void()> buildRequested;
+    std::function<void()> persistedUndoRequested;
+    std::function<void()> persistedRedoRequested;
 
 protected:
     void keyPressEvent(QKeyEvent *event) override
     {
+        if (event->matches(QKeySequence::Undo)
+            && !document()->isUndoAvailable()
+            && persistedUndoRequested) {
+            persistedUndoRequested();
+            event->accept();
+            return;
+        }
+        if (event->matches(QKeySequence::Redo)
+            && !document()->isRedoAvailable()
+            && persistedRedoRequested) {
+            persistedRedoRequested();
+            event->accept();
+            return;
+        }
+
         const bool enter =
             event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter;
         if (enter && !event->modifiers().testFlag(Qt::ShiftModifier)) {
@@ -372,7 +391,7 @@ void MainWindow::buildInterface()
     auto *manualButton = new QPushButton(QStringLiteral("Manual"), central);
     manualButton->setObjectName(QStringLiteral("quietButton"));
     hero->addWidget(manualButton);
-    auto *version = new QLabel(QStringLiteral("3.17 Z · Qt 6"), central);
+    auto *version = new QLabel(QStringLiteral("3.28 Jardins · Qt 6"), central);
     version->setObjectName(QStringLiteral("badge"));
     hero->addWidget(version);
     page->addLayout(hero);
@@ -406,20 +425,26 @@ void MainWindow::buildInterface()
     outputBrowse->setObjectName(QStringLiteral("secondaryButton"));
     files->addWidget(outputBrowse, 0, 6);
 
+    historyButton_ = new QPushButton(QStringLiteral("Versions…"), fileCard);
+    historyButton_->setObjectName(QStringLiteral("secondaryButton"));
+    historyButton_->setEnabled(false);
+    historyButton_->setToolTip(
+        QStringLiteral("Browse and restore versions embedded in this wing file"));
+    files->addWidget(historyButton_, 0, 7);
     saveButton_ = new QPushButton(QStringLiteral("Save"), fileCard);
     saveButton_->setObjectName(QStringLiteral("secondaryButton"));
     saveButton_->setEnabled(false);
-    files->addWidget(saveButton_, 0, 7);
+    files->addWidget(saveButton_, 0, 8);
     buildButton_ = new QPushButton(QStringLiteral("Build paraglider"), fileCard);
     buildButton_->setObjectName(QStringLiteral("primaryButton"));
     buildButton_->setMinimumWidth(155);
-    files->addWidget(buildButton_, 0, 8);
+    files->addWidget(buildButton_, 0, 9);
 
     inputDetails_ = new QLabel(
         QStringLiteral("Open a design to create its section editors."),
         fileCard);
     inputDetails_->setObjectName(QStringLiteral("hint"));
-    files->addWidget(inputDetails_, 1, 1, 1, 8);
+    files->addWidget(inputDetails_, 1, 1, 1, 9);
     page->addWidget(fileCard);
 
     auto *workspaceSplitter = new QSplitter(Qt::Vertical, central);
@@ -746,6 +771,9 @@ void MainWindow::buildInterface()
         QDesktopServices::openUrl(QUrl(QString::fromLatin1(manualUrl)));
     });
     connect(outputBrowse, &QPushButton::clicked, this, [this] { browseForOutput(); });
+    connect(historyButton_, &QPushButton::clicked, this, [this] {
+        showVersionHistory();
+    });
     connect(saveButton_, &QPushButton::clicked, this, [this] { saveDesign(); });
     connect(buildButton_, &QPushButton::clicked, this, [this] { startCalculation(); });
     connect(sectionList_, &QListWidget::currentRowChanged,
@@ -877,17 +905,14 @@ bool MainWindow::loadDesign(const QString &path, bool confirmUnsaved)
     if (outputEdit_->text().trimmed().isEmpty()) {
         outputEdit_->setText(QDir::toNativeSeparators(info.absolutePath()));
     }
-    inputDetails_->setText(
-        QStringLiteral("%1 sections · %2 · modified %3")
-            .arg(document_.sections().size())
-            .arg(humanReadableSize(info.size()))
-            .arg(info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
+    refreshInputDetails();
 
     rebuildSectionEditors();
     documentDirty_ = false;
     dirtySections_.clear();
     refreshSectionLabels();
     saveButton_->setEnabled(false);
+    historyButton_->setEnabled(true);
     statusLabel_->setText(QStringLiteral("Design loaded"));
     updateWindowTitle();
     updateRunAvailability();
@@ -903,6 +928,8 @@ void MainWindow::rebuildSectionEditors()
     savedSectionTexts_.clear();
     undoButtons_.clear();
     redoButtons_.clear();
+    persistedSectionHistories_.clear();
+    persistedSectionHistoryPositions_.clear();
     while (sectionPages_->count() > 0) {
         QWidget *page = sectionPages_->widget(0);
         sectionPages_->removeWidget(page);
@@ -944,7 +971,7 @@ void MainWindow::rebuildSectionEditors()
         auto *editorHint = new QLabel(
             QStringLiteral(
                 "Enter builds and refreshes 3D · Shift+Enter inserts a record · "
-                "Undo/Redo history is independent for this section"),
+                "Undo/Redo is independent per section and survives Save/restart"),
             sectionPage);
         editorHint->setObjectName(QStringLiteral("editorHint"));
         editorHint->setWordWrap(true);
@@ -971,6 +998,12 @@ void MainWindow::rebuildSectionEditors()
         updateLineCount();
 
         const int editorIndex = static_cast<int>(index);
+        editor->persistedUndoRequested = [this, editorIndex] {
+            undoSection(editorIndex);
+        };
+        editor->persistedRedoRequested = [this, editorIndex] {
+            redoSection(editorIndex);
+        };
         connect(helpButton, &QPushButton::clicked, this,
                 [this, editorIndex] { showSectionHelp(editorIndex); });
         auto *undoButton = new QPushButton(QStringLiteral("Undo"), sectionPage);
@@ -985,17 +1018,17 @@ void MainWindow::rebuildSectionEditors()
             QStringLiteral("Redo in this section only (Ctrl+Y)"));
         redoButton->setEnabled(false);
         header->insertWidget(header->count() - 1, redoButton);
-        connect(undoButton, &QPushButton::clicked, editor, &QPlainTextEdit::undo);
-        connect(redoButton, &QPushButton::clicked, editor, &QPlainTextEdit::redo);
+        connect(undoButton, &QPushButton::clicked, this,
+                [this, editorIndex] { undoSection(editorIndex); });
+        connect(redoButton, &QPushButton::clicked, this,
+                [this, editorIndex] { redoSection(editorIndex); });
         connect(editor, &QPlainTextEdit::undoAvailable,
-                this, [this, undoButton](bool available) {
-                    undoButton->setEnabled(
-                        available && process_->state() == QProcess::NotRunning);
+                this, [this, editorIndex](bool) {
+                    updateUndoRedoAvailability(editorIndex);
                 });
         connect(editor, &QPlainTextEdit::redoAvailable,
-                this, [this, redoButton](bool available) {
-                    redoButton->setEnabled(
-                        available && process_->state() == QProcess::NotRunning);
+                this, [this, editorIndex](bool) {
+                    updateUndoRedoAvailability(editorIndex);
                 });
         connect(editor, &QPlainTextEdit::textChanged, this,
                 [this, editor, editorIndex, updateLineCount] {
@@ -1016,16 +1049,29 @@ void MainWindow::rebuildSectionEditors()
                         && process_->state() == QProcess::NotRunning);
                     refreshSectionLabels();
                     updateWindowTitle();
+                    updateUndoRedoAvailability(editorIndex);
                 });
 
         sectionEditors_.append(editor);
-        savedSectionTexts_.append(section.text);
+        const QString savedText = document_.savedSectionText(section.number);
+        savedSectionTexts_.append(savedText.isNull() ? section.text : savedText);
         undoButtons_.append(undoButton);
         redoButtons_.append(redoButton);
         sectionPages_->addWidget(sectionPage);
     }
 
     loadingEditors_ = false;
+    syncPersistedSectionHistories();
+    dirtySections_.clear();
+    for (qsizetype index = 0; index < sectionEditors_.size(); ++index) {
+        if (sectionEditors_.at(index)->toPlainText()
+            != savedSectionTexts_.value(index)) {
+            dirtySections_.insert(static_cast<int>(index));
+        }
+    }
+    documentDirty_ = !dirtySections_.isEmpty();
+    saveButton_->setEnabled(
+        documentDirty_ && process_->state() == QProcess::NotRunning);
     refreshSectionLabels();
     if (!document_.sections().isEmpty()) {
         sectionList_->setCurrentRow(0);
@@ -1052,12 +1098,18 @@ bool MainWindow::saveDesign(bool showConfirmation)
     savedSectionTexts_.clear();
     for (QPlainTextEdit *editor : std::as_const(sectionEditors_)) {
         savedSectionTexts_.append(editor->toPlainText());
+        editor->document()->clearUndoRedoStacks();
     }
+    syncPersistedSectionHistories();
     refreshSectionLabels();
+    refreshInputDetails();
     saveButton_->setEnabled(false);
+    historyButton_->setEnabled(true);
     updateWindowTitle();
     if (showConfirmation) {
-        statusLabel_->setText(QStringLiteral("Design saved"));
+        statusLabel_->setText(
+            QStringLiteral("Design saved · version %1 embedded")
+                .arg(document_.revisionCount()));
     }
     return true;
 }
@@ -1082,6 +1134,254 @@ bool MainWindow::maybeSaveChanges()
         return saveDesign(false);
     }
     return true;
+}
+
+void MainWindow::showVersionHistory()
+{
+    if (document_.isEmpty()) {
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Embedded wing versions"));
+    dialog.resize(760, 520);
+    auto *layout = new QVBoxLayout(&dialog);
+
+    auto *explanation = new QLabel(
+        QStringLiteral(
+            "Every saved snapshot lives inside this design file. Restoring a version "
+            "loads it into the editors without deleting later history; press Save to "
+            "make the restored wing the newest version."),
+        &dialog);
+    explanation->setWordWrap(true);
+    explanation->setObjectName(QStringLiteral("hint"));
+    layout->addWidget(explanation);
+
+    auto *versions = new QListWidget(&dialog);
+    const QList<DesignRevision> revisions = document_.revisions();
+    for (int index = revisions.size() - 1; index >= 0; --index) {
+        const DesignRevision &revision = revisions.at(index);
+        const QString timestamp =
+            revision.savedAt.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        auto *item = new QListWidgetItem(
+            QStringLiteral("v%1 · %2 · %3")
+                .arg(index + 1)
+                .arg(timestamp)
+                .arg(revision.summary),
+            versions);
+        item->setData(Qt::UserRole, index);
+    }
+    layout->addWidget(versions, 1);
+
+    auto *details = new QTextBrowser(&dialog);
+    details->setMaximumHeight(125);
+    layout->addWidget(details);
+
+    const auto updateDetails = [details, revisions](QListWidgetItem *item) {
+        if (item == nullptr) {
+            details->clear();
+            return;
+        }
+        const int index = item->data(Qt::UserRole).toInt();
+        const DesignRevision &revision = revisions.at(index);
+        QStringList changed;
+        for (const int section : revision.changedSections) {
+            changed.append(QString::number(section));
+        }
+        details->setHtml(
+            QStringLiteral(
+                "<b>Version %1</b><br>"
+                "Saved: %2<br>"
+                "Commit: <code>%3</code><br>"
+                "Parent: <code>%4</code><br>"
+                "Changed sections: %5")
+                .arg(index + 1)
+                .arg(revision.savedAt.toLocalTime().toString(Qt::ISODate))
+                .arg(revision.id.left(16).toHtmlEscaped())
+                .arg(revision.parentId.isEmpty()
+                         ? QStringLiteral("root")
+                         : revision.parentId.left(16).toHtmlEscaped())
+                .arg(changed.isEmpty()
+                         ? QStringLiteral("initial snapshot")
+                         : changed.join(QStringLiteral(", "))));
+    };
+    connect(versions, &QListWidget::currentItemChanged, &dialog,
+            [updateDetails](QListWidgetItem *current, QListWidgetItem *) {
+                updateDetails(current);
+            });
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto *restore =
+        buttons->addButton(QStringLiteral("Restore selected"), QDialogButtonBox::AcceptRole);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(restore, &QPushButton::clicked, &dialog, [&dialog, versions, this] {
+        QListWidgetItem *item = versions->currentItem();
+        if (item == nullptr) {
+            return;
+        }
+        const int revisionIndex = item->data(Qt::UserRole).toInt();
+        dialog.accept();
+        restoreVersion(revisionIndex);
+    });
+    layout->addWidget(buttons);
+
+    if (versions->count() > 0) {
+        versions->setCurrentRow(0);
+    }
+    dialog.exec();
+}
+
+void MainWindow::restoreVersion(int revisionIndex)
+{
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this,
+        QStringLiteral("Restore embedded version"),
+        QStringLiteral(
+            "Replace every editor with version %1?\n\n"
+            "Unsaved edits will be discarded. Existing versions remain in the file, "
+            "and Save will add the restored wing as a new version.")
+            .arg(revisionIndex + 1),
+        QMessageBox::Yes | QMessageBox::Cancel,
+        QMessageBox::Cancel);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    QString error;
+    if (!document_.restoreRevision(revisionIndex, &error)) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Version could not be restored"),
+            error);
+        return;
+    }
+
+    rebuildSectionEditors();
+    statusLabel_->setText(
+        QStringLiteral("Version %1 restored · press Save to keep it as the newest version")
+            .arg(revisionIndex + 1));
+    updateWindowTitle();
+}
+
+void MainWindow::syncPersistedSectionHistories()
+{
+    persistedSectionHistories_.clear();
+    persistedSectionHistoryPositions_.clear();
+    for (qsizetype index = 0; index < document_.sections().size(); ++index) {
+        int position = -1;
+        QStringList history =
+            document_.sectionHistory(document_.sections().at(index).number, &position);
+        if (history.isEmpty()) {
+            history.append(document_.sections().at(index).text);
+            position = 0;
+        }
+        persistedSectionHistories_.append(std::move(history));
+        persistedSectionHistoryPositions_.append(position);
+    }
+    for (qsizetype index = 0; index < sectionEditors_.size(); ++index) {
+        updateUndoRedoAvailability(static_cast<int>(index));
+    }
+}
+
+void MainWindow::undoSection(int index)
+{
+    if (index < 0 || index >= sectionEditors_.size()
+        || process_->state() != QProcess::NotRunning) {
+        return;
+    }
+
+    QPlainTextEdit *editor = sectionEditors_.at(index);
+    if (editor->document()->isUndoAvailable()) {
+        editor->undo();
+        return;
+    }
+
+    const QStringList &history = persistedSectionHistories_.at(index);
+    int &position = persistedSectionHistoryPositions_[index];
+    if (position <= 0 || editor->toPlainText() != history.value(position)) {
+        updateUndoRedoAvailability(index);
+        return;
+    }
+
+    --position;
+    editor->setPlainText(history.at(position));
+    editor->document()->clearUndoRedoStacks();
+    updateUndoRedoAvailability(index);
+}
+
+void MainWindow::redoSection(int index)
+{
+    if (index < 0 || index >= sectionEditors_.size()
+        || process_->state() != QProcess::NotRunning) {
+        return;
+    }
+
+    QPlainTextEdit *editor = sectionEditors_.at(index);
+    if (editor->document()->isRedoAvailable()) {
+        editor->redo();
+        return;
+    }
+
+    const QStringList &history = persistedSectionHistories_.at(index);
+    int &position = persistedSectionHistoryPositions_[index];
+    if (editor->document()->isUndoAvailable()
+        || position + 1 >= history.size()
+        || editor->toPlainText() != history.value(position)) {
+        updateUndoRedoAvailability(index);
+        return;
+    }
+
+    ++position;
+    editor->setPlainText(history.at(position));
+    editor->document()->clearUndoRedoStacks();
+    updateUndoRedoAvailability(index);
+}
+
+void MainWindow::updateUndoRedoAvailability(int index)
+{
+    if (index < 0 || index >= sectionEditors_.size()
+        || index >= undoButtons_.size() || index >= redoButtons_.size()
+        || index >= persistedSectionHistories_.size()
+        || index >= persistedSectionHistoryPositions_.size()) {
+        return;
+    }
+
+    QPlainTextEdit *editor = sectionEditors_.at(index);
+    const QStringList &history = persistedSectionHistories_.at(index);
+    const int position = persistedSectionHistoryPositions_.at(index);
+    const bool running = process_->state() != QProcess::NotRunning;
+    const bool atPersistedState =
+        position >= 0 && position < history.size()
+        && editor->toPlainText() == history.at(position);
+
+    undoButtons_.at(index)->setEnabled(
+        !running
+        && (editor->document()->isUndoAvailable()
+            || (atPersistedState && position > 0)));
+    redoButtons_.at(index)->setEnabled(
+        !running
+        && (editor->document()->isRedoAvailable()
+            || (!editor->document()->isUndoAvailable()
+                && atPersistedState
+                && position + 1 < history.size())));
+}
+
+void MainWindow::refreshInputDetails()
+{
+    if (document_.filePath().isEmpty()) {
+        inputDetails_->setText(
+            QStringLiteral("Open a design to create its section editors."));
+        return;
+    }
+
+    const QFileInfo info(document_.filePath());
+    inputDetails_->setText(
+        QStringLiteral("%1 sections · %2 embedded version%3 · %4 · modified %5")
+            .arg(document_.sections().size())
+            .arg(document_.revisionCount())
+            .arg(document_.revisionCount() == 1 ? QString() : QStringLiteral("s"))
+            .arg(humanReadableSize(info.size()))
+            .arg(info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
 }
 
 void MainWindow::showSectionHelp(int index)
@@ -1206,9 +1506,10 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
             QStringLiteral("Build completed · %1").arg(viewport_->modelSummary()));
     } else {
         statusLabel_->setText(
-            QStringLiteral("Build failed · exit %1 · %2/4 files")
+            QStringLiteral("Build failed · exit %1 · %2/%3 files")
                 .arg(exitCode)
-                .arg(generatedCount));
+                .arg(generatedCount)
+                .arg(static_cast<int>(outputs.size())));
         log_->appendPlainText(
             QStringLiteral("\nThe engine did not complete. Check the section counts, "
                            "field types, referenced airfoil files and last message above."));
@@ -1277,15 +1578,18 @@ void MainWindow::setRunning(bool running)
     for (qsizetype index = 0; index < sectionEditors_.size(); ++index) {
         QPlainTextEdit *editor = sectionEditors_.at(index);
         editor->setReadOnly(running);
-        if (index < undoButtons_.size()) {
-            undoButtons_.at(index)->setEnabled(
-                !running && editor->document()->isUndoAvailable());
-        }
-        if (index < redoButtons_.size()) {
-            redoButtons_.at(index)->setEnabled(
-                !running && editor->document()->isRedoAvailable());
+        if (running) {
+            if (index < undoButtons_.size()) {
+                undoButtons_.at(index)->setEnabled(false);
+            }
+            if (index < redoButtons_.size()) {
+                redoButtons_.at(index)->setEnabled(false);
+            }
+        } else {
+            updateUndoRedoAvailability(static_cast<int>(index));
         }
     }
+    historyButton_->setEnabled(!running && !document_.isEmpty());
     saveButton_->setEnabled(!running && documentDirty_);
     buildButton_->setEnabled(!running);
     progressBar_->setRange(0, running ? 0 : 1);
