@@ -1,0 +1,8 @@
+Compiled in xubuntu 23.04:
+
+gfortran -static-libgfortran leparagliding.f 
+
+Errors detection:
+
+gfortran leparagliding.f -fmax-errors=1
+

@@ -7,6 +7,8 @@
 #include <QSet>
 #include <QVector>
 
+#include <memory>
+
 class QCloseEvent;
 class QDragEnterEvent;
 class QDropEvent;
@@ -21,6 +23,7 @@ class QTabWidget;
 class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
+class QTemporaryDir;
 class ParagliderView;
 
 class MainWindow final : public QMainWindow
@@ -35,6 +38,13 @@ protected:
     void dropEvent(QDropEvent *event) override;
 
 private:
+    enum class CalculationMode
+    {
+        None,
+        Preview,
+        Export
+    };
+
     void buildInterface();
     void connectProcess();
     void browseForInput();
@@ -51,12 +61,14 @@ private:
     void redoSection(int index);
     void updateUndoRedoAvailability(int index);
     void refreshInputDetails();
-    void startCalculation();
+    void startPreviewCalculation(bool automatic = false);
+    void startExportCalculation();
+    void startCalculation(CalculationMode mode, bool automatic);
     void appendProcessOutput();
     void calculationFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void refreshOutputFiles();
     void openOutputItem(QTreeWidgetItem *item);
-    void loadViewportModel();
+    bool loadViewportModel(const QString &path);
     void setRunning(bool running);
     void updateRunAvailability();
     void updateWindowTitle();
@@ -76,9 +88,14 @@ private:
     QSet<int> dirtySections_;
     bool documentDirty_ = false;
     bool loadingEditors_ = false;
+    CalculationMode calculationMode_ = CalculationMode::None;
+    std::unique_ptr<QTemporaryDir> calculationDirectory_;
+    QString calculationOutputDirectory_;
 
     QLineEdit *inputEdit_ = nullptr;
     QLineEdit *outputEdit_ = nullptr;
+    QPushButton *inputBrowseButton_ = nullptr;
+    QPushButton *outputBrowseButton_ = nullptr;
     QLabel *inputDetails_ = nullptr;
     QLabel *statusLabel_ = nullptr;
     QLabel *modelStats_ = nullptr;
@@ -87,6 +104,7 @@ private:
     QPushButton *historyButton_ = nullptr;
     QPushButton *saveButton_ = nullptr;
     QPushButton *buildButton_ = nullptr;
+    QPushButton *exportButton_ = nullptr;
     QPushButton *openFolderButton_ = nullptr;
     QProgressBar *progressBar_ = nullptr;
     QPlainTextEdit *log_ = nullptr;

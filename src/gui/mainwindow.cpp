@@ -32,6 +32,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollBar>
+#include <QSaveFile>
 #include <QSettings>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -41,6 +42,8 @@
 #include <QTextCharFormat>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QTemporaryDir>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QUrl>
@@ -335,7 +338,6 @@ MainWindow::MainWindow(QWidget *parent)
         loadDesign(inputEdit_->text(), false);
     }
     refreshOutputFiles();
-    loadViewportModel();
     updateRunAvailability();
     updateWindowTitle();
 }
@@ -411,19 +413,19 @@ void MainWindow::buildInterface()
     inputEdit_->setReadOnly(true);
     inputEdit_->setPlaceholderText(QStringLiteral("Open leparagliding.txt"));
     files->addWidget(inputEdit_, 0, 1, 1, 2);
-    auto *inputBrowse = new QPushButton(QStringLiteral("Open…"), fileCard);
-    inputBrowse->setObjectName(QStringLiteral("secondaryButton"));
-    files->addWidget(inputBrowse, 0, 3);
+    inputBrowseButton_ = new QPushButton(QStringLiteral("Open…"), fileCard);
+    inputBrowseButton_->setObjectName(QStringLiteral("secondaryButton"));
+    files->addWidget(inputBrowseButton_, 0, 3);
 
-    auto *outputLabel = new QLabel(QStringLiteral("Output"), fileCard);
+    auto *outputLabel = new QLabel(QStringLiteral("Export to"), fileCard);
     outputLabel->setObjectName(QStringLiteral("fieldLabel"));
     files->addWidget(outputLabel, 0, 4);
     outputEdit_ = new QLineEdit(fileCard);
-    outputEdit_->setPlaceholderText(QStringLiteral("Generated-file directory"));
+    outputEdit_->setPlaceholderText(QStringLiteral("Export directory"));
     files->addWidget(outputEdit_, 0, 5);
-    auto *outputBrowse = new QPushButton(QStringLiteral("Browse…"), fileCard);
-    outputBrowse->setObjectName(QStringLiteral("secondaryButton"));
-    files->addWidget(outputBrowse, 0, 6);
+    outputBrowseButton_ = new QPushButton(QStringLiteral("Browse…"), fileCard);
+    outputBrowseButton_->setObjectName(QStringLiteral("secondaryButton"));
+    files->addWidget(outputBrowseButton_, 0, 6);
 
     historyButton_ = new QPushButton(QStringLiteral("Versions…"), fileCard);
     historyButton_->setObjectName(QStringLiteral("secondaryButton"));
@@ -438,13 +440,21 @@ void MainWindow::buildInterface()
     buildButton_ = new QPushButton(QStringLiteral("Build paraglider"), fileCard);
     buildButton_->setObjectName(QStringLiteral("primaryButton"));
     buildButton_->setMinimumWidth(155);
+    buildButton_->setToolTip(
+        QStringLiteral("Calculate the current editors and refresh the temporary 3D preview"));
     files->addWidget(buildButton_, 0, 9);
+    exportButton_ = new QPushButton(QStringLiteral("Export files…"), fileCard);
+    exportButton_->setObjectName(QStringLiteral("secondaryButton"));
+    exportButton_->setMinimumWidth(120);
+    exportButton_->setToolTip(
+        QStringLiteral("Write manufacturing, 3D, report, and line files to Output"));
+    files->addWidget(exportButton_, 0, 10);
 
     inputDetails_ = new QLabel(
         QStringLiteral("Open a design to create its section editors."),
         fileCard);
     inputDetails_->setObjectName(QStringLiteral("hint"));
-    files->addWidget(inputDetails_, 1, 1, 1, 9);
+    files->addWidget(inputDetails_, 1, 1, 1, 10);
     page->addWidget(fileCard);
 
     auto *workspaceSplitter = new QSplitter(Qt::Vertical, central);
@@ -535,10 +545,11 @@ void MainWindow::buildInterface()
 
     log_ = new QPlainTextEdit(diagnosticsTabs_);
     log_->setReadOnly(true);
-    log_->setPlaceholderText(QStringLiteral("Build progress and diagnostics appear here."));
+    log_->setPlaceholderText(
+        QStringLiteral("Preview and export progress appears here."));
     log_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     log_->setMaximumBlockCount(5000);
-    diagnosticsTabs_->addTab(log_, QStringLiteral("Build log"));
+    diagnosticsTabs_->addTab(log_, QStringLiteral("Calculation log"));
 
     auto *outputsPage = new QWidget(diagnosticsTabs_);
     auto *outputsLayout = new QVBoxLayout(outputsPage);
@@ -560,7 +571,7 @@ void MainWindow::buildInterface()
     outputTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     outputTree_->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     outputsLayout->addWidget(outputTree_);
-    diagnosticsTabs_->addTab(outputsPage, QStringLiteral("Generated files"));
+    diagnosticsTabs_->addTab(outputsPage, QStringLiteral("Exported files"));
     workspaceSplitter->addWidget(diagnosticsTabs_);
     workspaceSplitter->setStretchFactor(0, 7);
     workspaceSplitter->setStretchFactor(1, 2);
@@ -766,24 +777,30 @@ void MainWindow::buildInterface()
         }
     )"));
 
-    connect(inputBrowse, &QPushButton::clicked, this, [this] { browseForInput(); });
+    connect(inputBrowseButton_, &QPushButton::clicked, this, [this] {
+        browseForInput();
+    });
     connect(manualButton, &QPushButton::clicked, this, [] {
         QDesktopServices::openUrl(QUrl(QString::fromLatin1(manualUrl)));
     });
-    connect(outputBrowse, &QPushButton::clicked, this, [this] { browseForOutput(); });
+    connect(outputBrowseButton_, &QPushButton::clicked, this, [this] {
+        browseForOutput();
+    });
     connect(historyButton_, &QPushButton::clicked, this, [this] {
         showVersionHistory();
     });
     connect(saveButton_, &QPushButton::clicked, this, [this] { saveDesign(); });
-    connect(buildButton_, &QPushButton::clicked, this, [this] { startCalculation(); });
+    connect(buildButton_, &QPushButton::clicked, this, [this] {
+        startPreviewCalculation();
+    });
+    connect(exportButton_, &QPushButton::clicked, this, [this] {
+        startExportCalculation();
+    });
     connect(sectionList_, &QListWidget::currentRowChanged,
             sectionPages_, &QStackedWidget::setCurrentIndex);
     connect(outputEdit_, &QLineEdit::textChanged, this, [this] {
         refreshOutputFiles();
         updateRunAvailability();
-    });
-    connect(outputEdit_, &QLineEdit::editingFinished, this, [this] {
-        loadViewportModel();
     });
     connect(openFolderButton_, &QPushButton::clicked, this, [this] {
         if (!outputEdit_->text().isEmpty()) {
@@ -838,7 +855,10 @@ void MainWindow::connectProcess()
     connect(process_, &QProcess::readyReadStandardOutput, this,
             [this] { appendProcessOutput(); });
     connect(process_, &QProcess::started, this, [this] {
-        statusLabel_->setText(QStringLiteral("Building paraglider…"));
+        statusLabel_->setText(
+            calculationMode_ == CalculationMode::Export
+                ? QStringLiteral("Writing export files…")
+                : QStringLiteral("Building 3D preview…"));
     });
     connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
@@ -848,6 +868,9 @@ void MainWindow::connectProcess()
             diagnosticsTabs_->setCurrentWidget(log_);
             setRunning(false);
             statusLabel_->setText(QStringLiteral("Engine could not start"));
+            calculationDirectory_.reset();
+            calculationOutputDirectory_.clear();
+            calculationMode_ = CalculationMode::None;
         }
     });
     connect(process_,
@@ -887,6 +910,14 @@ void MainWindow::browseForOutput()
 
 bool MainWindow::loadDesign(const QString &path, bool confirmUnsaved)
 {
+    if (process_->state() != QProcess::NotRunning) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Calculation in progress"),
+            QStringLiteral("Wait for the current preview or export to finish "
+                           "before opening another design."));
+        return false;
+    }
     if (confirmUnsaved && !maybeSaveChanges()) {
         return false;
     }
@@ -913,10 +944,20 @@ bool MainWindow::loadDesign(const QString &path, bool confirmUnsaved)
     refreshSectionLabels();
     saveButton_->setEnabled(false);
     historyButton_->setEnabled(true);
-    statusLabel_->setText(QStringLiteral("Design loaded"));
+    viewport_->clearModel();
+    modelStats_->setText(QStringLiteral("Preparing current design preview…"));
+    statusLabel_->setText(QStringLiteral("Design loaded · preview queued"));
     updateWindowTitle();
     updateRunAvailability();
     saveSettings();
+
+    const QString loadedPath = document_.filePath();
+    QTimer::singleShot(0, this, [this, loadedPath] {
+        if (document_.filePath() == loadedPath
+            && process_->state() == QProcess::NotRunning) {
+            startPreviewCalculation(true);
+        }
+    });
     return true;
 }
 
@@ -970,7 +1011,7 @@ void MainWindow::rebuildSectionEditors()
         layout->addWidget(summary);
         auto *editorHint = new QLabel(
             QStringLiteral(
-                "Enter builds and refreshes 3D · Shift+Enter inserts a record · "
+                "Enter rebuilds the 3D preview · Shift+Enter inserts a record · "
                 "Undo/Redo is independent per section and survives Save/restart"),
             sectionPage);
         editorHint->setObjectName(QStringLiteral("editorHint"));
@@ -986,8 +1027,8 @@ void MainWindow::rebuildSectionEditors()
         editor->setUndoRedoEnabled(true);
         editor->document()->clearUndoRedoStacks();
         editor->setToolTip(
-            QStringLiteral("Enter: build and refresh 3D · Shift+Enter: insert a new record"));
-        editor->buildRequested = [this] { startCalculation(); };
+            QStringLiteral("Enter: rebuild 3D preview · Shift+Enter: insert a new record"));
+        editor->buildRequested = [this] { startPreviewCalculation(); };
         new DesignSyntaxHighlighter(editor->document());
         layout->addWidget(editor, 1);
 
@@ -1258,9 +1299,16 @@ void MainWindow::restoreVersion(int revisionIndex)
 
     rebuildSectionEditors();
     statusLabel_->setText(
-        QStringLiteral("Version %1 restored · press Save to keep it as the newest version")
+        QStringLiteral("Version %1 restored · rebuilding preview")
             .arg(revisionIndex + 1));
+    viewport_->clearModel();
+    modelStats_->setText(QStringLiteral("Building restored version preview…"));
     updateWindowTitle();
+    QTimer::singleShot(0, this, [this] {
+        if (process_->state() == QProcess::NotRunning) {
+            startPreviewCalculation(true);
+        }
+    });
 }
 
 void MainWindow::syncPersistedSectionHistories()
@@ -1433,45 +1481,128 @@ void MainWindow::showSectionHelp(int index)
     dialog.exec();
 }
 
-void MainWindow::startCalculation()
+void MainWindow::startPreviewCalculation(bool automatic)
 {
+    startCalculation(CalculationMode::Preview, automatic);
+}
+
+void MainWindow::startExportCalculation()
+{
+    startCalculation(CalculationMode::Export, false);
+}
+
+void MainWindow::startCalculation(
+    CalculationMode mode,
+    bool automatic)
+{
+    if (process_->state() != QProcess::NotRunning) {
+        return;
+    }
+
+    const auto reportProblem =
+        [this, automatic](const QString &title, const QString &message) {
+            statusLabel_->setText(title);
+            log_->appendPlainText(QStringLiteral("\n%1").arg(message));
+            if (!automatic) {
+                QMessageBox::warning(this, title, message);
+            }
+        };
+
     if (document_.isEmpty() || !QFileInfo(document_.filePath()).isFile()) {
-        QMessageBox::warning(
-            this,
+        reportProblem(
             QStringLiteral("No design loaded"),
             QStringLiteral("Open a LEparagliding design before building."));
         return;
     }
-    if (!saveDesign(false)) {
+
+    const QString invalid = document_.validationError();
+    if (!invalid.isEmpty()) {
+        reportProblem(QStringLiteral("Design is not valid"), invalid);
         return;
     }
-    if (!QDir().mkpath(outputEdit_->text())) {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("Output folder unavailable"),
-            QStringLiteral("The selected output folder could not be created."));
-        return;
+
+    QString outputDirectory;
+    if (mode == CalculationMode::Export) {
+        outputDirectory = QDir(outputEdit_->text()).absolutePath();
+        if (outputEdit_->text().trimmed().isEmpty()
+            || !QDir().mkpath(outputDirectory)) {
+            reportProblem(
+                QStringLiteral("Output folder unavailable"),
+                QStringLiteral("Select a writable output folder before exporting."));
+            return;
+        }
     }
+
     if (!QFileInfo::exists(enginePath())) {
-        QMessageBox::critical(
-            this,
+        reportProblem(
             QStringLiteral("Calculation engine missing"),
             QStringLiteral("The C++ engine was not found next to the application:\n%1")
                 .arg(enginePath()));
         return;
     }
 
+    auto calculationDirectory = std::make_unique<QTemporaryDir>(
+        QDir::tempPath()
+        + QStringLiteral("/LEparagliding-preview-XXXXXX"));
+    if (!calculationDirectory->isValid()) {
+        reportProblem(
+            QStringLiteral("Temporary preview unavailable"),
+            QStringLiteral("A temporary calculation folder could not be created."));
+        return;
+    }
+
+    const QString temporaryInput =
+        calculationDirectory->filePath(QStringLiteral("leparagliding.txt"));
+    QSaveFile input(temporaryInput);
+    const QByteArray designText = document_.assembledText().toUtf8();
+    if (!input.open(QIODevice::WriteOnly)
+        || input.write(designText) != designText.size()
+        || !input.commit()) {
+        reportProblem(
+            QStringLiteral("Temporary preview unavailable"),
+            QStringLiteral("The current editor state could not be prepared:\n%1")
+                .arg(input.errorString()));
+        return;
+    }
+
+    if (mode == CalculationMode::Preview) {
+        outputDirectory =
+            calculationDirectory->filePath(QStringLiteral("output"));
+        if (!QDir().mkpath(outputDirectory)) {
+            reportProblem(
+                QStringLiteral("Temporary preview unavailable"),
+                QStringLiteral("The temporary preview output folder could not be created."));
+            return;
+        }
+        viewport_->clearModel();
+        modelStats_->setText(QStringLiteral("Building current editor preview…"));
+    }
+
+    calculationMode_ = mode;
+    calculationOutputDirectory_ = outputDirectory;
+    calculationDirectory_ = std::move(calculationDirectory);
+
     saveSettings();
     log_->clear();
     log_->appendPlainText(
-        QStringLiteral("Design: %1\nOutput: %2\n")
-            .arg(document_.filePath(), QDir(outputEdit_->text()).absolutePath()));
-    diagnosticsTabs_->setCurrentWidget(log_);
+        QStringLiteral("%1\nDesign resources: %2\nTemporary input: %3\nOutput: %4\n")
+            .arg(mode == CalculationMode::Preview
+                     ? QStringLiteral("Temporary 3D preview")
+                     : QStringLiteral("Explicit file export"),
+                 QFileInfo(document_.filePath()).absolutePath(),
+                 temporaryInput,
+                 outputDirectory));
+    if (!automatic) {
+        diagnosticsTabs_->setCurrentWidget(log_);
+    }
     setRunning(true);
 
     process_->setProgram(enginePath());
     process_->setArguments(
-        {document_.filePath(), QDir(outputEdit_->text()).absolutePath()});
+        {QStringLiteral("--resource-dir"),
+         QFileInfo(document_.filePath()).absolutePath(),
+         temporaryInput,
+         outputDirectory});
     process_->setWorkingDirectory(QFileInfo(document_.filePath()).absolutePath());
     process_->start();
 }
@@ -1487,34 +1618,80 @@ void MainWindow::appendProcessOutput()
 void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     appendProcessOutput();
-    setRunning(false);
-    refreshOutputFiles();
 
-    int generatedCount = 0;
-    for (const auto &output : outputs) {
-        if (QFileInfo::exists(outputPathFor(QString::fromLatin1(output.fileName)))) {
-            ++generatedCount;
+    const CalculationMode completedMode = calculationMode_;
+    const QString completedOutput = calculationOutputDirectory_;
+    const QString modelPath =
+        QDir(completedOutput).filePath(QStringLiteral("lep-3d.dxf"));
+    const bool engineSucceeded =
+        exitStatus == QProcess::NormalExit && exitCode == 0;
+
+    if (completedMode == CalculationMode::Preview) {
+        const bool success =
+            engineSucceeded
+            && QFileInfo::exists(modelPath)
+            && loadViewportModel(modelPath);
+        if (success) {
+            statusLabel_->setText(
+                QStringLiteral("Preview ready · %1%2")
+                    .arg(
+                        viewport_->modelSummary(),
+                        documentDirty_
+                            ? QStringLiteral(" · unsaved edits")
+                            : QString()));
+        } else {
+            statusLabel_->setText(
+                QStringLiteral("Preview failed · exit %1").arg(exitCode));
+            log_->appendPlainText(
+                QStringLiteral(
+                    "\nThe preview did not complete. Check the section data, "
+                    "referenced airfoil files, and last engine message above."));
+            diagnosticsTabs_->setCurrentWidget(log_);
+        }
+    } else if (completedMode == CalculationMode::Export) {
+        refreshOutputFiles();
+
+        int generatedCount = 0;
+        for (const auto &output : outputs) {
+            if (QFileInfo::exists(
+                    QDir(completedOutput).filePath(
+                        QString::fromLatin1(output.fileName)))) {
+                ++generatedCount;
+            }
+        }
+
+        const bool success =
+            engineSucceeded
+            && generatedCount == static_cast<int>(outputs.size());
+        if (success) {
+            const bool modelLoaded = loadViewportModel(modelPath);
+            statusLabel_->setText(
+                QStringLiteral("Export completed · %1 files%2%3")
+                    .arg(generatedCount)
+                    .arg(documentDirty_
+                             ? QStringLiteral(" · unsaved edits remain")
+                             : QString())
+                    .arg(modelLoaded
+                             ? QString()
+                             : QStringLiteral(" · preview unavailable")));
+        } else {
+            statusLabel_->setText(
+                QStringLiteral("Export failed · exit %1 · %2/%3 files")
+                    .arg(exitCode)
+                    .arg(generatedCount)
+                    .arg(static_cast<int>(outputs.size())));
+            log_->appendPlainText(
+                QStringLiteral(
+                    "\nThe export did not complete. Check the section data, "
+                    "referenced airfoil files, and last engine message above."));
+            diagnosticsTabs_->setCurrentWidget(log_);
         }
     }
 
-    const bool success =
-        exitStatus == QProcess::NormalExit && exitCode == 0
-        && generatedCount == static_cast<int>(outputs.size());
-    if (success) {
-        loadViewportModel();
-        statusLabel_->setText(
-            QStringLiteral("Build completed · %1").arg(viewport_->modelSummary()));
-    } else {
-        statusLabel_->setText(
-            QStringLiteral("Build failed · exit %1 · %2/%3 files")
-                .arg(exitCode)
-                .arg(generatedCount)
-                .arg(static_cast<int>(outputs.size())));
-        log_->appendPlainText(
-            QStringLiteral("\nThe engine did not complete. Check the section counts, "
-                           "field types, referenced airfoil files and last message above."));
-        diagnosticsTabs_->setCurrentWidget(log_);
-    }
+    calculationDirectory_.reset();
+    calculationOutputDirectory_.clear();
+    calculationMode_ = CalculationMode::None;
+    setRunning(false);
 }
 
 void MainWindow::refreshOutputFiles()
@@ -1550,13 +1727,12 @@ void MainWindow::openOutputItem(QTreeWidgetItem *item)
     }
 }
 
-void MainWindow::loadViewportModel()
+bool MainWindow::loadViewportModel(const QString &path)
 {
-    const QString path = outputPathFor(QStringLiteral("lep-3d.dxf"));
     if (!QFileInfo(path).isFile()) {
         viewport_->clearModel();
         modelStats_->setText(QStringLiteral("No model loaded"));
-        return;
+        return false;
     }
 
     QString error;
@@ -1565,15 +1741,18 @@ void MainWindow::loadViewportModel()
         modelStats_->setText(QStringLiteral("Model could not be loaded"));
         log_->appendPlainText(
             QStringLiteral("\n3D viewport: %1").arg(error));
-        return;
+        return false;
     }
     modelStats_->setText(viewport_->modelSummary());
+    return true;
 }
 
 void MainWindow::setRunning(bool running)
 {
     inputEdit_->setEnabled(!running);
     outputEdit_->setEnabled(!running);
+    inputBrowseButton_->setEnabled(!running);
+    outputBrowseButton_->setEnabled(!running);
     sectionList_->setEnabled(!running);
     for (qsizetype index = 0; index < sectionEditors_.size(); ++index) {
         QPlainTextEdit *editor = sectionEditors_.at(index);
@@ -1592,6 +1771,7 @@ void MainWindow::setRunning(bool running)
     historyButton_->setEnabled(!running && !document_.isEmpty());
     saveButton_->setEnabled(!running && documentDirty_);
     buildButton_->setEnabled(!running);
+    exportButton_->setEnabled(!running);
     progressBar_->setRange(0, running ? 0 : 1);
     progressBar_->setValue(running ? 0 : 1);
     if (!running) {
@@ -1604,9 +1784,10 @@ void MainWindow::updateRunAvailability()
     const bool ready =
         !document_.isEmpty()
         && QFileInfo(document_.filePath()).isFile()
-        && !outputEdit_->text().trimmed().isEmpty()
         && process_->state() == QProcess::NotRunning;
     buildButton_->setEnabled(ready);
+    exportButton_->setEnabled(
+        ready && !outputEdit_->text().trimmed().isEmpty());
 }
 
 void MainWindow::updateWindowTitle()

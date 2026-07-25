@@ -353,7 +353,9 @@ void ParagliderView::paintEvent(QPaintEvent *)
         painter.drawText(
             rect().adjusted(30, 20, -30, -20),
             Qt::AlignCenter,
-            QStringLiteral("3D model viewport\n\nBuild the paraglider to generate and load lep-3d.dxf"));
+            QStringLiteral(
+                "3D model viewport\n\nOpen a design or build the paraglider "
+                "to calculate a fresh preview"));
         drawHud(painter);
         return;
     }

@@ -17,11 +17,10 @@ file(WRITE "${history_input_directory}/leparagliding.txt"
     "* parity-test-history-record\n"
     "* <<< LEPARAGLIDING STUDIO HISTORY V1 <<<\n")
 get_filename_component(input_directory "${INPUT}" DIRECTORY)
-file(COPY "${input_directory}/gnuC2.txt"
-    DESTINATION "${history_input_directory}")
 
 execute_process(
     COMMAND "${ENGINE}"
+        --resource-dir "${input_directory}"
         "${history_input_directory}/leparagliding.txt"
         "${OUTPUT_DIR}"
     RESULT_VARIABLE engine_result

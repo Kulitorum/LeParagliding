@@ -34,9 +34,11 @@ void printUsage()
 {
     std::cout
         << "LEparagliding C++ engine 3.28\n"
-        << "Usage: leparagliding-engine <design-file> <output-directory>\n"
+        << "Usage: leparagliding-engine [--resource-dir <directory>] "
+           "<design-file> <output-directory>\n"
         << "\n"
-        << "Relative airfoil paths are resolved from the design file's directory.\n";
+        << "Relative airfoil paths are resolved from the design file's directory,\n"
+        << "or from --resource-dir when calculating a temporary design copy.\n";
 }
 
 std::string pathToUtf8(const std::filesystem::path &path)
@@ -46,7 +48,8 @@ std::string pathToUtf8(const std::filesystem::path &path)
 }
 
 int runEngine(const std::filesystem::path &inputArgument,
-              const std::filesystem::path &outputArgument)
+              const std::filesystem::path &outputArgument,
+              const std::filesystem::path &resourceArgument = {})
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
@@ -54,9 +57,18 @@ int runEngine(const std::filesystem::path &inputArgument,
     try {
         const auto input = std::filesystem::absolute(inputArgument).lexically_normal();
         const auto output = std::filesystem::absolute(outputArgument).lexically_normal();
+        const auto resourceDirectory =
+            resourceArgument.empty()
+                ? input.parent_path()
+                : std::filesystem::absolute(resourceArgument).lexically_normal();
 
         if (!std::filesystem::is_regular_file(input)) {
             std::cerr << "Input file does not exist: " << pathToUtf8(input) << '\n';
+            return 2;
+        }
+        if (!std::filesystem::is_directory(resourceDirectory)) {
+            std::cerr << "Resource path is not a directory: "
+                      << pathToUtf8(resourceDirectory) << '\n';
             return 2;
         }
 
@@ -102,7 +114,7 @@ int runEngine(const std::filesystem::path &inputArgument,
         const std::string inputUtf8 = pathToUtf8(preparedInput.path());
         const std::string outputUtf8 = pathToUtf8(output);
         lep_configure_paths(inputUtf8.c_str(), outputUtf8.c_str());
-        std::filesystem::current_path(input.parent_path());
+        std::filesystem::current_path(resourceDirectory);
 
         const int result = MAIN__();
         f_exit();
@@ -124,11 +136,19 @@ int wmain(int argc, wchar_t *argv[])
         printUsage();
         return 0;
     }
-    if (argc != 3) {
-        printUsage();
-        return 2;
+    if (argc == 3) {
+        return runEngine(
+            std::filesystem::path(argv[1]),
+            std::filesystem::path(argv[2]));
     }
-    return runEngine(std::filesystem::path(argv[1]), std::filesystem::path(argv[2]));
+    if (argc == 5 && std::wstring_view(argv[1]) == L"--resource-dir") {
+        return runEngine(
+            std::filesystem::path(argv[3]),
+            std::filesystem::path(argv[4]),
+            std::filesystem::path(argv[2]));
+    }
+    printUsage();
+    return 2;
 }
 #else
 int main(int argc, char *argv[])
@@ -139,10 +159,18 @@ int main(int argc, char *argv[])
         printUsage();
         return 0;
     }
-    if (argc != 3) {
-        printUsage();
-        return 2;
+    if (argc == 3) {
+        return runEngine(
+            std::filesystem::u8path(argv[1]),
+            std::filesystem::u8path(argv[2]));
     }
-    return runEngine(std::filesystem::u8path(argv[1]), std::filesystem::u8path(argv[2]));
+    if (argc == 5 && std::string_view(argv[1]) == "--resource-dir") {
+        return runEngine(
+            std::filesystem::u8path(argv[3]),
+            std::filesystem::u8path(argv[4]),
+            std::filesystem::u8path(argv[2]));
+    }
+    printUsage();
+    return 2;
 }
 #endif

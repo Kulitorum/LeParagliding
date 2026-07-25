@@ -20,13 +20,17 @@ The desktop application is a complete design studio:
 
 - every numbered block in the selected design has its own syntax-highlighted
   editor and independent Undo/Redo history;
-- every Save or Build embeds the wing's complete version history in the design
-  file, so Undo/Redo can continue across restarts and the `Versions...` window
+- every Save embeds the wing's complete version history in the design file, so
+  Undo/Redo can continue across restarts and the `Versions...` window
   can restore the whole wing to any saved state;
 - the `?` button on a section opens format guidance and a link to the full
   manual;
-- **Build paraglider** validates and saves the design, runs the compatible C++
-  engine, and reloads the generated 3D geometry;
+- opening a design automatically calculates a fresh 3D preview in a temporary
+  folder, preventing an older exported DXF from being shown;
+- **Build paraglider** validates the current editors and refreshes that
+  temporary preview without saving the design or writing user output files;
+- **Export files...** writes the manufacturing plans, 3D geometry, reports,
+  and line data to the selected Output folder;
 - the viewport displays all `LINE` entities from `lep-3d.dxf`, with isometric,
   front, back, left, right, top, and bottom views plus perspective and
   orthographic projection.
@@ -38,14 +42,16 @@ the model. Number keys `0`–`6` select the preset views and `P` toggles the
 projection. Double-click a completed output file to open it in its associated
 viewer.
 
-While editing a section, press `Enter` to save, build, and refresh the 3D
-viewport. Use `Shift+Enter` when you intentionally need to insert another input
-record. `Ctrl+Z`/`Ctrl+Y` and the section's Undo/Redo buttons affect only the
-currently visible section; switching sections does not merge or clear their
-histories. Once the live editor history is exhausted, Undo continues through
-that section's saved versions. Restoring an older whole-wing version does not
-delete newer versions; the restored state becomes a new latest version when it
-is next saved.
+While editing a section, press `Enter` to build and refresh the temporary 3D
+preview. Use `Shift+Enter` when you intentionally need to insert another input
+record. Preview builds and exports use the current editors but do not save them;
+use **Save** when the change should become a new embedded version.
+`Ctrl+Z`/`Ctrl+Y` and the section's Undo/Redo buttons affect only the currently
+visible section; switching sections does not merge or clear their histories.
+Once the live editor history is exhausted, Undo continues through that
+section's saved versions. Restoring an older whole-wing version does not delete
+newer versions; the restored state becomes a new latest version when it is next
+saved.
 
 Version history is stored as a marked comment trailer at the end of the same
 design file. Each entry is a compressed full-wing snapshot with a UTC

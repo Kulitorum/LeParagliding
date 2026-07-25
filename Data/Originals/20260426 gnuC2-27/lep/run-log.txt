@@ -1,0 +1,64 @@
+ LABORATORI D'ENVOL PARAGLIDING
+ Paragliders and parachutes design program
+
+ LEparagliding 3.28   version "Jardins"                                         
+ 2026-04-26
+
+ Pere Casellas
+ pere@laboratoridenvol.com
+ GNU General Public License 3.0 http://www.gnu.org
+
+ 01-Planform read
+ 02-Airfoils read
+ 03-Anchors position read
+ 04-Airfoil holes read
+ 05-Skin tension read
+ 06-Sewing allowances read
+ 07-Marks read
+ 08-Calage read
+ 09-Lines read
+ 10-Brakes read
+ 11-Ramifications read
+ 12-H V VH ribs read
+ 16-Intrados colors read
+ 17-Aditional rib points read
+ 18-Elastic lines corrections read
+ 19-DXF layer names read
+ 20-DXF mark types read
+ 21-Joncs definition read
+ 22-Nose mylars definition read
+ 23-Tab reinforcements definition read
+ 24-General 2D DXF options read
+ 25-General 3D DXF options read
+ 26-Glue vents read
+ 27-Special wingtip read
+ 28-Parameters for calage variation read
+ 29-3D-Shaping read
+ 30-Airfoil modification read
+ 31-New skin tension read
+ 32-Parameters for part separation read
+ 33-Parameters for detailed risers read
+ 34-Parameters for lines characteristics table read
+ 35-Parameters for solve equilibrium read
+ 36-Parameters for xflr5 analysis read
+ 37-Some special parameters read
+ All data read! Calculus start...please wait a moment
+
+ Area = 27.00 m2
+
+ Total line length =  297.89 m
+
+ OK, paraglider calculated!
+
+ Please open the following files:
+
+    leparagliding.dxf
+    lep-3d.dxf
+    lep-out.txt
+    lines.txt
+    run-log.txt
+    ../stl/lep-3d-surfaces.stl
+    ../stl/lep-3d-surfaces.scad
+    ../xflr5/ *.xwimp
+    ../xflr5/ *.dat
+
