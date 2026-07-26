@@ -259,6 +259,14 @@ target_include_directories(preprocessor-reference-compare PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
 )
 
+add_executable(section1-curves-test
+    tests/section1_curves_test.cpp
+    src/gui/section1_curves.cpp
+)
+target_include_directories(section1-curves-test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
+)
+
 qt_add_executable(LEparagliding WIN32
     src/gui/design_document.cpp
     src/gui/design_document.h
@@ -269,15 +277,21 @@ qt_add_executable(LEparagliding WIN32
     src/gui/main.cpp
     src/gui/mainwindow.cpp
     src/gui/mainwindow.h
+    src/gui/curve_editor.cpp
+    src/gui/curve_editor.h
     src/gui/paraglider_view.cpp
     src/gui/paraglider_view.h
     src/gui/preset_catalog.cpp
     src/gui/preset_catalog.h
+    src/gui/section1_curve_panel.cpp
+    src/gui/section1_curve_panel.h
+    src/gui/section1_curves.cpp
+    src/gui/section1_curves.h
     src/gui/section_help.cpp
     src/gui/section_help.h
     ${XFLR5_RESOURCES}
 )
-set_target_properties(LEparagliding PROPERTIES AUTORCC ON)
+set_target_properties(LEparagliding PROPERTIES AUTORCC ON AUTOMOC ON)
 target_link_libraries(LEparagliding PRIVATE Qt6::Widgets lep_occt xflr5core)
 add_dependencies(LEparagliding leparagliding-engine)
 
@@ -305,6 +319,7 @@ set_target_properties(
     leparagliding-engine
     reference-report-compare
     preprocessor-reference-compare
+    section1-curves-test
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -315,6 +330,7 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         leparagliding-engine
         reference-report-compare
         preprocessor-reference-compare
+        section1-curves-test
         PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
     )
@@ -405,6 +421,7 @@ endif()
 
 enable_testing()
 add_test(NAME engine_help COMMAND leparagliding-engine --help)
+add_test(NAME section1_curves COMMAND section1-curves-test)
 add_test(NAME engine_rejects_missing_input
     COMMAND leparagliding-engine
         "${CMAKE_BINARY_DIR}/does-not-exist.txt"

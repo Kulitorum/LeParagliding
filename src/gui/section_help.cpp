@@ -1,5 +1,35 @@
 #include "section_help.h"
 
+#include "section1_curves.h"
+
+namespace {
+
+// Field reference for Section 1, generated from the same column metadata the
+// graphical curve editor uses, so the two cannot drift apart.
+QString section1FieldReferenceHtml()
+{
+    QString html = QStringLiteral(
+        "<p>Scalar records before the matrix: brand and wing name (in "
+        "quotes), drawing scale, wing scale, number of cells, number of "
+        "ribs, \"Alpha max\" (the maximum automatic washin angle plus a "
+        "distribution parameter), and the paraglider type code with its "
+        "parameter.</p>"
+        "<p>Rib matrix columns, one row per rib of the half wing:</p>"
+        "<table cellspacing=\"0\" cellpadding=\"4\">");
+    for (const lep::Section1Column &column : lep::section1Columns()) {
+        html += QStringLiteral(
+                    "<tr><td><b>%1</b>&nbsp;</td><td>%2&nbsp;</td>"
+                    "<td>%3</td></tr>")
+                    .arg(QLatin1String(column.label),
+                         QLatin1String(column.unit),
+                         QLatin1String(column.description));
+    }
+    html += QStringLiteral("</table>");
+    return html;
+}
+
+} // namespace
+
 SectionHelp helpForSection(int number, const QString &fallbackTitle)
 {
     SectionHelp help;
@@ -19,6 +49,7 @@ SectionHelp helpForSection(int number, const QString &fallbackTitle)
             "Distances use centimetres. Ribs are entered for one half-wing and mirrored. "
             "Changing rib or cell counts also changes the expected row counts in many "
             "later sections.");
+        help.details = section1FieldReferenceHtml();
         break;
     case 2:
         help.title = QStringLiteral("Airfoils");

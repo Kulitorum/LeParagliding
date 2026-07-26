@@ -2,6 +2,7 @@
 
 #include "geometry_preprocessor_dialog.h"
 #include "paraglider_view.h"
+#include "section1_curve_panel.h"
 #include "section_help.h"
 
 #include <globals/mainframe.h>
@@ -1672,7 +1673,19 @@ void MainWindow::rebuildSectionEditors()
             QStringLiteral("Enter: rebuild 3D preview · Shift+Enter: insert a new record"));
         editor->buildRequested = [this] { startPreviewCalculation(); };
         new DesignSyntaxHighlighter(editor->document());
-        layout->addWidget(editor, 1);
+        if (section.number == 1) {
+            // Section 1 gets the graphical rib-matrix editor below the text;
+            // the splitter lets either half take over the page.
+            auto *splitter = new QSplitter(Qt::Vertical, sectionPage);
+            splitter->setChildrenCollapsible(false);
+            splitter->addWidget(editor);
+            splitter->addWidget(new Section1CurvePanel(editor, splitter));
+            splitter->setStretchFactor(0, 3);
+            splitter->setStretchFactor(1, 2);
+            layout->addWidget(splitter, 1);
+        } else {
+            layout->addWidget(editor, 1);
+        }
 
         auto updateLineCount = [editor, lineCount] {
             lineCount->setText(
