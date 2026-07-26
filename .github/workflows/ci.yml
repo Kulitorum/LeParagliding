@@ -277,21 +277,80 @@ jobs:
             --plugin qt --output appimage
           mv LEparagliding*-x86_64.AppImage "LEparagliding_v${{ steps.version.outputs.version }}_linux-x86_64.AppImage"
 
-      # Unsigned for now: signing/notarization needs Apple Developer ID
-      # secrets; Gatekeeper users right-click > Open the first time.
-      - name: Package (macOS DMG)
+      # macOS signing activates when the Developer ID secrets are present
+      # (same names as in the Decenza repo); without them the DMG ships
+      # unsigned and Gatekeeper users right-click > Open the first time.
+      - name: Install Apple Developer ID certificate (macOS)
+        if: ${{ runner.os == 'macOS' && secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
+        env:
+          P12_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/developer_id_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          echo -n "$P12_CERTIFICATE_BASE64" | base64 --decode -o "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Package (macOS app bundle)
         if: runner.os == 'macOS'
         run: |
           APP=build-ci/bin/Release/LEparagliding.app
           cp build-ci/bin/Release/leparagliding-engine "$APP/Contents/MacOS/"
           "$QT_ROOT_DIR/bin/macdeployqt" "$APP" \
             -executable="$APP/Contents/MacOS/leparagliding-engine" -verbose=1
+
+      # Hardened runtime + deep signing covers the bundled engine and all
+      # deployed Qt/OCCT libraries; required for notarization.
+      - name: Sign the app (macOS)
+        if: ${{ runner.os == 'macOS' && secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          APP=build-ci/bin/Release/LEparagliding.app
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/app-signing.keychain-db"
+          codesign --deep --force --options runtime \
+            --sign "Developer ID Application: Michael Holm (HKHN2RK2P4)" \
+            "$APP"
+          codesign --verify --strict "$APP"
+
+      - name: Create DMG (macOS)
+        if: runner.os == 'macOS'
+        run: |
           mkdir dmg_contents
-          cp -R "$APP" dmg_contents/
+          cp -R build-ci/bin/Release/LEparagliding.app dmg_contents/
           ln -s /Applications dmg_contents/Applications
           hdiutil create -volname "LEparagliding" -srcfolder dmg_contents \
             -ov -format UDZO \
             "LEparagliding_v${{ steps.version.outputs.version }}_macos-arm64.dmg"
+
+      - name: Sign, notarize, and staple the DMG (macOS)
+        if: ${{ runner.os == 'macOS' && secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_APP_PASSWORD: ${{ secrets.APPLE_ID_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG="LEparagliding_v${{ steps.version.outputs.version }}_macos-arm64.dmg"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/app-signing.keychain-db"
+          codesign --force --sign "Developer ID Application: Michael Holm (HKHN2RK2P4)" "$DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_ID_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "$DMG"
+
+      - name: Cleanup signing keychain (macOS)
+        if: ${{ always() && runner.os == 'macOS' }}
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
 
       # The Release output folder is already self-contained (windeployqt +
       # OCCT runtime + presets), so the Windows artifact is a plain zip. The

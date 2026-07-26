@@ -180,9 +180,12 @@ and attaches the downloads. CI runs only on `v*` tags; for a build
 without a release, use the Actions tab ("Run workflow", optionally with
 "Upload artifacts to the GitHub release").
 
-The macOS app is currently unsigned (right-click → Open on first launch);
-the signed Windows installer remains the local
-`installer/build_installer.ps1` flow described in `CLAUDE.md`.
+The macOS app is signed with the Developer ID certificate and notarized
+when the repository's signing secrets are configured
+(`MACOS_DEVELOPER_ID_P12_BASE64` and friends); without them CI produces an
+unsigned DMG (right-click → Open on first launch). The signed Windows
+installer remains the local `installer/build_installer.ps1` flow described
+in `CLAUDE.md`.
 
 ## Port architecture
 
