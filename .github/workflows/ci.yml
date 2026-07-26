@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      platforms:
+        description: 'Platforms to build: "all" or any of "linux macos windows"'
+        required: false
+        default: 'all'
+        type: string
 
 permissions:
   contents: write
@@ -32,22 +37,39 @@ env:
   QT_VERSION: '6.10.3'
 
 jobs:
+  # Filters the build matrix by the workflow_dispatch "platforms" input so a
+  # single platform can be rebuilt without repeating the finished ones.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Select platforms
+        id: select
+        shell: bash
+        run: |
+          ALL='[
+            {"name":"Linux (Ubuntu 24.04)","os":"ubuntu-24.04","qt_arch":"linux_gcc_64","key":"linux"},
+            {"name":"macOS 15 (arm64)","os":"macos-15","qt_arch":"clang_64","key":"macos"},
+            {"name":"Windows (VS 2022)","os":"windows-latest","qt_arch":"win64_msvc2022_64","key":"windows"}
+          ]'
+          SEL='${{ inputs.platforms }}'
+          if [ -z "$SEL" ] || [ "$SEL" = "all" ]; then
+            MATRIX=$(echo "$ALL" | jq -c .)
+          else
+            MATRIX=$(echo "$ALL" | jq -c --arg sel "$SEL" '[.[] | select(.key as $k | $sel | contains($k))]')
+          fi
+          echo "Selected platforms: $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.name }}
+    needs: plan
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux (Ubuntu 24.04)
-            os: ubuntu-24.04
-            qt_arch: linux_gcc_64
-          - name: macOS 15 (arm64)
-            os: macos-15
-            qt_arch: clang_64
-          - name: Windows (VS 2022)
-            os: windows-latest
-            qt_arch: win64_msvc2022_64
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - name: Checkout
