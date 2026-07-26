@@ -4,15 +4,19 @@
 #include "paraglider_view.h"
 #include "section_help.h"
 
+#include <globals/mainframe.h>
+
 #include <QAbstractItemView>
 #include <QCloseEvent>
 #include <QColorDialog>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDragEnterEvent>
+#include <QEvent>
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -421,12 +425,18 @@ MainWindow::~MainWindow()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    if (maybeSaveChanges()) {
-        saveSettings();
-        event->accept();
-    } else {
+    if (!maybeSaveChanges()) {
         event->ignore();
+        return;
     }
+    // The embedded XFLR5 frame runs its own close flow (prompt for unsaved
+    // project, persist its settings); a cancel there aborts the host close.
+    if (xflr5Frame_ && !xflr5Frame_->close()) {
+        event->ignore();
+        return;
+    }
+    saveSettings();
+    event->accept();
 }
 
 void MainWindow::buildInterface()
@@ -762,7 +772,48 @@ void MainWindow::buildInterface()
     footer->addStretch();
     page->addLayout(footer);
 
-    setCentralWidget(central);
+    workspaceTabs_ = new QTabWidget(this);
+    workspaceTabs_->setObjectName(QStringLiteral("workspaceTabs"));
+    workspaceTabs_->setDocumentMode(true);
+    workspaceTabs_->addTab(central, QStringLiteral("Design"));
+
+    xflr5Page_ = new QWidget(workspaceTabs_);
+    auto *xflr5Layout = new QVBoxLayout(xflr5Page_);
+    xflr5Layout->setContentsMargins(0, 0, 0, 0);
+    xflr5Layout->setSpacing(0);
+    workspaceTabs_->addTab(xflr5Page_, QStringLiteral("Aerodynamics (XFLR5)"));
+
+    // Floating busy card so the tab does not look dead while XFLR5 boots or
+    // a wing transfer runs the engine. Positioned by repositionXflr5Busy(),
+    // kept centered via the event filter on xflr5Page_.
+    xflr5Busy_ = new QFrame(xflr5Page_);
+    xflr5Busy_->setObjectName(QStringLiteral("card"));
+    auto *busyLayout = new QVBoxLayout(xflr5Busy_);
+    busyLayout->setContentsMargins(28, 22, 28, 22);
+    busyLayout->setSpacing(12);
+    xflr5BusyLabel_ = new QLabel(xflr5Busy_);
+    xflr5BusyLabel_->setAlignment(Qt::AlignCenter);
+    busyLayout->addWidget(xflr5BusyLabel_);
+    xflr5BusyBar_ = new QProgressBar(xflr5Busy_);
+    xflr5BusyBar_->setRange(0, 0);
+    xflr5BusyBar_->setTextVisible(false);
+    xflr5BusyBar_->setFixedWidth(260);
+    busyLayout->addWidget(xflr5BusyBar_);
+    xflr5Busy_->hide();
+    xflr5Page_->installEventFilter(this);
+    xflr5Busy_->installEventFilter(this);
+
+    // XFLR5 boots ~170k lines of application state; defer it until the tab
+    // is first opened so startup and the smoke tests stay fast. Entering the
+    // tab also transfers the current wing if it changed since the last one.
+    connect(workspaceTabs_, &QTabWidget::currentChanged, this, [this](int index) {
+        if (workspaceTabs_->widget(index) == xflr5Page_) {
+            initializeXflr5Tab();
+            maybeTransferWingToXflr5();
+        }
+    });
+
+    setCentralWidget(workspaceTabs_);
     setStyleSheet(QStringLiteral(R"(
         QMainWindow, QWidget {
             background: #0d1422;
@@ -1155,16 +1206,216 @@ void MainWindow::buildInterface()
     });
 }
 
+void MainWindow::showXflr5Tab(bool transferWing)
+{
+    workspaceTabs_->setCurrentWidget(xflr5Page_);
+    initializeXflr5Tab();
+    if (transferWing) {
+        maybeTransferWingToXflr5();
+    }
+}
+
+void MainWindow::maybeTransferWingToXflr5()
+{
+    if (document_.isEmpty()) {
+        hideXflr5Busy();
+        return;
+    }
+    const QByteArray hash = QCryptographicHash::hash(
+        document_.assembledText().toUtf8(), QCryptographicHash::Sha1);
+    if (hash == xflr5TransferredHash_) {
+        hideXflr5Busy();
+        return;
+    }
+    if (process_->state() != QProcess::NotRunning) {
+        if (calculationMode_ == CalculationMode::Xflr5Transfer
+            && xflr5RunHash_ == hash) {
+            // This exact document state is already on its way.
+            return;
+        }
+        // Another engine run is in flight; transfer once it finishes.
+        xflr5TransferPending_ = true;
+        showXflr5Busy(QStringLiteral("Waiting for the current calculation…"));
+        return;
+    }
+    startCalculation(CalculationMode::Xflr5Transfer, true);
+    if (calculationMode_ == CalculationMode::Xflr5Transfer) {
+        showXflr5Busy(QStringLiteral("Transferring wing to XFLR5…"));
+    } else {
+        // The run could not start (validation problem); details went to the
+        // status bar and calculation log.
+        hideXflr5Busy();
+    }
+}
+
+// Returns the current design with Section 36 (XFLR5 export) forced on, so a
+// transfer run always produces the xflr5/ files regardless of how the user
+// configured the design. The document itself is never modified.
+QString MainWindow::designTextWithXflr5ExportForced() const
+{
+    static const QString enabledBlock = QStringLiteral(
+        "1\n"
+        "* Panel parameters\n"
+        "10 chord nr\n"
+        "2 per cell\n"
+        "1 cosine distribution along chord\n"
+        "0 uniform along span\n"
+        "* Include billowed airfoils (more accuracy)\n"
+        "0\n");
+
+    const QList<DesignSection> &sections = document_.sections();
+    int index36 = -1;
+    int index37 = -1;
+    for (int index = 0; index < sections.size(); ++index) {
+        if (sections[index].number == 36) {
+            index36 = index;
+        } else if (sections[index].number == 37) {
+            index37 = index;
+        }
+    }
+
+    if (index36 < 0) {
+        // Design predates Section 36: splice an enabled block in, before
+        // Section 37 when one exists — the engine reads sections in order.
+        const QString block = QStringLiteral(
+            "*******************************************************\n"
+            "*       36. CREATE FILES FOR XFLR5 ANALYSIS\n"
+            "*******************************************************\n")
+            + enabledBlock;
+        if (index37 >= 0) {
+            DesignDocument forced = document_;
+            forced.setSectionText(index37, block + sections[index37].text);
+            return forced.assembledText();
+        }
+        QString text = document_.assembledText();
+        if (!text.endsWith(QLatin1Char('\n'))) {
+            text += QLatin1Char('\n');
+        }
+        return text + block;
+    }
+
+    // Replace only the flag line ("0") with the enabled block. Every comment
+    // row must survive untouched: the section's trailing asterisk row is the
+    // opening of the next section's header, and the translated Fortran
+    // reader skips comments strictly positionally — dropping one derails the
+    // parse (observed as a 0xC0000409 engine crash).
+    QStringList lines = sections[index36].text.split(QLatin1Char('\n'));
+    int flagIndex = -1;
+    for (int index = 0; index < lines.size(); ++index) {
+        const QString trimmed = lines[index].trimmed();
+        if (!trimmed.isEmpty() && !trimmed.startsWith(QLatin1Char('*'))) {
+            flagIndex = index;
+            break;
+        }
+    }
+    if (flagIndex < 0) {
+        // No data line at all — leave the document untouched; the engine's
+        // own migration keeps the run alive (without an export).
+        return document_.assembledText();
+    }
+    if (lines[flagIndex].trimmed().section(QLatin1Char(' '), 0, 0)
+        == QStringLiteral("1")) {
+        // Export already enabled — keep the user's own parameters.
+        return document_.assembledText();
+    }
+    lines[flagIndex] = enabledBlock.chopped(1); // block carries its own '\n'
+
+    DesignDocument forced = document_;
+    forced.setSectionText(index36, lines.join(QLatin1Char('\n')));
+    return forced.assembledText();
+}
+
+void MainWindow::showXflr5Busy(const QString &text, bool busy)
+{
+    ++xflr5BusyGeneration_;
+    xflr5BusyLabel_->setText(text);
+    xflr5BusyBar_->setVisible(busy);
+    xflr5Busy_->adjustSize();
+    repositionXflr5Busy();
+    xflr5Busy_->raise();
+    xflr5Busy_->show();
+    if (!busy) {
+        // A message without progress (e.g. a failure notice) fades on its
+        // own unless a newer overlay has replaced it meanwhile.
+        const int generation = xflr5BusyGeneration_;
+        QTimer::singleShot(6000, this, [this, generation] {
+            if (xflr5BusyGeneration_ == generation) {
+                xflr5Busy_->hide();
+            }
+        });
+    }
+}
+
+void MainWindow::hideXflr5Busy()
+{
+    ++xflr5BusyGeneration_;
+    xflr5Busy_->hide();
+}
+
+void MainWindow::repositionXflr5Busy()
+{
+    xflr5Busy_->move((xflr5Page_->width() - xflr5Busy_->width()) / 2,
+                     (xflr5Page_->height() - xflr5Busy_->height()) / 2);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    // Keep the busy card centered: the page resizes with the window, and
+    // the card's own size settles only once its layout runs on first show.
+    if ((watched == xflr5Page_ || watched == xflr5Busy_)
+        && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
+        repositionXflr5Busy();
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::initializeXflr5Tab()
+{
+    if (xflr5Frame_ || xflr5Initializing_) {
+        return;
+    }
+    xflr5Initializing_ = true;
+    showXflr5Busy(QStringLiteral("Loading XFLR5…"));
+    if (isVisible()) {
+        // Paint the overlay before the construction below blocks the event
+        // loop. Never pump events on a hidden window (smoke test, --xflr5
+        // before show()): nothing is on screen to repaint anyway.
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
+    QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+    xflr5Frame_ = new MainFrame(xflr5Page_);
+    // QMainWindow's constructor forces Qt::Window; drop it so the frame is
+    // an ordinary child. addWidget() alone won't clear it because the frame
+    // is already parented to the page (no reparent happens).
+    xflr5Frame_->setWindowFlags(Qt::Widget);
+    xflr5Page_->layout()->addWidget(xflr5Frame_);
+    // Standalone XFLR5 boots into an empty "no module" view and relies on
+    // its menus; start the embedded frame in the wing/plane analysis module.
+    xflr5Frame_->onMiarex();
+    xflr5Frame_->show();
+    QGuiApplication::restoreOverrideCursor();
+    xflr5Initializing_ = false;
+    hideXflr5Busy();
+}
+
 void MainWindow::connectProcess()
 {
     process_->setProcessChannelMode(QProcess::MergedChannels);
     connect(process_, &QProcess::readyReadStandardOutput, this,
             [this] { appendProcessOutput(); });
     connect(process_, &QProcess::started, this, [this] {
-        statusLabel_->setText(
-            calculationMode_ == CalculationMode::Export
-                ? QStringLiteral("Writing export files…")
-                : QStringLiteral("Building 3D preview…"));
+        switch (calculationMode_) {
+        case CalculationMode::Export:
+            statusLabel_->setText(QStringLiteral("Writing export files…"));
+            break;
+        case CalculationMode::Xflr5Transfer:
+            statusLabel_->setText(QStringLiteral("Transferring wing to XFLR5…"));
+            showXflr5Busy(QStringLiteral("Transferring wing to XFLR5…"));
+            break;
+        default:
+            statusLabel_->setText(QStringLiteral("Building 3D preview…"));
+            break;
+        }
     });
     connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
@@ -1332,9 +1583,15 @@ bool MainWindow::loadDesign(const QString &path, bool confirmUnsaved)
 
     const QString loadedPath = document_.filePath();
     QTimer::singleShot(0, this, [this, loadedPath] {
-        if (document_.filePath() == loadedPath
-            && process_->state() == QProcess::NotRunning) {
+        if (document_.filePath() != loadedPath) {
+            return;
+        }
+        if (process_->state() == QProcess::NotRunning) {
             startPreviewCalculation(true);
+        } else {
+            // An XFLR5 transfer can win the race for the engine (--xflr5);
+            // rebuild the preview once the engine frees up.
+            previewPending_ = true;
         }
     });
     return true;
@@ -2001,7 +2258,11 @@ void MainWindow::startCalculation(
     const QString temporaryInput =
         calculationDirectory->filePath(QStringLiteral("leparagliding.txt"));
     QSaveFile input(temporaryInput);
-    const QByteArray designText = document_.assembledText().toUtf8();
+    const QByteArray designText =
+        (mode == CalculationMode::Xflr5Transfer
+             ? designTextWithXflr5ExportForced()
+             : document_.assembledText())
+            .toUtf8();
     if (!input.open(QIODevice::WriteOnly)
         || input.write(designText) != designText.size()
         || !input.commit()) {
@@ -2012,7 +2273,7 @@ void MainWindow::startCalculation(
         return;
     }
 
-    if (mode == CalculationMode::Preview) {
+    if (mode == CalculationMode::Preview || mode == CalculationMode::Xflr5Transfer) {
         outputDirectory =
             calculationDirectory->filePath(QStringLiteral("output"));
         if (!QDir().mkpath(outputDirectory)) {
@@ -2021,7 +2282,16 @@ void MainWindow::startCalculation(
                 QStringLiteral("The temporary preview output folder could not be created."));
             return;
         }
-        clearViewportModel(QStringLiteral("Building current editor preview…"));
+        if (mode == CalculationMode::Preview) {
+            clearViewportModel(QStringLiteral("Building current editor preview…"));
+        }
+    }
+
+    if (mode == CalculationMode::Xflr5Transfer) {
+        // Remember which document state this run represents; committed to
+        // xflr5TransferredHash_ only when the import succeeds.
+        xflr5RunHash_ = QCryptographicHash::hash(
+            document_.assembledText().toUtf8(), QCryptographicHash::Sha1);
     }
 
     calculationMode_ = mode;
@@ -2034,7 +2304,9 @@ void MainWindow::startCalculation(
         QStringLiteral("%1\nDesign resources: %2\nTemporary input: %3\nOutput: %4\n")
             .arg(mode == CalculationMode::Preview
                      ? QStringLiteral("Temporary 3D preview")
-                     : QStringLiteral("Explicit file export"),
+                     : mode == CalculationMode::Xflr5Transfer
+                           ? QStringLiteral("XFLR5 wing transfer")
+                           : QStringLiteral("Explicit file export"),
                  QFileInfo(document_.filePath()).absolutePath(),
                  temporaryInput,
                  outputDirectory));
@@ -2203,12 +2475,57 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
                     "referenced airfoil files, and last engine message above."));
             diagnosticsTabs_->setCurrentWidget(log_);
         }
+    } else if (completedMode == CalculationMode::Xflr5Transfer) {
+        // Import before the temp directory is released below.
+        const QString xflr5Directory =
+            QDir(completedOutput).filePath(QStringLiteral("xflr5"));
+        QString importError;
+        bool success = engineSucceeded;
+        if (!success) {
+            importError = engineExitDescription(exitCode, exitStatus);
+        } else if (!QDir(xflr5Directory).exists()) {
+            success = false;
+            importError = QStringLiteral(
+                "The engine did not produce an xflr5 output folder.");
+        } else {
+            initializeXflr5Tab();
+            success = xflr5Frame_->lepImportLepWing(xflr5Directory, importError);
+        }
+        if (success) {
+            xflr5TransferredHash_ = xflr5RunHash_;
+            statusLabel_->setText(
+                QStringLiteral("Wing transferred to XFLR5%1")
+                    .arg(documentDirty_
+                             ? QStringLiteral(" · unsaved edits")
+                             : QString()));
+            hideXflr5Busy();
+        } else {
+            const QString headline =
+                QStringLiteral("XFLR5 transfer failed");
+            statusLabel_->setText(headline);
+            log_->appendPlainText(QStringLiteral("\n") + headline);
+            if (!importError.isEmpty()) {
+                log_->appendPlainText(importError);
+            }
+            showXflr5Busy(
+                QStringLiteral("Transfer failed · see the calculation log "
+                               "on the Design tab"),
+                false);
+        }
     }
 
     calculationDirectory_.reset();
     calculationOutputDirectory_.clear();
     calculationMode_ = CalculationMode::None;
     setRunning(false);
+
+    if (xflr5TransferPending_) {
+        xflr5TransferPending_ = false;
+        maybeTransferWingToXflr5();
+    } else if (previewPending_) {
+        previewPending_ = false;
+        startPreviewCalculation(true);
+    }
 }
 
 void MainWindow::refreshOutputFiles()

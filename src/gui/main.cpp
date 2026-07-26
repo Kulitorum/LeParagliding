@@ -10,6 +10,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSettings>
+#include <QSurfaceFormat>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -20,6 +22,8 @@
 #include <QTextDocument>
 #include <QTextStream>
 #include <QTemporaryDir>
+
+#include <xfl3d/views/gl3dview.h>
 
 namespace {
 
@@ -468,6 +472,47 @@ int runHeadless(int argc, char *argv[])
     return process.exitCode();
 }
 
+// The embedded XFLR5 uses QOpenGLWidget views that require shared contexts
+// and a default surface format chosen before QApplication exists. Mirrors
+// setOGLDefaultFormat() in XFLR5's own main.cpp (third_party/xflr5), reading
+// the same XFLR5 settings file so a standalone XFLR5's OpenGL preferences
+// carry over. The OCCT viewport is unaffected: it renders into a native
+// window with its own WGL context.
+void configureXflr5OpenGL()
+{
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+
+#if defined(Q_OS_LINUX) || defined(Q_OS_MAC)
+    QSettings settings(QSettings::NativeFormat, QSettings::UserScope,
+                       QStringLiteral("sourceforge.net"), QStringLiteral("xflr5"));
+#else
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope,
+                       QStringLiteral("XFLR5"));
+#endif
+    int oglMajor = 3;
+    int oglMinor = 3;
+    if (QFile(settings.fileName()).exists()) {
+        gl3dView::loadSettings(settings);
+        oglMajor = gl3dView::oglMajor();
+        oglMinor = gl3dView::oglMinor();
+    }
+
+    if (oglMajor <= 2 || (oglMajor == 3 && oglMinor < 3)) {
+        gl3dView::setProfile(QSurfaceFormat::NoProfile);
+        gl3dView::setDeprecatedFuncs(true);
+    } else {
+        gl3dView::setProfile(QSurfaceFormat::CoreProfile);
+        gl3dView::setDeprecatedFuncs(false);
+    }
+    gl3dView::setRenderableType(QSurfaceFormat::OpenGL);
+    gl3dView::setOGLVersion(oglMajor, oglMinor);
+    if (gl3dView::defaultXflSurfaceFormat().samples() < 0) {
+        gl3dView::setDefaultSamples(4);
+    }
+    QSurfaceFormat::setDefaultFormat(gl3dView::defaultXflSurfaceFormat());
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -475,6 +520,8 @@ int main(int argc, char *argv[])
     if (isHeadlessRequested(argc, argv)) {
         return runHeadless(argc, argv);
     }
+
+    configureXflr5OpenGL();
 
     bool smokeTestRequested = false;
     for (int index = 1; index < argc; ++index) {
@@ -505,6 +552,10 @@ int main(int argc, char *argv[])
         QStringLiteral("Load every catalog preset through the Studio editor "
                        "checks, then exit."));
     parser.addOption(validatePresets);
+    QCommandLineOption xflr5Tab(
+        QStringLiteral("xflr5"),
+        QStringLiteral("Open on the Aerodynamics (XFLR5) tab."));
+    parser.addOption(xflr5Tab);
     parser.addPositionalArgument(
         QStringLiteral("studio-files"),
         QStringLiteral("Design file used by --studio-self-test, or presets "
@@ -521,9 +572,16 @@ int main(int argc, char *argv[])
 
     MainWindow window;
     if (smokeTestRequested || parser.isSet(smokeTest)) {
+        // Also construct the embedded XFLR5 MainFrame so regressions in the
+        // vendored code surface in CI, not on first tab click — but without
+        // the wing transfer, which would spawn an engine run.
+        window.showXflr5Tab(false);
         return 0;
     }
 
+    if (parser.isSet(xflr5Tab)) {
+        window.showXflr5Tab();
+    }
     window.show();
     return application.exec();
 }

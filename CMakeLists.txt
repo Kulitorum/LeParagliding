@@ -25,7 +25,7 @@ if(WIN32 AND "${CMAKE_PREFIX_PATH}" STREQUAL "")
     endforeach()
 endif()
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Xml)
 
 # Open CASCADE Technology is the authoritative 3D kernel for model creation,
 # STEP serialization, tessellation, and viewport rendering. The Windows
@@ -157,6 +157,68 @@ else()
     endif()
 endif()
 
+# Vendored XFLR5 v6.62 (third_party/xflr5, see PROVENANCE.md): the XFoil
+# solver library plus the complete xflr5v6 application compiled as a static
+# library. The GUI hosts XFLR5's MainFrame in a tab; XFLR5's own
+# QApplication bootstrap (globals/main.cpp, globals/xflr5app.*) is excluded.
+add_library(xfoil STATIC
+    third_party/xflr5/XFoil-lib/xfoil.cpp
+)
+target_include_directories(xfoil PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/xflr5/XFoil-lib"
+)
+target_compile_definitions(xfoil PUBLIC XFOILLIB_STATIC)
+target_link_libraries(xfoil PUBLIC Qt6::Core)
+
+# Explicit source list generated from the upstream qmake manifests: the
+# v6.62 tree contains orphaned duplicate files that qmake never compiled,
+# so a glob would sweep in code that does not build (see the header of the
+# generated file for how to regenerate).
+set(LEP_XFLR5_V6_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/xflr5/xflr5v6")
+include(cmake/xflr5_sources.cmake)
+
+add_library(xflr5core STATIC ${XFLR5_CORE_SOURCES})
+set_target_properties(xflr5core PROPERTIES AUTOMOC ON)
+target_include_directories(xflr5core PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/xflr5/xflr5v6"
+)
+target_link_libraries(xflr5core PUBLIC
+    xfoil
+    Qt6::Widgets
+    Qt6::OpenGL
+    Qt6::OpenGLWidgets
+    Qt6::Xml
+)
+if(WIN32)
+    target_link_libraries(xflr5core PUBLIC opengl32 user32)
+endif()
+if(MSVC)
+    target_compile_options(xfoil PRIVATE /W0 /bigobj)
+    target_compile_options(xflr5core PRIVATE /W0 /bigobj)
+    foreach(xflr5_target xfoil xflr5core)
+        target_compile_definitions(${xflr5_target} PRIVATE
+            _CRT_SECURE_NO_WARNINGS
+            _USE_MATH_DEFINES
+            NOMINMAX
+        )
+    endforeach()
+else()
+    target_compile_options(xfoil PRIVATE -w)
+    target_compile_options(xflr5core PRIVATE -w)
+endif()
+
+# XFLR5's Qt resources (icons, dark stylesheet, GL shaders, script/text
+# templates) must be compiled into the executable: rcc registration relies
+# on static initializers that the linker may drop from a static library.
+set(XFLR5_RESOURCES
+    third_party/xflr5/xflr5v6/resources/images.qrc
+    third_party/xflr5/xflr5v6/resources/qss.qrc
+    third_party/xflr5/xflr5v6/xfl3d/resources/shaders.qrc
+    third_party/xflr5/xflr5v6/xfl3d/resources/text_files.qrc
+    third_party/xflr5/xflr5v6/xflscript/script.qrc
+    third_party/xflr5/xflr5v6/xflwidgets/textfiles.qrc
+)
+
 add_executable(leparagliding-engine
     src/engine/engine_paths.cpp
     src/engine/engine_paths.h
@@ -213,8 +275,10 @@ qt_add_executable(LEparagliding WIN32
     src/gui/preset_catalog.h
     src/gui/section_help.cpp
     src/gui/section_help.h
+    ${XFLR5_RESOURCES}
 )
-target_link_libraries(LEparagliding PRIVATE Qt6::Widgets lep_occt)
+set_target_properties(LEparagliding PROPERTIES AUTORCC ON)
+target_link_libraries(LEparagliding PRIVATE Qt6::Widgets lep_occt xflr5core)
 add_dependencies(LEparagliding leparagliding-engine)
 
 # Wing presets from laboratoridenvol.com: shipped next to the executable so

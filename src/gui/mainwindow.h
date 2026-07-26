@@ -3,6 +3,7 @@
 #include "design_document.h"
 #include "preset_catalog.h"
 
+#include <QByteArray>
 #include <QHash>
 #include <QMainWindow>
 #include <QProcess>
@@ -14,6 +15,7 @@
 class QCloseEvent;
 class QDragEnterEvent;
 class QDropEvent;
+class QFrame;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -28,6 +30,7 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QTemporaryDir;
 class ParagliderView;
+class MainFrame; // XFLR5's main window (third_party/xflr5), hosted as a tab
 
 class MainWindow final : public QMainWindow
 {
@@ -35,20 +38,33 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+    // Switches to the Aerodynamics tab, constructing the embedded XFLR5
+    // MainFrame on first use. Public for --xflr5 and the smoke test, which
+    // passes transferWing = false to avoid spawning an engine run.
+    void showXflr5Tab(bool transferWing = true);
+
 protected:
     void closeEvent(QCloseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     enum class CalculationMode
     {
         None,
         Preview,
-        Export
+        Export,
+        Xflr5Transfer
     };
 
     void buildInterface();
+    void initializeXflr5Tab();
+    void maybeTransferWingToXflr5();
+    void showXflr5Busy(const QString &text, bool busy = true);
+    void hideXflr5Busy();
+    void repositionXflr5Busy();
+    QString designTextWithXflr5ExportForced() const;
     void buildPresetsMenu(QPushButton *button);
     void connectProcess();
     void browseForInput();
@@ -125,6 +141,18 @@ private:
     QPlainTextEdit *log_ = nullptr;
     QTreeWidget *outputTree_ = nullptr;
     QTabWidget *diagnosticsTabs_ = nullptr;
+    QTabWidget *workspaceTabs_ = nullptr;
+    QWidget *xflr5Page_ = nullptr;
+    MainFrame *xflr5Frame_ = nullptr;
+    QByteArray xflr5TransferredHash_;
+    QByteArray xflr5RunHash_;
+    bool xflr5TransferPending_ = false;
+    bool previewPending_ = false;
+    QFrame *xflr5Busy_ = nullptr;
+    QLabel *xflr5BusyLabel_ = nullptr;
+    QProgressBar *xflr5BusyBar_ = nullptr;
+    bool xflr5Initializing_ = false;
+    int xflr5BusyGeneration_ = 0;
     ParagliderView *viewport_ = nullptr;
     QToolButton *projectionButton_ = nullptr;
     QTreeWidget *partsTree_ = nullptr;
