@@ -16,8 +16,10 @@ on:
 permissions:
   contents: write
 
+# Grouped by commit, not ref: pushing a branch and a tag that point at the
+# same commit (the release flow) then yields one run instead of two.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
 
 env:
