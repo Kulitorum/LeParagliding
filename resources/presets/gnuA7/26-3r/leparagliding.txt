@@ -540,21 +540,3 @@ Zcp      0.345  m   z-coordinate center of pressure
 1351	6    (1) solve for (gamma, K), (2) for (gamma,dragextra), (3) for (gamma,K,dragextra), (4,5) for (Kd,gamma,V)
 1352	2    Use flat area (1) or projected area (2)
 1353    2    Print normal (0) or advanced detailed output (1),(2)
-
-
-*******************************************************
-*       BELOW COMMENTS (not read)
-*******************************************************
-
-
-***************************************************
-*       11. Ramification lengths
-***************************************************
-3	180
-4	300	150
-3	100
-4	200	80
-
-
-Sizes 22-24-26-30:
-0.902169868 0.942285695 0.980762047 1.053507434

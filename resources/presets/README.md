@@ -36,7 +36,15 @@ following mechanical adaptations were applied so every preset loads in the
   linked as a dead URL in the v4 folder and was taken from the sibling
   `evo/` folder instead.
 - `gnuA7/26-3r`: the "Kit three risers" folder does not carry its own
-  `gnua.txt`; taken from the parent `data26/` folder.
+  `gnua.txt`; taken from the parent `data26/` folder. The published file also
+  ends with a "BELOW COMMENTS (not read)" block (blank lines, a stray copy of
+  the section 11 header, and size-scale notes) that the Fortran reader never
+  reaches but that the Studio editor rejects; the block was removed.
+- `Swoop/original`: after section 37 the published file appends an
+  alternative enabled copy of sections 35-37 (equilibrium + XFLR5 template).
+  The Fortran reader stops at the first copy, so the appended block never
+  took part in the calculation, but its duplicated section numbers made the
+  Studio editor reject the file; the appended block was removed.
 
 ## Not included
 

@@ -2,6 +2,7 @@
 
 #include "design_document.h"
 #include "paraglider_view.h"
+#include "preset_catalog.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -9,6 +10,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QStyleFactory>
@@ -332,6 +336,79 @@ int runStudioSelfTest(const QStringList &arguments)
     return 0;
 }
 
+// The engine tolerates upstream quirks (blank lines, unread trailer blocks
+// after section 37), but the Studio editor refuses to start a calculation on
+// them. Every shipped preset must satisfy the stricter of the two, so this
+// walks the whole catalog through the same load + validation the GUI uses.
+int runPresetValidation(const QStringList &arguments)
+{
+    if (arguments.size() != 1) {
+        QTextStream(stderr)
+            << "--validate-presets requires a presets directory.\n";
+        return 2;
+    }
+    const QString directory = arguments.at(0);
+
+    qsizetype manifestVariants = 0;
+    QFile manifest(QDir(directory).filePath(QStringLiteral("presets.json")));
+    if (manifest.open(QIODevice::ReadOnly)) {
+        const QJsonArray wings = QJsonDocument::fromJson(manifest.readAll())
+                                     .object()
+                                     .value(QStringLiteral("wings"))
+                                     .toArray();
+        for (const QJsonValue &wing : wings) {
+            manifestVariants +=
+                wing.toObject().value(QStringLiteral("variants")).toArray().size();
+        }
+    }
+
+    const QList<PresetWing> catalog = loadPresetCatalog(directory);
+    if (catalog.isEmpty()) {
+        QTextStream(stderr) << "No presets were found in " << directory << '\n';
+        return 2;
+    }
+
+    int failures = 0;
+    qsizetype loadedVariants = 0;
+    for (const PresetWing &wing : catalog) {
+        for (const PresetVariant &variant : wing.variants) {
+            ++loadedVariants;
+            QString error;
+            DesignDocument document;
+            if (document.load(variant.designFile, &error)) {
+                error = document.validationError();
+            }
+            if (!error.isEmpty()) {
+                ++failures;
+                QTextStream(stderr)
+                    << wing.name << " (" << variant.label << "): " << error
+                    << '\n' << "    " << variant.designFile << '\n';
+            }
+        }
+    }
+
+    // loadPresetCatalog silently drops variants whose design file is
+    // missing, so a packaging mistake must be caught by comparing against
+    // the manifest itself.
+    if (loadedVariants != manifestVariants) {
+        QTextStream(stderr)
+            << "presets.json lists " << manifestVariants
+            << " variants but only " << loadedVariants
+            << " design files were found.\n";
+        return 2;
+    }
+
+    if (failures != 0) {
+        QTextStream(stderr)
+            << failures << " of " << loadedVariants
+            << " preset variants failed Studio validation.\n";
+        return 2;
+    }
+    QTextStream(stdout)
+        << loadedVariants << " preset variants load and validate in Studio.\n";
+    return 0;
+}
+
 int runHeadless(int argc, char *argv[])
 {
     QCoreApplication application(argc, argv);
@@ -423,14 +500,23 @@ int main(int argc, char *argv[])
         QStringLiteral("studio-self-test"),
         QStringLiteral("Build, reload, and validate the OCCT NURBS model, then exit."));
     parser.addOption(studioSelfTest);
+    QCommandLineOption validatePresets(
+        QStringLiteral("validate-presets"),
+        QStringLiteral("Load every catalog preset through the Studio editor "
+                       "checks, then exit."));
+    parser.addOption(validatePresets);
     parser.addPositionalArgument(
         QStringLiteral("studio-files"),
-        QStringLiteral("Design file used by --studio-self-test."),
+        QStringLiteral("Design file used by --studio-self-test, or presets "
+                       "directory used by --validate-presets."),
         QStringLiteral("[design-file]"));
     parser.process(application);
 
     if (parser.isSet(studioSelfTest)) {
         return runStudioSelfTest(parser.positionalArguments());
+    }
+    if (parser.isSet(validatePresets)) {
+        return runPresetValidation(parser.positionalArguments());
     }
 
     MainWindow window;

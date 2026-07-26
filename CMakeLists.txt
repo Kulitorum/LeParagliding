@@ -329,6 +329,17 @@ add_test(NAME preset_gnua7_calculates
 set_tests_properties(preset_gnua7_calculates PROPERTIES
     TIMEOUT 120
 )
+# Every shipped preset must pass the Studio editor's stricter validation
+# (unique section headers, no blank records) — the engine alone tolerates
+# upstream quirks that would leave the GUI preview silently unavailable.
+add_test(NAME presets_validate_in_studio
+    COMMAND LEparagliding
+        --validate-presets
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/presets"
+)
+set_tests_properties(presets_validate_in_studio PROPERTIES
+    TIMEOUT 60
+)
 add_test(NAME engine_tolerates_blank_lines
     COMMAND leparagliding-engine
         --resource-dir "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/3.28"
