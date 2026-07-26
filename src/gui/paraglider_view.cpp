@@ -173,6 +173,11 @@ ParagliderView::ColorRole roleForPath(const QStringList &path)
         if (name == QStringLiteral("Vents")) {
             return ColorRole::Vents;
         }
+        if (name == QStringLiteral("Extrados curves")
+            || name == QStringLiteral("Intrados curves")
+            || name == QStringLiteral("Vent curves")) {
+            return ColorRole::SurfaceWireframe;
+        }
         if (name == QStringLiteral("Ribs")) {
             return ColorRole::Ribs;
         }

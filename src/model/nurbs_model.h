@@ -66,11 +66,17 @@ void lep_nurbs_set_line_capture(int enabled);
 
 // Names the lines captured next: the 4-character label matches lines.txt
 // (e.g. "3A5"), planIndex is the line plan row 1..6 (A..F), and brake
-// lines form their own group regardless of plan.
+// lines form their own group regardless of plan. typeName/diameterMm come
+// from the section-34 line characteristics table (Fortran blank-padded
+// name, diameter in mm); an empty name or non-positive diameter means the
+// line has no usable type row and the part keeps its bare label.
 void lep_nurbs_set_line_tag(const char *label,
                             int labelLength,
                             int planIndex,
-                            int isBrake);
+                            int isBrake,
+                            const char *typeName,
+                            int typeNameLength,
+                            double diameterMm);
 
 // Routes the lines captured next into the top-level "Diagonals" assembly
 // group as one part labeled "<kind> <index>", e.g. "H-rib 7" for row 7 of

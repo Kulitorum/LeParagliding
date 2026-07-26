@@ -88,6 +88,11 @@ constexpr const char *wingGroupName = "Wing";
 constexpr const char *extradosGroupName = "Extrados";
 constexpr const char *ventsGroupName = "Vents";
 constexpr const char *intradosGroupName = "Intrados";
+// The interior surface-wireframe curves live in sibling groups next to the
+// skin groups so CAD tools can hide them independently of the surfaces.
+constexpr const char *extradosCurvesGroupName = "Extrados curves";
+constexpr const char *ventCurvesGroupName = "Vent curves";
+constexpr const char *intradosCurvesGroupName = "Intrados curves";
 constexpr const char *ribsGroupName = "Ribs";
 constexpr const char *linesGroupName = "Lines";
 constexpr const char *brakeGroupName = "Brake lines";
@@ -115,6 +120,19 @@ const char *regionGroupName(Region region)
         return intradosGroupName;
     }
     return extradosGroupName;
+}
+
+const char *regionCurvesGroupName(Region region)
+{
+    switch (region) {
+    case Region::Extrados:
+        return extradosCurvesGroupName;
+    case Region::Vent:
+        return ventCurvesGroupName;
+    case Region::Intrados:
+        return intradosCurvesGroupName;
+    }
+    return extradosCurvesGroupName;
 }
 
 // Region names as used in diagnostics; these match the historical engine
@@ -739,12 +757,29 @@ public:
     void setLineTag(const char *label,
                     int labelLength,
                     int planIndex,
-                    bool brake)
+                    bool brake,
+                    const char *typeName,
+                    int typeNameLength,
+                    double diameterMm)
     {
-        currentLineTag_.label =
+        std::string title =
             label != nullptr && labelLength > 0
                 ? trimmedLabel(label, labelLength)
                 : std::string();
+        const std::string type =
+            typeName != nullptr && typeNameLength > 0
+                ? trimmedLabel(typeName, typeNameLength)
+                : std::string();
+        if (!type.empty()
+            && std::isfinite(diameterMm)
+            && diameterMm > 0.0) {
+            std::ostringstream suffix;
+            suffix << type << " " << diameterMm << " mm";
+            title = title.empty()
+                        ? suffix.str()
+                        : title + " (" + suffix.str() + ")";
+        }
+        currentLineTag_.label = std::move(title);
         currentLineTag_.planIndex = std::clamp(planIndex, 0, 6);
         currentLineTag_.brake = brake;
         currentLineTag_.group.clear();
@@ -1426,30 +1461,39 @@ private:
                 "Panel " + std::to_string(panel.panelIndex);
             const PartColor faceColor = regionColor(panel.region);
 
-            const auto makePanelShape =
-                [](const TopoDS_Face &face,
-                   const std::vector<TopoDS_Edge> &wireframe) {
-                    std::vector<TopoDS_Shape> shapes;
-                    shapes.reserve(wireframe.size() + 1);
-                    shapes.push_back(face);
-                    shapes.insert(
-                        shapes.end(), wireframe.begin(), wireframe.end());
-                    return makeCompound(shapes);
-                };
-
             regionGroup.group(rightSideName).parts.push_back(
                 {partName,
-                 makePanelShape(panel.rightFace, panel.rightWireframe),
+                 panel.rightFace,
                  faceColor,
                  wireframeColor,
                  true});
             regionGroup.group(leftSideName).parts.push_back(
                 {partName,
-                 makePanelShape(panel.leftFace, panel.leftWireframe),
+                 panel.leftFace,
                  faceColor,
                  wireframeColor,
                  true});
             result.surfaceCount += 2;
+
+            AssemblyGroup &curvesGroup =
+                wing.group(regionCurvesGroupName(panel.region));
+            const auto addWireframePart =
+                [&](const char *sideName,
+                    const std::vector<TopoDS_Edge> &wireframe) {
+                    if (wireframe.empty()) {
+                        return;
+                    }
+                    const std::vector<TopoDS_Shape> shapes(
+                        wireframe.begin(), wireframe.end());
+                    curvesGroup.group(sideName).parts.push_back(
+                        {partName,
+                         makeCompound(shapes),
+                         wireframeColor,
+                         wireframeColor,
+                         false});
+                };
+            addWireframePart(rightSideName, panel.rightWireframe);
+            addWireframePart(leftSideName, panel.leftWireframe);
             result.splineCount += static_cast<int>(
                 panel.rightWireframe.size() + panel.leftWireframe.size());
         }
@@ -2448,9 +2492,19 @@ extern "C" void lep_nurbs_set_line_capture(int enabled)
 extern "C" void lep_nurbs_set_line_tag(const char *label,
                                         int labelLength,
                                         int planIndex,
-                                        int isBrake)
+                                        int isBrake,
+                                        const char *typeName,
+                                        int typeNameLength,
+                                        double diameterMm)
 {
-    model().setLineTag(label, labelLength, planIndex, isBrake != 0);
+    model().setLineTag(
+        label,
+        labelLength,
+        planIndex,
+        isBrake != 0,
+        typeName,
+        typeNameLength,
+        diameterMm);
 }
 
 extern "C" void lep_nurbs_tag_diagonal(const char *kind,

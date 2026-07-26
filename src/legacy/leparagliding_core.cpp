@@ -50,7 +50,10 @@ void lep_nurbs_set_line_capture(integer enabled);
 void lep_nurbs_set_line_tag(const char *label,
                             integer labelLength,
                             integer planIndex,
-                            integer isBrake);
+                            integer isBrake,
+                            const char *typeName,
+                            integer typeNameLength,
+                            doublereal diameterMm);
 void lep_nurbs_tag_diagonal(const char *kind,
                             integer kindLength,
                             integer index);
@@ -34699,8 +34702,11 @@ L12:
 		5) * 10 - 61];
 	p1z = z1line[corda[i__ - 1] + (corda[i__ + 499] + corda[i__ + 999] *
 		5) * 10 - 61];
-/*      Tag captured OCCT line with its lines.txt label and plan */
-	lep_nurbs_set_line_tag(ln4 + ((i__ - 1) << 2), 4, corda[i__ - 1], 0);
+/*      Tag captured OCCT line with its lines.txt label, plan, and the
+	section-34 type name and diameter, tyline(corda(i,40),4) and (,2) */
+	lep_nurbs_set_line_tag(ln4 + ((i__ - 1) << 2), 4, corda[i__ - 1], 0,
+		tylinea + (corda[i__ + 19499] + 153) * 30, 30,
+		tyline[corda[i__ + 19499] + 51]);
 	if (i37c == 0) {
 /* colors by risers */
 	    line3d_(&p1x, &p1y, &p1z, &p2x, &p2y, &p2z, &iccolor[corda[i__ -
@@ -34735,8 +34741,11 @@ L12:
 		5) * 10 - 61];
 	p1z = z1line[corda[i__ - 1] + (corda[i__ + 499] + corda[i__ + 999] *
 		5) * 10 - 61];
-/*      Tag captured OCCT brake line with its lines.txt label */
-	lep_nurbs_set_line_tag(ln4 + ((i__ - 1) << 2), 4, 6, 1);
+/*      Tag captured OCCT brake line with its lines.txt label and the
+	section-34 type name and diameter */
+	lep_nurbs_set_line_tag(ln4 + ((i__ - 1) << 2), 4, 6, 1,
+		tylinea + (corda[i__ + 19499] + 153) * 30, 30,
+		tyline[corda[i__ + 19499] + 51]);
 	if (i37c == 0) {
 /* colors by risers */
 	    line3d_(&p1x, &p1y, &p1z, &p2x, &p2y, &p2z, &iccolor[15]);
