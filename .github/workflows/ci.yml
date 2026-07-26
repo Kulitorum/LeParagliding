@@ -23,8 +23,11 @@ permissions:
 
 # Grouped by commit, not ref: pushing a branch and a tag that point at the
 # same commit (the release flow) then yields one run instead of two.
+# Tag/branch pushes on the same commit share a group (one run instead of
+# two), but every manual dispatch gets its own group: concurrent sessions
+# dispatching partial builds must not cancel each other's runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.sha }}
   cancel-in-progress: true
 
 env:
