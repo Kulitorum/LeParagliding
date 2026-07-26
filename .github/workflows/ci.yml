@@ -30,6 +30,9 @@ jobs:
           - name: macOS 15 (arm64)
             os: macos-15
             qt_arch: clang_64
+          - name: Windows (VS 2022)
+            os: windows-latest
+            qt_arch: win64_msvc2022_64
 
     steps:
       - name: Checkout
@@ -80,8 +83,42 @@ jobs:
           path: ${{ runner.temp }}/occt-install
           key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
 
+      # OCCT links freetype; on Windows it comes from vcpkg and its DLLs are
+      # dropped into the OCCT install tree so they travel with the cache.
+      - name: Install freetype via vcpkg (Windows)
+        if: runner.os == 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: vcpkg install freetype:x64-windows
+
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build Open CASCADE (Windows)
+        if: runner.os == 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          curl.exe -fsSL "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/$env:OCCT_TAG.tar.gz" -o "$env:RUNNER_TEMP\occt.tar.gz"
+          tar -xzf "$env:RUNNER_TEMP\occt.tar.gz" -C "$env:RUNNER_TEMP"
+          $src = (Get-ChildItem "$env:RUNNER_TEMP" -Directory -Filter 'OCCT-*')[0].FullName.Replace('\', '/')
+          $tmp = "$env:RUNNER_TEMP".Replace('\', '/')
+          cmake -S "$src" -B "$tmp/occt-build" -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DINSTALL_DIR="$tmp/occt-install" `
+            -DINSTALL_DIR_LAYOUT=Unix `
+            -D3RDPARTY_FREETYPE_DIR='C:/vcpkg/installed/x64-windows' `
+            -DBUILD_MODULE_Draw=OFF `
+            -DBUILD_MODULE_DETools=OFF `
+            -DUSE_TK=OFF `
+            -DUSE_TCL=OFF `
+            -DBUILD_DOC_Overview=OFF
+          cmake --build "$tmp/occt-build" --target install
+          Copy-Item 'C:/vcpkg/installed/x64-windows/bin/*.dll' "$tmp/occt-install/bin/"
+
       - name: Build Open CASCADE
-        if: steps.occt-cache.outputs.cache-hit != 'true'
+        if: runner.os != 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           curl -fsSL "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/${OCCT_TAG}.tar.gz" | tar xz -C "$RUNNER_TEMP"
@@ -97,6 +134,7 @@ jobs:
           cmake --build "$RUNNER_TEMP/occt-build" --target install
 
       - name: Configure
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           cmake -S . -B build-ci -G Ninja \
@@ -104,12 +142,35 @@ jobs:
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/occt-install;$QT_ROOT_DIR"
 
       - name: Build
+        if: runner.os != 'Windows'
         run: cmake --build build-ci
 
       # The OpenGL viewport tests need a real display; everything else —
       # engine runs, preprocessor parity, preset calculation, headless CLI —
       # runs offscreen.
       - name: Test
+        if: runner.os != 'Windows'
         env:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build-ci --output-on-failure -E "gui_smoke|studio_model_smoke"
+
+      # Windows drives the same "windows" CMake preset developers use
+      # locally (VS generator, windeployqt + OCCT runtime deployment), and
+      # additionally runs the Fortran byte-compare reference test.
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tmp = "$env:RUNNER_TEMP".Replace('\', '/')
+          $qt = "$env:QT_ROOT_DIR".Replace('\', '/')
+          cmake --preset windows "-DCMAKE_PREFIX_PATH=$qt" "-DLEP_OCCT_ROOT=$tmp/occt-install"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build --preset release --parallel
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --preset release -E "gui_smoke|studio_model_smoke"

@@ -159,7 +159,10 @@ ctest --test-dir build --output-on-failure
 ```
 
 `.github/workflows/ci.yml` runs exactly this on Ubuntu 24.04 and macOS 15,
-caching the OCCT install tree between runs.
+caching the OCCT install tree between runs. A third job builds the Windows
+preset with MSVC against an OCCT compiled the same way (freetype from
+vcpkg, `-DINSTALL_DIR_LAYOUT=Unix`) and runs the Fortran byte-compare
+reference test.
 
 ## Port architecture
 
