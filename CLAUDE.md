@@ -15,6 +15,25 @@ ctest --preset release          # run the test suite
 The Release output folder is directly runnable: post-build steps run
 windeployqt and copy the OCCT runtime DLLs next to the executables.
 
+## GitHub releases
+
+Version source of truth is `project(... VERSION x.y.z)` in CMakeLists.txt.
+To release: bump it, commit, push, then `git tag vX.Y.Z && git push origin
+vX.Y.Z` — CI builds Windows/Linux/macOS and attaches the downloads (builds
+run only on tags or manual dispatch; the `platforms` input limits which
+platforms rebuild).
+
+**Every GitHub release must get a proper hand-written description** — never
+leave bare auto-generated notes. It must contain: a one-paragraph
+what-is-this for first-time visitors, the changes in this version, and a
+per-platform install table (Windows: unzip & run; Linux: `chmod +x` the
+AppImage; macOS: unsigned — right-click → Open). Apply it after the CI
+uploads finish:
+
+```powershell
+gh release edit vX.Y.Z --title "LEparagliding Studio X.Y.Z" --notes-file notes.md
+```
+
 ## Building the signed installer
 
 One command (from anywhere):
