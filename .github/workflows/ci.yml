@@ -166,7 +166,11 @@ jobs:
           tar -xf "$inner" -C "$tmp/occt-prebuilt"
           $root = (Get-ChildItem "$tmp/occt-prebuilt" -Directory -Filter 'opencascade-*')[0].FullName
           $bin = "$root/win64/vc14/bin"
+          # The 3rdparty tree carries debug variants under debug\bin whose
+          # names collide with the release DLLs (jemalloc.dll links
+          # VCRUNTIME140D, which end users do not have) — exclude them.
           Get-ChildItem "$tmp/occt-prebuilt/3rdparty-*" -Recurse -Filter *.dll |
+            Where-Object { $_.FullName -notmatch '\\debug\\' } |
             Copy-Item -Destination $bin -Force
           "LEP_OCCT_ROOT=$($root.Replace('\', '/'))" >> $env:GITHUB_ENV
 
