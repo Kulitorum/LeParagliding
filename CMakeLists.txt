@@ -281,12 +281,22 @@ set_target_properties(LEparagliding PROPERTIES AUTORCC ON)
 target_link_libraries(LEparagliding PRIVATE Qt6::Widgets lep_occt xflr5core)
 add_dependencies(LEparagliding leparagliding-engine)
 
-# Wing presets from laboratoridenvol.com: shipped next to the executable so
-# the Presets menu (and the installer wildcard) picks them up.
+# Wing presets from laboratoridenvol.com: shipped with the executable so the
+# Presets menu (and the installer wildcard) picks them up. On macOS they must
+# land in Contents/Resources rather than next to the binary in Contents/MacOS:
+# data files under MacOS/ make `codesign --deep` treat the folder as a nested
+# code bundle and reject the app ("bundle format unrecognized, invalid, or
+# unsuitable").
+if(APPLE)
+    set(lep_presets_deploy_dir
+        "$<TARGET_BUNDLE_CONTENT_DIR:LEparagliding>/Resources/presets")
+else()
+    set(lep_presets_deploy_dir "$<TARGET_FILE_DIR:LEparagliding>/presets")
+endif()
 add_custom_command(TARGET LEparagliding POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/resources/presets"
-        "$<TARGET_FILE_DIR:LEparagliding>/presets"
+        "${lep_presets_deploy_dir}"
     COMMENT "Deploying wing presets"
 )
 

@@ -1469,8 +1469,16 @@ namespace {
 
 QString presetsRootPath()
 {
+#ifdef Q_OS_MACOS
+    // Inside the .app the presets live in Contents/Resources, not next to the
+    // executable in Contents/MacOS: shipping data files under MacOS/ makes
+    // `codesign --deep` reject the bundle ("bundle format unrecognized").
+    return QDir::cleanPath(QCoreApplication::applicationDirPath()
+        + QStringLiteral("/../Resources/presets"));
+#else
     return QDir(QCoreApplication::applicationDirPath())
         .absoluteFilePath(QStringLiteral("presets"));
+#endif
 }
 
 bool isShippedPreset(const QString &filePath)
@@ -1483,13 +1491,11 @@ bool isShippedPreset(const QString &filePath)
 
 void MainWindow::buildPresetsMenu(QPushButton *button)
 {
-    presetCatalog_ = loadPresetCatalog(
-        QDir(QCoreApplication::applicationDirPath())
-            .filePath(QStringLiteral("presets")));
+    presetCatalog_ = loadPresetCatalog(presetsRootPath());
     if (presetCatalog_.isEmpty()) {
         button->setEnabled(false);
         button->setToolTip(QStringLiteral(
-            "No presets folder was found next to the executable."));
+            "No presets folder was found for the application."));
         return;
     }
 
