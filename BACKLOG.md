@@ -50,8 +50,11 @@ structured section (see below). The retired grid's rib-count cross-check
 - Section 12 H/V/VH ribs: per-type sub-schemas (type code in column 2
   decides the row layout: 1, 3, 6, 11, 13, 15, 16).
 - Sections 15/16 colors: visual chordwise color-region editor.
-- Section 4 holes and Section 31 skin-tension groups: group-aware editors
-  (counts maintained automatically).
+- Section 31 skin-tension groups: group-aware editor (counts maintained
+  automatically). Section 4 holes got a graphical editor (2026-07-26);
+  still deferred there: adding/removing holes and groups from the GUI
+  (counts live in the text), and rotated/rounded triangle rendering
+  fidelity.
 - Add/remove-record support in the grids, updating the structural count
   fields automatically (currently directed to the text editor on purpose).
 

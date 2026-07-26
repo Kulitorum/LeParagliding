@@ -1,5 +1,6 @@
 #pragma once
 
+#include "panel_undo.h"
 #include "section1_curves.h"
 #include "spline_fit.h"
 
@@ -37,6 +38,16 @@ public:
                        QWidget *parent = nullptr);
 
 private:
+    // Everything a graphical edit can touch; undo restores it absolutely.
+    struct UndoState
+    {
+        QString text;
+        QJsonObject splines;
+    };
+    UndoState captureState() const;
+    void restoreState(const UndoState &state);
+    void pushUndo(UndoState before);
+
     void loadSplinesFromDocument();
     void persistSplines();
     void syncFromText();
@@ -77,4 +88,5 @@ private:
     std::vector<std::string> staleColumns_;
     double tolerancePercent_ = 1.0;
     bool applyingEdit_ = false;
+    PanelUndoStack<UndoState> undo_;
 };

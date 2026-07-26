@@ -83,6 +83,10 @@ signals:
     void pointMoved(const QString &seriesId, int pointIndex, double value);
     // Drag released or a keyboard nudge applied: time to persist the series.
     void editCommitted(const QString &seriesId);
+    // Ctrl+Z / Ctrl+Y pressed with this widget focused; the host owns the
+    // undo stack for graphical edits.
+    void undoRequested();
+    void redoRequested();
 
 protected:
     bool event(QEvent *event) override;

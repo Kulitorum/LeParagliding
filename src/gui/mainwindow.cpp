@@ -3,6 +3,7 @@
 #include "airfoil_panel.h"
 #include "geometry_preprocessor_dialog.h"
 #include "grid_curve_panel.h"
+#include "holes_panel.h"
 #include "paraglider_view.h"
 #include "section1_curve_panel.h"
 #include "section_help.h"
@@ -1717,6 +1718,23 @@ void MainWindow::rebuildSectionEditors()
                             process_->state() == QProcess::NotRunning);
                         updateWindowTitle();
                     }
+                });
+        } else if (section.number == 4) {
+            // Airfoil holes: drawn inside the airfoil of each group's
+            // first rib, resolved through the live Section 2 editor.
+            graphicalPanel = new HolesPanel(
+                editor,
+                [this] {
+                    return QFileInfo(document_.filePath()).absolutePath();
+                },
+                [this]() -> QString {
+                    for (qsizetype i = 0; i < document_.sections().size();
+                         ++i) {
+                        if (document_.sections().at(i).number == 2
+                            && i < sectionEditors_.size())
+                            return sectionEditors_.at(i)->toPlainText();
+                    }
+                    return QString();
                 });
         } else if (const SectionSpec *spec = sectionSpec(section.number);
                    spec != nullptr && !spec->curveColumns.isEmpty()) {

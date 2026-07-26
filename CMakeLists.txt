@@ -315,11 +315,14 @@ qt_add_executable(LEparagliding WIN32
     src/gui/geometry_preprocessor_dialog.h
     src/gui/grid_curve_panel.cpp
     src/gui/grid_curve_panel.h
+    src/gui/holes_panel.cpp
+    src/gui/holes_panel.h
     src/gui/main.cpp
     src/gui/mainwindow.cpp
     src/gui/mainwindow.h
     src/gui/curve_editor.cpp
     src/gui/curve_editor.h
+    src/gui/panel_undo.h
     src/gui/paraglider_view.cpp
     src/gui/paraglider_view.h
     src/gui/preset_catalog.cpp

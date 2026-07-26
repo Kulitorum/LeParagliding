@@ -1,5 +1,6 @@
 #pragma once
 
+#include "panel_undo.h"
 #include "section_grid.h"
 
 #include <QWidget>
@@ -30,7 +31,10 @@ private:
     CurveEditor *curves_;
     QLabel *description_;
     QLabel *status_;
+    void restoreText(const QString &text);
+
     lep::SectionGrid grid_;
     QVector<int> uniformRows_; // indexes into grid_.rows used by the curves
     bool applyingEdit_ = false;
+    PanelUndoStack<QString> undo_;
 };

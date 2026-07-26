@@ -11,6 +11,7 @@
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
@@ -413,6 +414,14 @@ void AirfoilView::mouseReleaseEvent(QMouseEvent *event)
 
 void AirfoilView::keyPressEvent(QKeyEvent *event)
 {
+    if (event->matches(QKeySequence::Undo)) {
+        emit undoRequested();
+        return;
+    }
+    if (event->matches(QKeySequence::Redo)) {
+        emit redoRequested();
+        return;
+    }
     if (activeSegment_ < 0 || activeSegment_ >= segments_.size()
         || activeIndex_ < 0
         || activeIndex_ >= segments_.at(activeSegment_).handles.size()) {
@@ -479,6 +488,8 @@ AirfoilPanel::AirfoilPanel(
     fileLabel->setObjectName(QStringLiteral("hint"));
     header->addWidget(fileLabel);
     fileCombo_ = new QComboBox(this);
+    fileCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    fileCombo_->setMinimumContentsLength(20);
     header->addWidget(fileCombo_, 0);
     header->addStretch();
     layout->addLayout(header);
@@ -580,8 +591,66 @@ AirfoilPanel::AirfoilPanel(
         if (!previewActive_)
             commitHandleEdit();
     });
+    connect(view_, &AirfoilView::undoRequested, this, [this] {
+        if (const UndoState *state = undo_.undo())
+            restoreState(*state);
+    });
+    connect(view_, &AirfoilView::redoRequested, this, [this] {
+        if (const UndoState *state = undo_.redo())
+            restoreState(*state);
+    });
 
     loadSplinesFromDocument();
+    syncFromText();
+}
+
+AirfoilPanel::UndoState AirfoilPanel::captureState() const
+{
+    UndoState state;
+    state.text = editor_->toPlainText();
+    state.splines = loadSplines_ ? loadSplines_() : QJsonObject();
+    for (const LoadedAirfoil &airfoil : airfoils_) {
+        QFile file(airfoil.absolutePath);
+        if (file.open(QIODevice::ReadOnly))
+            state.files.insert(airfoil.absolutePath, file.readAll());
+    }
+    return state;
+}
+
+void AirfoilPanel::pushUndo(UndoState before)
+{
+    UndoState after = captureState();
+    if (before.text == after.text && before.splines == after.splines
+        && before.files == after.files)
+        return;
+    undo_.push(std::move(before), std::move(after));
+}
+
+void AirfoilPanel::restoreState(const UndoState &state)
+{
+    for (auto it = state.files.constBegin(); it != state.files.constEnd();
+         ++it) {
+        QFile current(it.key());
+        if (current.open(QIODevice::ReadOnly)
+            && current.readAll() == it.value())
+            continue;
+        current.close();
+        QSaveFile file(it.key());
+        if (file.open(QIODevice::WriteOnly)) {
+            file.write(it.value());
+            file.commit();
+        }
+    }
+    if (storeSplines_)
+        storeSplines_(state.splines);
+    loadSplinesFromDocument();
+    if (editor_->toPlainText() != state.text) {
+        applyingEdit_ = true;
+        QTextCursor cursor(editor_->document());
+        cursor.select(QTextCursor::Document);
+        cursor.insertText(state.text);
+        applyingEdit_ = false;
+    }
     syncFromText();
 }
 
@@ -830,9 +899,10 @@ void AirfoilPanel::rebuildView()
         status_->setStyleSheet(QStringLiteral("color: %1;").arg(kOkColor));
         status_->setText(
             QStringLiteral("B-spline backed · %1 control points · drag "
-                           "squares to reshape (arrows nudge, Shift = ×10) "
-                           "· the file regenerates on every edit · press "
-                           "Enter in the text to rebuild the 3D preview")
+                           "squares to reshape (arrows nudge, Shift = ×10, "
+                           "Ctrl+Z undoes) · the file regenerates on every "
+                           "edit · press Enter in the text to rebuild the "
+                           "3D preview")
                 .arg(controls));
     } else {
         status_->setStyleSheet(QStringLiteral("color: %1;").arg(kOkColor));
@@ -939,6 +1009,7 @@ void AirfoilPanel::commitHandleEdit()
     LoadedAirfoil *airfoil = currentAirfoil();
     if (airfoil == nullptr || airfoil->splines.empty())
         return;
+    UndoState before = captureState();
     // Handles in the view are the authoritative new control points.
     for (size_t s = 0; s < airfoil->splines.size(); ++s) {
         const int handleCount =
@@ -966,6 +1037,7 @@ void AirfoilPanel::commitHandleEdit()
                                        airfoil->stations);
     persistSplines();
     rebuildView();
+    pushUndo(std::move(before));
 }
 
 void AirfoilPanel::applySplineToFile()
@@ -973,6 +1045,7 @@ void AirfoilPanel::applySplineToFile()
     LoadedAirfoil *airfoil = currentAirfoil();
     if (airfoil == nullptr || airfoil->splines.empty())
         return;
+    UndoState before = captureState();
     QString error;
     if (!writeAirfoil(*airfoil, airfoil->absolutePath, airfoil->splines,
                       airfoil->stations, &error)) {
@@ -984,18 +1057,21 @@ void AirfoilPanel::applySplineToFile()
         return;
     }
     syncFromText();
+    pushUndo(std::move(before));
 }
 
 void AirfoilPanel::removeSplines()
 {
     LoadedAirfoil *airfoil = currentAirfoil();
-    if (airfoil == nullptr)
+    if (airfoil == nullptr || airfoil->splines.empty())
         return;
+    UndoState before = captureState();
     airfoil->splines.clear();
     airfoil->stations.clear();
     persistSplines();
     status_->setStyleSheet(QStringLiteral("color: %1;").arg(kOkColor));
     syncFromText();
+    pushUndo(std::move(before));
 }
 
 void AirfoilPanel::showConvertDialog()
@@ -1113,6 +1189,7 @@ void AirfoilPanel::showConvertDialog()
         newName += QStringLiteral("-spline.txt");
     }
 
+    UndoState undoBefore = captureState();
     // The fit-time chord parameters become the permanent sampling
     // stations for this airfoil: the file is these splines evaluated at
     // exactly these stations from now on.
@@ -1180,4 +1257,5 @@ void AirfoilPanel::showConvertDialog()
         applyingEdit_ = false;
     }
     syncFromText();
+    pushUndo(std::move(undoBefore));
 }

@@ -3,6 +3,7 @@
 #include <QFontMetrics>
 #include <QHelpEvent>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QToolTip>
@@ -715,6 +716,14 @@ void CurveEditor::mouseReleaseEvent(QMouseEvent *event)
 
 void CurveEditor::keyPressEvent(QKeyEvent *event)
 {
+    if (event->matches(QKeySequence::Undo)) {
+        emit undoRequested();
+        return;
+    }
+    if (event->matches(QKeySequence::Redo)) {
+        emit redoRequested();
+        return;
+    }
     const bool large = event->modifiers().testFlag(Qt::ShiftModifier);
     switch (event->key()) {
     case Qt::Key_Up:

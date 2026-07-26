@@ -63,8 +63,28 @@ GridCurvePanel::GridCurvePanel(int sectionNumber, QPlainTextEdit *editor,
         if (!applyingEdit_)
             syncFromText();
     });
+    connect(curves_, &CurveEditor::undoRequested, this, [this] {
+        if (const QString *text = undo_.undo())
+            restoreText(*text);
+    });
+    connect(curves_, &CurveEditor::redoRequested, this, [this] {
+        if (const QString *text = undo_.redo())
+            restoreText(*text);
+    });
 
     updateDescription(QString());
+    syncFromText();
+}
+
+void GridCurvePanel::restoreText(const QString &text)
+{
+    if (editor_->toPlainText() == text)
+        return;
+    applyingEdit_ = true;
+    QTextCursor cursor(editor_->document());
+    cursor.select(QTextCursor::Document);
+    cursor.insertText(text);
+    applyingEdit_ = false;
     syncFromText();
 }
 
@@ -220,6 +240,7 @@ void GridCurvePanel::commitSeries(const QString &seriesId)
     if (!series || series->points.size() != uniformRows_.size())
         return;
     const int column = seriesId.toInt();
+    const QString before = editor_->toPlainText();
 
     QTextDocument *document = editor_->document();
     applyingEdit_ = true;
@@ -248,6 +269,9 @@ void GridCurvePanel::commitSeries(const QString &seriesId)
     cursor.endEditBlock();
     applyingEdit_ = false;
     syncFromText();
+    const QString after = editor_->toPlainText();
+    if (after != before)
+        undo_.push(before, after);
 }
 
 void GridCurvePanel::updateDescription(const QString &seriesId)

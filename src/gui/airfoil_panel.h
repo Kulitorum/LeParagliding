@@ -1,8 +1,10 @@
 #pragma once
 
 #include "airfoil_file.h"
+#include "panel_undo.h"
 #include "spline_fit.h"
 
+#include <QHash>
 #include <QJsonObject>
 #include <QPointF>
 #include <QVector>
@@ -44,6 +46,10 @@ public:
 signals:
     void handleMoved(int segment, int index, const QPointF &position);
     void editCommitted();
+    // Ctrl+Z / Ctrl+Y pressed with the view focused; the panel owns the
+    // undo stack for graphical edits.
+    void undoRequested();
+    void redoRequested();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -107,6 +113,18 @@ private:
         bool stale = false;
     };
 
+    // Everything a graphical edit can touch: the section text (file
+    // references), the trailer JSON, and the referenced files on disk.
+    struct UndoState
+    {
+        QString text;
+        QJsonObject splines;
+        QHash<QString, QByteArray> files; // absolute path -> content
+    };
+    UndoState captureState() const;
+    void restoreState(const UndoState &state);
+    void pushUndo(UndoState before);
+
     void syncFromText();
     void rebuildView();
     void showConvertDialog();
@@ -142,4 +160,5 @@ private:
     bool applyingEdit_ = false;
     bool previewActive_ = false;
     std::vector<lep::BSpline2D> previewSplines_;
+    PanelUndoStack<UndoState> undo_;
 };

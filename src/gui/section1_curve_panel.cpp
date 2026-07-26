@@ -186,9 +186,46 @@ Section1CurvePanel::Section1CurvePanel(
         if (!applyingEdit_)
             syncFromText();
     });
+    connect(curves_, &CurveEditor::undoRequested, this, [this] {
+        if (const UndoState *state = undo_.undo())
+            restoreState(*state);
+    });
+    connect(curves_, &CurveEditor::redoRequested, this, [this] {
+        if (const UndoState *state = undo_.redo())
+            restoreState(*state);
+    });
 
     loadSplinesFromDocument();
     updateDescription(QString());
+    syncFromText();
+}
+
+Section1CurvePanel::UndoState Section1CurvePanel::captureState() const
+{
+    return {editor_->toPlainText(), loadSplines_ ? loadSplines_()
+                                                 : QJsonObject()};
+}
+
+void Section1CurvePanel::pushUndo(UndoState before)
+{
+    UndoState after = captureState();
+    if (before.text == after.text && before.splines == after.splines)
+        return; // the operation turned out to be a no-op
+    undo_.push(std::move(before), std::move(after));
+}
+
+void Section1CurvePanel::restoreState(const UndoState &state)
+{
+    if (storeSplines_)
+        storeSplines_(state.splines);
+    loadSplinesFromDocument();
+    if (editor_->toPlainText() != state.text) {
+        applyingEdit_ = true;
+        QTextCursor cursor(editor_->document());
+        cursor.select(QTextCursor::Document);
+        cursor.insertText(state.text);
+        applyingEdit_ = false;
+    }
     syncFromText();
 }
 
@@ -408,7 +445,8 @@ void Section1CurvePanel::rebuildDisplay()
                                               : QStringLiteral("s"));
         }
         text += QStringLiteral(" · drag points to edit · ↑/↓ nudges "
-                               "(Shift = ×10)");
+                               "(Shift = ×10) · Ctrl+Z here undoes the "
+                               "last curve edit");
         status_->setText(text);
     }
     updateToolbar();
@@ -432,6 +470,7 @@ void Section1CurvePanel::commitSeries(const QString &seriesId)
     const int column = columnIndexById(seriesId.toStdString());
     if (column < 1 || !matrixUsable_ || previewActive_)
         return;
+    UndoState before = captureState();
     const CurveSeries *series = nullptr;
     for (const CurveSeries &candidate : curves_->seriesList()) {
         if (candidate.id == seriesId) {
@@ -456,6 +495,7 @@ void Section1CurvePanel::commitSeries(const QString &seriesId)
             lep::uniformParameters(static_cast<int>(matrix_.rows.size())));
         patchRows({{column, sampled}}, false);
         persistSplines();
+        pushUndo(std::move(before));
         return;
     }
 
@@ -466,6 +506,7 @@ void Section1CurvePanel::commitSeries(const QString &seriesId)
     for (const QPointF &point : series->points)
         values.push_back(point.y());
     patchRows({{column, values}}, true);
+    pushUndo(std::move(before));
 }
 
 void Section1CurvePanel::patchRows(
@@ -663,6 +704,7 @@ void Section1CurvePanel::showConvertDialog()
         return;
     }
 
+    UndoState before = captureState();
     tolerancePercent_ = sliderToPercent(slider->value());
     std::map<int, std::vector<double>> valuesByColumn;
     for (const auto &[column, toggle] : toggles) {
@@ -679,21 +721,26 @@ void Section1CurvePanel::showConvertDialog()
     previewSplines_.clear();
     persistSplines();
     patchRows(valuesByColumn, false);
+    pushUndo(std::move(before));
 }
 
 void Section1CurvePanel::removeSelectedSpline()
 {
     const std::string selected = curves_->selectedSeriesId().toStdString();
-    if (splines_.erase(selected) > 0) {
-        persistSplines();
-        syncFromText();
-    }
+    if (splines_.count(selected) == 0)
+        return;
+    UndoState before = captureState();
+    splines_.erase(selected);
+    persistSplines();
+    syncFromText();
+    pushUndo(std::move(before));
 }
 
 void Section1CurvePanel::refitStaleColumns()
 {
     if (!matrixUsable_)
         return;
+    UndoState before = captureState();
     const std::vector<double> stations =
         lep::uniformParameters(static_cast<int>(matrix_.rows.size()));
     for (const std::string &columnId : staleColumns_) {
@@ -709,12 +756,14 @@ void Section1CurvePanel::refitStaleColumns()
     }
     persistSplines();
     syncFromText();
+    pushUndo(std::move(before));
 }
 
 void Section1CurvePanel::applyStaleSplines()
 {
     if (!matrixUsable_)
         return;
+    UndoState before = captureState();
     const std::vector<double> stations =
         lep::uniformParameters(static_cast<int>(matrix_.rows.size()));
     std::map<int, std::vector<double>> valuesByColumn;
@@ -726,6 +775,7 @@ void Section1CurvePanel::applyStaleSplines()
         valuesByColumn[column] = lep::sampleBSpline(spline->second, stations);
     }
     patchRows(valuesByColumn, false);
+    pushUndo(std::move(before));
 }
 
 void Section1CurvePanel::updateDescription(const QString &seriesId)
