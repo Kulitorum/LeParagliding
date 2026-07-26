@@ -15,6 +15,26 @@ ctest --preset release          # run the test suite
 The Release output folder is directly runnable: post-build steps run
 windeployqt and copy the OCCT runtime DLLs next to the executables.
 
+### Linux verification via WSL
+
+The WSL Ubuntu distro on this machine keeps a persistent Linux build
+environment: OCCT 8.0.0p1 installed at `~/occt-install` (built with
+`-DCMAKE_INSTALL_RPATH='$ORIGIN'` so transitively loaded toolkits resolve)
+and Qt 6.8.3 at `~/Qt/6.8.3/gcc_64`. Configure with
+`-DCMAKE_PREFIX_PATH="$HOME/occt-install;$HOME/Qt/6.8.3/gcc_64"`.
+
+Building from `/mnt/c` works for a quick check, but `/mnt/c` is
+case-insensitive and masks case bugs that break the CI runners (a stray
+`RESOURCES` source entry once configured fine locally and failed on ext4).
+For a faithful check, copy the tracked tree to ext4 first:
+`git ls-files -z | tar --null -T - -cf - | tar -xf - -C ~/lep-src`.
+
+Run multi-line WSL commands as a script piped through `tr -d '\r'`
+(`wsl.exe -- bash -c "tr -d '\r' < /mnt/c/...sh | bash"`): wsl.exe
+re-evaluates inline command strings, mangling quotes and `$variables`,
+and CRLF line endings break bash. Package installs: `wsl -u root -- apt-get
+install -y ...` (no password needed, unlike sudo).
+
 ## GitHub releases
 
 Version source of truth is `project(... VERSION x.y.z)` in CMakeLists.txt.
