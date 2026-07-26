@@ -54,6 +54,7 @@ jobs:
           ALL='[
             {"name":"Linux (Ubuntu 24.04)","os":"ubuntu-24.04","qt_arch":"linux_gcc_64","key":"linux"},
             {"name":"macOS 15 (arm64)","os":"macos-15","qt_arch":"clang_64","key":"macos"},
+            {"name":"macOS 13 (x86_64)","os":"macos-13","qt_arch":"clang_64","key":"macos"},
             {"name":"Windows (VS 2022)","os":"windows-latest","qt_arch":"win64_msvc2022_64","key":"windows"}
           ]'
           SEL='${{ inputs.platforms }}'
@@ -174,12 +175,14 @@ jobs:
         shell: bash
         run: |
           curl -fsSL "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/${OCCT_TAG}.tar.gz" | tar xz -C "$RUNNER_TEMP"
-          # macOS ships a universal (arm64 + x86_64) build with a deployment
-          # target a few releases back, so OCCT's libraries match the app.
+          # Build OCCT with the same deployment target as the app so its
+          # libraries do not drag the minimum macOS version back up. Each
+          # macOS runner builds for its own native architecture (Homebrew's
+          # freetype/fontconfig are single-arch, so a cross-arch slice cannot
+          # link); the arm64 and x86_64 DMGs are produced by separate runners.
           EXTRA=()
           if [ "$RUNNER_OS" = "macOS" ]; then
-            EXTRA+=(-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-                    -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0)
+            EXTRA+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0)
           fi
           cmake -S "$RUNNER_TEMP"/OCCT-* -B "$RUNNER_TEMP/occt-build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -204,15 +207,10 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          # macOS: emit a universal binary (the deployment target is set in
-          # CMakeLists.txt). Other platforms build for the host arch.
-          EXTRA=()
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            EXTRA+=(-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64")
-          fi
+          # Each host builds for its native architecture; the macOS deployment
+          # target is set in CMakeLists.txt so binaries run on older systems.
           cmake -S . -B build-ci -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            "${EXTRA[@]}" \
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/occt-install;$QT_ROOT_DIR"
 
       - name: Build
@@ -346,7 +344,7 @@ jobs:
           ln -s /Applications dmg_contents/Applications
           hdiutil create -volname "LEparagliding" -srcfolder dmg_contents \
             -ov -format UDZO \
-            "LEparagliding_v${{ steps.version.outputs.version }}_macos-universal.dmg"
+            "LEparagliding_v${{ steps.version.outputs.version }}_macos-$(uname -m).dmg"
 
       - name: Sign, notarize, and staple the DMG (macOS)
         if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
@@ -356,7 +354,7 @@ jobs:
           APPLE_ID_APP_PASSWORD: ${{ secrets.APPLE_ID_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG="LEparagliding_v${{ steps.version.outputs.version }}_macos-universal.dmg"
+          DMG="LEparagliding_v${{ steps.version.outputs.version }}_macos-$(uname -m).dmg"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/app-signing.keychain-db"
           codesign --force --sign "Developer ID Application: Michael Holm (HKHN2RK2P4)" "$DMG"
           xcrun notarytool submit "$DMG" \
