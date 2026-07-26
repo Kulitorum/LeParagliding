@@ -99,6 +99,9 @@ set(LEP_OCCT_TOOLKITS
     TKLCAF
     TKCAF
     TKXCAF
+    TKBinL
+    TKBin
+    TKBinXCAF
 )
 
 add_library(lep_occt INTERFACE)

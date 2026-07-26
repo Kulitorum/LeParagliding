@@ -42,11 +42,14 @@
 #include <Prs3d_ShadingAspect.hxx>
 #include <Prs3d_TypeOfHighlight.hxx>
 #include <Quantity_Color.hxx>
+#include <BinXCAFDrivers.hxx>
+#include <PCDM_ReaderStatus.hxx>
 #include <STEPCAFControl_Reader.hxx>
 #include <Standard_Failure.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <TDF_Label.hxx>
 #include <TDataStd_Name.hxx>
+#include <TDocStd_Application.hxx>
 #include <TDocStd_Document.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
@@ -679,36 +682,58 @@ bool ParagliderView::loadStep(const QString &path, QString *errorMessage)
     const QFileInfo fileInfo(path);
     if (!fileInfo.isFile()) {
         if (errorMessage != nullptr) {
-            *errorMessage = QStringLiteral("STEP file does not exist: %1")
+            *errorMessage = QStringLiteral("Model file does not exist: %1")
                                 .arg(fileInfo.absoluteFilePath());
         }
         return false;
     }
+    const bool binaryXcaf =
+        fileInfo.suffix().compare(QStringLiteral("xbf"), Qt::CaseInsensitive)
+        == 0;
 
     try {
-        STEPCAFControl_Reader reader;
-        reader.SetNameMode(true);
-        reader.SetColorMode(true);
+        occ::handle<TDocStd_Document> document;
         const QByteArray encodedPath =
             fileInfo.absoluteFilePath().toUtf8();
-        if (reader.ReadFile(encodedPath.constData()) != IFSelect_RetDone) {
-            if (errorMessage != nullptr) {
-                *errorMessage =
-                    QStringLiteral("OCCT could not read the STEP file.");
+        if (binaryXcaf) {
+            // Binary XCAF from a preview engine run: open the document
+            // directly, no STEP entity translation involved.
+            const occ::handle<TDocStd_Application> application =
+                XCAFApp_Application::GetApplication();
+            BinXCAFDrivers::DefineFormat(application);
+            if (application->Open(
+                    TCollection_ExtendedString(encodedPath.constData(), true),
+                    document)
+                    != PCDM_RS_OK
+                || document.IsNull()) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = QStringLiteral(
+                        "OCCT could not read the binary XCAF model.");
+                }
+                return false;
             }
-            return false;
-        }
+        } else {
+            STEPCAFControl_Reader reader;
+            reader.SetNameMode(true);
+            reader.SetColorMode(true);
+            if (reader.ReadFile(encodedPath.constData()) != IFSelect_RetDone) {
+                if (errorMessage != nullptr) {
+                    *errorMessage =
+                        QStringLiteral("OCCT could not read the STEP file.");
+                }
+                return false;
+            }
 
-        occ::handle<TDocStd_Document> document;
-        XCAFApp_Application::GetApplication()->NewDocument(
-            "MDTV-XCAF",
-            document);
-        if (!reader.Transfer(document)) {
-            if (errorMessage != nullptr) {
-                *errorMessage =
-                    QStringLiteral("The STEP file contains no transferable model roots.");
+            XCAFApp_Application::GetApplication()->NewDocument(
+                "MDTV-XCAF",
+                document);
+            if (!reader.Transfer(document)) {
+                if (errorMessage != nullptr) {
+                    *errorMessage =
+                        QStringLiteral("The STEP file contains no transferable model roots.");
+                }
+                return false;
             }
-            return false;
         }
 
         const occ::handle<XCAFDoc_ShapeTool> shapeTool =
@@ -801,6 +826,10 @@ bool ParagliderView::loadStep(const QString &path, QString *errorMessage)
                 traverse(freeShapes.Value(index), TopLoc_Location(), -1, {});
             }
         }
+
+        // The shapes own their geometry independently of the document;
+        // close it or every preview rebuild leaks a session document.
+        XCAFApp_Application::GetApplication()->Close(document);
 
         bool anyLeaf = false;
         for (const Impl::Part &part : parts) {

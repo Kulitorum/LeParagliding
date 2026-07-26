@@ -8,16 +8,18 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 extern "C" int MAIN__();
 extern "C" void f_exit();
 
 namespace {
 
-constexpr std::array<std::string_view, 5> outputFiles{
+constexpr std::array<std::string_view, 6> outputFiles{
     "leparagliding.dxf",
     "lep-3d.dxf",
     "lep-3d.step",
+    "lep-3d.xbf",
     "lep-out.txt",
     "lines.txt",
 };
@@ -36,11 +38,13 @@ void printUsage()
 {
     std::cout
         << "LEparagliding C++ engine 3.28\n"
-        << "Usage: leparagliding-engine [--resource-dir <directory>] "
+        << "Usage: leparagliding-engine [--preview] [--resource-dir <directory>] "
            "<design-file> <output-directory>\n"
         << "\n"
         << "Relative airfoil paths are resolved from the design file's directory,\n"
-        << "or from --resource-dir when calculating a temporary design copy.\n";
+        << "or from --resource-dir when calculating a temporary design copy.\n"
+        << "--preview writes the 3D model as binary XCAF (lep-3d.xbf) instead\n"
+        << "of STEP; the Studio preview loads it directly.\n";
 }
 
 std::string pathToUtf8(const std::filesystem::path &path)
@@ -51,7 +55,8 @@ std::string pathToUtf8(const std::filesystem::path &path)
 
 int runEngine(const std::filesystem::path &inputArgument,
               const std::filesystem::path &outputArgument,
-              const std::filesystem::path &resourceArgument = {})
+              const std::filesystem::path &resourceArgument,
+              bool preview)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
@@ -130,8 +135,9 @@ int runEngine(const std::filesystem::path &inputArgument,
             return result;
         }
 
+        const char *modelFileName = preview ? "lep-3d.xbf" : "lep-3d.step";
         const lep::NurbsWriteResult step =
-            lep::writeNurbsStep(output / "lep-3d.step");
+            lep::writeNurbsStep(output / modelFileName);
         for (const std::string &warning : step.warnings) {
             std::cerr << "NURBS model warning: " << warning << '\n';
         }
@@ -154,8 +160,8 @@ int runEngine(const std::filesystem::path &inputArgument,
             << step.maximumSourceDeviationMillimetres << " mm\n"
             << "Maximum source/legacy-grid deviation: "
             << step.maximumLegacyAgreementMillimetres << " mm\n"
-            << "STEP model: "
-            << pathToUtf8(output / "lep-3d.step") << '\n';
+            << (preview ? "Preview model: " : "STEP model: ")
+            << pathToUtf8(output / modelFileName) << '\n';
         return result;
     } catch (const std::exception &exception) {
         std::cerr << "Engine error: " << exception.what() << '\n';
@@ -163,52 +169,75 @@ int runEngine(const std::filesystem::path &inputArgument,
     }
 }
 
+// Flags are plain ASCII, so one comparison covers char and wchar_t argv.
+template <typename StringView>
+bool matchesFlag(StringView argument, std::string_view flag)
+{
+    if (argument.size() != flag.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < flag.size(); ++index) {
+        if (argument[index]
+            != static_cast<typename StringView::value_type>(flag[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::filesystem::path argumentPath(std::wstring_view argument)
+{
+    return std::filesystem::path(argument);
+}
+
+std::filesystem::path argumentPath(std::string_view argument)
+{
+    return std::filesystem::u8path(std::string(argument));
+}
+
+template <typename StringView>
+int runFromArguments(const std::vector<StringView> &arguments)
+{
+    bool preview = false;
+    std::filesystem::path resourceDirectory;
+    std::vector<std::filesystem::path> positional;
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        const StringView argument = arguments[index];
+        if (matchesFlag(argument, "--help") || matchesFlag(argument, "-h")) {
+            printUsage();
+            return arguments.size() == 1 ? 0 : 2;
+        }
+        if (matchesFlag(argument, "--preview")) {
+            preview = true;
+        } else if (matchesFlag(argument, "--resource-dir")) {
+            if (index + 1 >= arguments.size()) {
+                printUsage();
+                return 2;
+            }
+            resourceDirectory = argumentPath(arguments[++index]);
+        } else {
+            positional.push_back(argumentPath(argument));
+        }
+    }
+    if (positional.size() != 2) {
+        printUsage();
+        return 2;
+    }
+    return runEngine(positional[0], positional[1], resourceDirectory, preview);
+}
+
 } // namespace
 
 #ifdef _WIN32
 int wmain(int argc, wchar_t *argv[])
 {
-    if (argc == 2
-        && (std::wstring_view(argv[1]) == L"--help"
-            || std::wstring_view(argv[1]) == L"-h")) {
-        printUsage();
-        return 0;
-    }
-    if (argc == 3) {
-        return runEngine(
-            std::filesystem::path(argv[1]),
-            std::filesystem::path(argv[2]));
-    }
-    if (argc == 5 && std::wstring_view(argv[1]) == L"--resource-dir") {
-        return runEngine(
-            std::filesystem::path(argv[3]),
-            std::filesystem::path(argv[4]),
-            std::filesystem::path(argv[2]));
-    }
-    printUsage();
-    return 2;
+    return runFromArguments(
+        std::vector<std::wstring_view>(argv + 1, argv + argc));
 }
 #else
 int main(int argc, char *argv[])
 {
-    if (argc == 2
-        && (std::string_view(argv[1]) == "--help"
-            || std::string_view(argv[1]) == "-h")) {
-        printUsage();
-        return 0;
-    }
-    if (argc == 3) {
-        return runEngine(
-            std::filesystem::u8path(argv[1]),
-            std::filesystem::u8path(argv[2]));
-    }
-    if (argc == 5 && std::string_view(argv[1]) == "--resource-dir") {
-        return runEngine(
-            std::filesystem::u8path(argv[3]),
-            std::filesystem::u8path(argv[4]),
-            std::filesystem::u8path(argv[2]));
-    }
-    printUsage();
-    return 2;
+    return runFromArguments(
+        std::vector<std::string_view>(argv + 1, argv + argc));
 }
 #endif

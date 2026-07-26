@@ -10,6 +10,7 @@
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BinXCAFDrivers.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GeomConvert.hxx>
 #include <GeomFill_NSections.hxx>
@@ -20,6 +21,8 @@
 #include <Interface_Static.hxx>
 #include <NCollection_Array1.hxx>
 #include <NCollection_Sequence.hxx>
+#include <OSD_Parallel.hxx>
+#include <PCDM_StoreStatus.hxx>
 #include <Precision.hxx>
 #include <Quantity_Color.hxx>
 #include <STEPCAFControl_Writer.hxx>
@@ -29,6 +32,7 @@
 #include <TCollection_ExtendedString.hxx>
 #include <TDF_Label.hxx>
 #include <TDataStd_Name.hxx>
+#include <TDocStd_Application.hxx>
 #include <TDocStd_Document.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
@@ -1662,14 +1666,15 @@ private:
                             const RibFrame &frame,
                             int ribIndex,
                             int holeNumber,
-                            int &edgeCount) const
+                            int &edgeCount,
+                            std::vector<std::string> &warnings) const
     {
         // A hole that cannot be built is left uncut with a warning; the
         // legacy core also draws inconsistent hole definitions without
         // complaint.
         const auto fail =
-            [this, ribIndex, holeNumber](const std::string &reason) {
-                warnings_.push_back(
+            [&warnings, ribIndex, holeNumber](const std::string &reason) {
+                warnings.push_back(
                     "Left hole " + std::to_string(holeNumber)
                     + " of rib " + std::to_string(ribIndex)
                     + " uncut: " + reason);
@@ -1817,14 +1822,18 @@ private:
     // the exact panel boundary edges wherever a panel exists, interpolates
     // the captured contour where none does, and closes the trailing edge
     // with a straight seam. Airfoil holes become inner wires.
+    // Builds one rib face; runs on worker threads, so every warning and
+    // error goes to the caller's sinks instead of the shared members.
     TopoDS_Face makeRibFace(int ribIndex,
                             std::vector<RibBoundarySegment> segments,
                             const CapturedRib &rib,
                             int &edgeCount,
-                            TopoDS_Shape &curveFallback) const
+                            TopoDS_Shape &curveFallback,
+                            std::vector<std::string> &warnings,
+                            std::vector<std::string> &errors) const
     {
-        const auto fail = [this, ribIndex](const std::string &reason) {
-            errors_.push_back(
+        const auto fail = [&errors, ribIndex](const std::string &reason) {
+            errors.push_back(
                 reason + " for rib " + std::to_string(ribIndex));
             return TopoDS_Face();
         };
@@ -2062,70 +2071,122 @@ private:
             return detail.str();
         };
 
-        {
-            const BRepCheck_Analyzer analyzer(face, true);
-            if (!analyzer.IsValid()) {
-                // Very thin profiles (single-skin ribs) can produce an
-                // outline OCCT cannot classify as a face; keep the exact
-                // outline curves instead of failing the whole model.
-                warnings_.push_back(
-                    "Exported rib " + std::to_string(ribIndex)
-                    + " as outline curves: OCCT rejected its face "
-                    + invalidFaceDetail(analyzer, face));
-                std::vector<TopoDS_Shape> outline;
-                outline.reserve(boundary.size());
-                for (const BoundaryEdge &edge : boundary) {
-                    outline.push_back(edge.edge);
-                }
-                curveFallback = makeCompound(outline);
-                edgeCount = static_cast<int>(boundary.size());
-                return {};
+        const auto outlineFallback = [&](const BRepCheck_Analyzer &analyzer) {
+            // Very thin profiles (single-skin ribs) can produce an
+            // outline OCCT cannot classify as a face; keep the exact
+            // outline curves instead of failing the whole model.
+            warnings.push_back(
+                "Exported rib " + std::to_string(ribIndex)
+                + " as outline curves: OCCT rejected its face "
+                + invalidFaceDetail(analyzer, face));
+            std::vector<TopoDS_Shape> outline;
+            outline.reserve(boundary.size());
+            for (const BoundaryEdge &edge : boundary) {
+                outline.push_back(edge.edge);
             }
-        }
+            curveFallback = makeCompound(outline);
+            edgeCount = static_cast<int>(boundary.size());
+        };
 
+        // Prepare every hole wire up front. Their warnings are committed
+        // only when the rib keeps its face: a rib that falls back to
+        // outline curves never reported hole problems.
+        struct PreparedHole
+        {
+            std::size_t number = 0;
+            TopoDS_Wire wire;
+            int edgeCount = 0;
+        };
+        std::vector<PreparedHole> preparedHoles;
+        std::vector<std::string> holeWarnings;
         if (!rib.holes.empty()) {
             RibFrame frame;
             if (!fitRibFrame(rib.planarPoints, rib.spatialPoints, frame)) {
-                warnings_.push_back(
+                holeWarnings.push_back(
                     "Left the holes of rib " + std::to_string(ribIndex)
                     + " uncut: could not recover its rigid planar frame");
-                return face;
+            } else {
+                for (std::size_t holeIndex = 0;
+                     holeIndex < rib.holes.size();
+                     ++holeIndex) {
+                    int holeEdgeCount = 0;
+                    TopoDS_Wire holeWire = ribHoleWire(
+                        rib.holes[holeIndex],
+                        frame,
+                        ribIndex,
+                        static_cast<int>(holeIndex) + 1,
+                        holeEdgeCount,
+                        holeWarnings);
+                    if (holeWire.IsNull()) {
+                        // ribHoleWire already recorded why.
+                        continue;
+                    }
+                    // Holes must wind against the outer boundary.
+                    if (signedAreaAlongNormal(holeWire, planeOrigin, normal)
+                        > 0.0) {
+                        holeWire.Reverse();
+                    }
+                    preparedHoles.push_back(
+                        {holeIndex + 1, holeWire, holeEdgeCount});
+                }
             }
-            for (std::size_t holeIndex = 0;
-                 holeIndex < rib.holes.size();
-                 ++holeIndex) {
-                int holeEdgeCount = 0;
-                TopoDS_Wire holeWire = ribHoleWire(
-                    rib.holes[holeIndex],
-                    frame,
-                    ribIndex,
-                    static_cast<int>(holeIndex) + 1,
-                    holeEdgeCount);
-                if (holeWire.IsNull()) {
-                    // ribHoleWire already recorded why.
-                    continue;
-                }
-                // Holes must wind against the outer boundary.
-                if (signedAreaAlongNormal(holeWire, planeOrigin, normal)
-                    > 0.0) {
-                    holeWire.Reverse();
-                }
-                BRepBuilderAPI_MakeFace holedFace(face, holeWire);
-                const BRepCheck_Analyzer holedCheck(
-                    holedFace.IsDone() ? holedFace.Face() : face, true);
-                if (!holedFace.IsDone() || !holedCheck.IsValid()) {
-                    // The legacy core draws such holes over the outline in
-                    // the 2D patterns; in the solid model they cannot be
-                    // cut, so leave them out and say so.
-                    warnings_.push_back(
-                        "Left hole " + std::to_string(holeIndex + 1)
-                        + " of rib " + std::to_string(ribIndex)
-                        + " uncut: it does not fit inside the rib outline");
-                    continue;
-                }
-                face = holedFace.Face();
-                edgeCount += holeEdgeCount;
+        }
+
+        // Cut every hole, then validate the finished face once: the
+        // analyzer dominates the whole model build, so the per-hole
+        // diagnosis below runs only when this combined face fails.
+        TopoDS_Face holedFace = face;
+        int holedEdgeCount = 0;
+        bool allHolesCut = true;
+        for (const PreparedHole &hole : preparedHoles) {
+            BRepBuilderAPI_MakeFace cut(holedFace, hole.wire);
+            if (!cut.IsDone()) {
+                allHolesCut = false;
+                break;
             }
+            holedFace = cut.Face();
+            holedEdgeCount += hole.edgeCount;
+        }
+        if (allHolesCut) {
+            const BRepCheck_Analyzer analyzer(holedFace, true);
+            if (analyzer.IsValid()) {
+                warnings.insert(warnings.end(),
+                                holeWarnings.begin(),
+                                holeWarnings.end());
+                edgeCount += holedEdgeCount;
+                return holedFace;
+            }
+        }
+
+        // Something in the combined face is invalid. Check the bare face
+        // first (it decides between the outline fallback and hole trouble),
+        // then re-cut hole by hole to skip exactly the offenders.
+        {
+            const BRepCheck_Analyzer analyzer(face, true);
+            if (!analyzer.IsValid()) {
+                outlineFallback(analyzer);
+                return {};
+            }
+        }
+        warnings.insert(warnings.end(),
+                        holeWarnings.begin(),
+                        holeWarnings.end());
+        for (const PreparedHole &hole : preparedHoles) {
+            BRepBuilderAPI_MakeFace cut(face, hole.wire);
+            const BRepCheck_Analyzer holedCheck(
+                cut.IsDone() ? cut.Face() : face, true);
+            if (!cut.IsDone() || !holedCheck.IsValid()) {
+                // The legacy core draws such holes over the outline in
+                // the 2D patterns; in the solid model they cannot be
+                // cut, so leave them out and say so.
+                warnings.push_back(
+                    "Left hole " + std::to_string(hole.number)
+                    + " of rib " + std::to_string(ribIndex)
+                    + " uncut: it does not fit inside the rib outline");
+                continue;
+            }
+            face = cut.Face();
+            edgeCount += hole.edgeCount;
         }
         return face;
     }
@@ -2153,7 +2214,14 @@ private:
             }
         }
 
-        AssemblyGroup &ribs = wing.group(ribsGroupName);
+        struct RibJob
+        {
+            int ribIndex = 0;
+            const std::vector<RibBoundarySegment> *segments = nullptr;
+            const CapturedRib *rib = nullptr;
+        };
+        std::vector<RibJob> jobs;
+        jobs.reserve(ribSegments.size());
         for (const auto &[ribIndex, segments] : ribSegments) {
             const auto captured = capturedRibs_.find(ribIndex);
             if (captured == capturedRibs_.end()) {
@@ -2162,52 +2230,114 @@ private:
                     + std::to_string(ribIndex));
                 return;
             }
+            jobs.push_back({ribIndex, &segments, &captured->second});
+        }
 
+        struct RibBuild
+        {
+            TopoDS_Shape shape;
+            TopoDS_Shape mirroredShape;
+            bool hasFace = false;
+            bool onCenter = false;
             int edgeCount = 0;
-            TopoDS_Shape outlineCurves;
-            const TopoDS_Face face = makeRibFace(
-                ribIndex, segments, captured->second, edgeCount,
-                outlineCurves);
-            if (!errors_.empty()) {
-                return;
-            }
-            const bool hasFace = !face.IsNull();
-            const TopoDS_Shape shape =
-                hasFace ? TopoDS_Shape(face) : outlineCurves;
-            if (shape.IsNull()) {
-                errors_.push_back(
-                    "Could not build the shape of rib "
-                    + std::to_string(ribIndex));
+            std::vector<std::string> warnings;
+            std::vector<std::string> errors;
+        };
+        std::vector<RibBuild> builds(jobs.size());
+
+        // Every rib face is geometrically independent, so they build on
+        // OCCT's thread pool; the merge below runs in rib order to keep
+        // the assembly, warnings, and errors deterministic.
+        OSD_Parallel::For(
+            0,
+            static_cast<int>(jobs.size()),
+            [this, &jobs, &builds](int jobIndex) {
+                const RibJob &job =
+                    jobs[static_cast<std::size_t>(jobIndex)];
+                RibBuild &build =
+                    builds[static_cast<std::size_t>(jobIndex)];
+                try {
+                    TopoDS_Shape outlineCurves;
+                    const TopoDS_Face face = makeRibFace(
+                        job.ribIndex,
+                        *job.segments,
+                        *job.rib,
+                        build.edgeCount,
+                        outlineCurves,
+                        build.warnings,
+                        build.errors);
+                    if (!build.errors.empty()) {
+                        return;
+                    }
+                    build.hasFace = !face.IsNull();
+                    build.shape = build.hasFace ? TopoDS_Shape(face)
+                                                : outlineCurves;
+                    if (build.shape.IsNull()) {
+                        build.errors.push_back(
+                            "Could not build the shape of rib "
+                            + std::to_string(job.ribIndex));
+                        return;
+                    }
+                    build.onCenter = std::all_of(
+                        job.rib->spatialPoints.begin(),
+                        job.rib->spatialPoints.end(),
+                        [](const gp_Pnt &point) {
+                            return std::abs(point.X())
+                                   <= symmetryPlaneToleranceMillimetres;
+                        });
+                    if (!build.onCenter) {
+                        build.mirroredShape = mirrored(build.shape);
+                        if (build.mirroredShape.IsNull()) {
+                            build.errors.push_back(
+                                "Could not mirror the shape of rib "
+                                + std::to_string(job.ribIndex));
+                        }
+                    }
+                } catch (const Standard_Failure &failure) {
+                    build.errors.push_back(
+                        "OCCT failed building rib "
+                        + std::to_string(job.ribIndex) + ": "
+                        + (failure.GetMessageString() != nullptr
+                               ? failure.GetMessageString()
+                               : "unknown OCCT error"));
+                } catch (const std::exception &exception) {
+                    build.errors.push_back(
+                        "Failed building rib "
+                        + std::to_string(job.ribIndex) + ": "
+                        + exception.what());
+                }
+            });
+
+        AssemblyGroup &ribs = wing.group(ribsGroupName);
+        for (std::size_t index = 0; index < jobs.size(); ++index) {
+            RibBuild &build = builds[index];
+            warnings_.insert(warnings_.end(),
+                             build.warnings.begin(),
+                             build.warnings.end());
+            if (!build.errors.empty()) {
+                errors_.insert(errors_.end(),
+                               build.errors.begin(),
+                               build.errors.end());
                 return;
             }
 
-            const std::string partName = "Rib " + std::to_string(ribIndex);
-            const bool onCenter = std::all_of(
-                captured->second.spatialPoints.begin(),
-                captured->second.spatialPoints.end(),
-                [](const gp_Pnt &point) {
-                    return std::abs(point.X())
-                           <= symmetryPlaneToleranceMillimetres;
-                });
-            if (onCenter) {
+            const std::string partName =
+                "Rib " + std::to_string(jobs[index].ribIndex);
+            if (build.onCenter) {
                 ribs.group(centerSideName).parts.push_back(
-                    {partName, shape, ribColor, ribColor, hasFace});
-                result.surfaceCount += hasFace ? 1 : 0;
-                result.splineCount += edgeCount;
+                    {partName, build.shape, ribColor, ribColor,
+                     build.hasFace});
+                result.surfaceCount += build.hasFace ? 1 : 0;
+                result.splineCount += build.edgeCount;
             } else {
-                const TopoDS_Shape mirroredShape = mirrored(shape);
-                if (mirroredShape.IsNull()) {
-                    errors_.push_back(
-                        "Could not mirror the shape of rib "
-                        + std::to_string(ribIndex));
-                    return;
-                }
                 ribs.group(rightSideName).parts.push_back(
-                    {partName, shape, ribColor, ribColor, hasFace});
+                    {partName, build.shape, ribColor, ribColor,
+                     build.hasFace});
                 ribs.group(leftSideName).parts.push_back(
-                    {partName, mirroredShape, ribColor, ribColor, hasFace});
-                result.surfaceCount += hasFace ? 2 : 0;
-                result.splineCount += edgeCount * 2;
+                    {partName, build.mirroredShape, ribColor, ribColor,
+                     build.hasFace});
+                result.surfaceCount += build.hasFace ? 2 : 0;
+                result.splineCount += build.edgeCount * 2;
             }
             ++result.ribCount;
         }
@@ -2296,7 +2426,16 @@ private:
                        const std::filesystem::path &path,
                        lep::NurbsWriteResult &result) const
     {
-        const occ::handle<TDocStd_Document> document = newDocument();
+        // A .xbf target serializes the XCAF document in OCCT's binary
+        // format: identical geometry and assembly names, but no STEP
+        // entity translation, so previews write and load far faster.
+        const bool binary = path.extension() == ".xbf";
+        if (binary) {
+            BinXCAFDrivers::DefineFormat(
+                XCAFApp_Application::GetApplication());
+        }
+        const occ::handle<TDocStd_Document> document =
+            newDocument(binary ? "BinXCAF" : "MDTV-XCAF");
         if (document.IsNull()) {
             result.error = "OCCT could not create the XCAF document.";
             return;
@@ -2311,6 +2450,21 @@ private:
         setLabelName(wingLabel, wing.name);
         addGroupContents(shapeTool, colorTool, wingLabel, wing, result);
         shapeTool->UpdateAssemblies();
+
+        if (binary) {
+            const auto encoded = path.u8string();
+            const std::string encodedPath{
+                reinterpret_cast<const char *>(encoded.data()),
+                encoded.size()};
+            if (XCAFApp_Application::GetApplication()->SaveAs(
+                    document,
+                    TCollection_ExtendedString(encodedPath.c_str(), true))
+                != PCDM_SS_OK) {
+                result.error =
+                    "OCCT could not write the binary XCAF model.";
+            }
+            return;
+        }
 
         // AP242 preserves exact B-spline geometry, carries the assembly
         // names and colours, and is the current STEP schema. All model
@@ -2340,11 +2494,11 @@ private:
         }
     }
 
-    static occ::handle<TDocStd_Document> newDocument()
+    static occ::handle<TDocStd_Document> newDocument(const char *format)
     {
         occ::handle<TDocStd_Document> document;
         XCAFApp_Application::GetApplication()->NewDocument(
-            "MDTV-XCAF",
+            format,
             document);
         return document;
     }

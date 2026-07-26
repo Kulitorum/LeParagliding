@@ -324,6 +324,41 @@ int runStudioSelfTest(const QStringList &arguments)
         return 2;
     }
 
+    // The preview pipeline hands the model over as binary XCAF instead of
+    // STEP; it must load and describe the same assembly.
+    QProcess previewEngine;
+    previewEngine.setProgram(enginePath());
+    previewEngine.setArguments(
+        {QStringLiteral("--preview"), arguments.at(0), outputDirectory});
+    previewEngine.setProcessChannelMode(QProcess::MergedChannels);
+    previewEngine.start();
+    if (!previewEngine.waitForStarted()
+        || !previewEngine.waitForFinished(150000)
+        || previewEngine.exitStatus() != QProcess::NormalExit
+        || previewEngine.exitCode() != 0) {
+        QTextStream(stderr)
+            << "NURBS engine preview self-test failed:\n"
+            << QString::fromLocal8Bit(previewEngine.readAll()) << '\n';
+        return 2;
+    }
+    const QString xbfPath =
+        QDir(outputDirectory).filePath(QStringLiteral("lep-3d.xbf"));
+    ParagliderView previewViewport;
+    if (!previewViewport.loadStep(xbfPath, &error)) {
+        QTextStream(stderr)
+            << "Binary XCAF preview load failed: " << error << '\n';
+        return 2;
+    }
+    if (previewViewport.partCount() != viewport.partCount()
+        || previewViewport.surfaceCount() != viewport.surfaceCount()
+        || previewViewport.splineCount() != viewport.splineCount()) {
+        QTextStream(stderr)
+            << "Preview (binary XCAF) and STEP disagree: "
+            << previewViewport.modelSummary() << " vs "
+            << viewport.modelSummary() << ".\n";
+        return 2;
+    }
+
     // Exercise the native OCCT WNT/OpenGL presentation as well as STEP
     // import and meshing. This catches viewer/runtime deployment failures
     // that a shape-only test would miss.

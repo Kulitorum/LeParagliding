@@ -2400,11 +2400,17 @@ void MainWindow::startCalculation(
     setRunning(true);
 
     process_->setProgram(enginePath());
-    process_->setArguments(
-        {QStringLiteral("--resource-dir"),
-         QFileInfo(document_.filePath()).absolutePath(),
-         temporaryInput,
-         outputDirectory});
+    QStringList engineArguments{
+        QStringLiteral("--resource-dir"),
+        QFileInfo(document_.filePath()).absolutePath(),
+        temporaryInput,
+        outputDirectory};
+    if (mode == CalculationMode::Preview) {
+        // Previews hand the model over as binary XCAF (lep-3d.xbf), which
+        // writes and loads far faster than STEP; explicit exports keep STEP.
+        engineArguments.prepend(QStringLiteral("--preview"));
+    }
+    process_->setArguments(engineArguments);
     process_->setWorkingDirectory(QFileInfo(document_.filePath()).absolutePath());
     process_->start();
 }
@@ -2476,7 +2482,10 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
     const CalculationMode completedMode = calculationMode_;
     const QString completedOutput = calculationOutputDirectory_;
     const QString modelPath =
-        QDir(completedOutput).filePath(QStringLiteral("lep-3d.step"));
+        QDir(completedOutput).filePath(
+            completedMode == CalculationMode::Preview
+                ? QStringLiteral("lep-3d.xbf")
+                : QStringLiteral("lep-3d.step"));
     const bool engineSucceeded =
         exitStatus == QProcess::NormalExit && exitCode == 0;
 
