@@ -12,7 +12,9 @@ concurrency:
 
 env:
   OCCT_TAG: V8_0_0_p1
-  QT_VERSION: '6.8.3'
+  # Qt 6.8's QtGui link interface still references the AGL framework, which
+  # the macOS 26 SDK (selected via latest-stable Xcode) no longer ships.
+  QT_VERSION: '6.11.1'
 
 jobs:
   build:
