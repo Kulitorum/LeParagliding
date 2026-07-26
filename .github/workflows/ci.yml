@@ -101,9 +101,11 @@ jobs:
 
       # Open CASCADE 8.0 is newer than any distro or Homebrew package, so it
       # is built from source once per OCCT tag and cached as an install tree.
-      - name: Cache Open CASCADE
+      # Restore and save are split so a ~50-minute OCCT build is banked even
+      # when a later step in the job fails.
+      - name: Cache Open CASCADE (restore)
         id: occt-cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/occt-install
           key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
@@ -115,8 +117,11 @@ jobs:
         shell: pwsh
         run: vcpkg install freetype:x64-windows
 
+      # Unconditional: the project itself also builds with Ninja + MSVC in
+      # CI (the "windows" preset's VS 2022 generator is for local use; the
+      # windows-latest image no longer ships that Visual Studio version).
       - name: Set up MSVC environment (Windows)
-        if: runner.os == 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -141,6 +146,13 @@ jobs:
             -DBUILD_DOC_Overview=OFF
           cmake --build "$tmp/occt-build" --target install
           Copy-Item 'C:/vcpkg/installed/x64-windows/bin/*.dll' "$tmp/occt-install/bin/"
+
+      - name: Cache Open CASCADE (save)
+        if: steps.occt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/occt-install
+          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
 
       - name: Build Open CASCADE
         if: runner.os != 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
@@ -179,8 +191,8 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build-ci --output-on-failure -E "gui_smoke|studio_model_smoke"
 
-      # Windows drives the same "windows" CMake preset developers use
-      # locally (VS generator, windeployqt + OCCT runtime deployment), and
+      # Windows builds with Ninja + the runner's MSVC (windeployqt + OCCT
+      # runtime deployment run as post-build steps exactly as locally), and
       # additionally runs the Fortran byte-compare reference test.
       - name: Configure (Windows)
         if: runner.os == 'Windows'
@@ -188,17 +200,20 @@ jobs:
         run: |
           $tmp = "$env:RUNNER_TEMP".Replace('\', '/')
           $qt = "$env:QT_ROOT_DIR".Replace('\', '/')
-          cmake --preset windows "-DCMAKE_PREFIX_PATH=$qt" "-DLEP_OCCT_ROOT=$tmp/occt-install"
+          cmake -S . -B build-ci -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCMAKE_PREFIX_PATH=$qt" `
+            "-DLEP_OCCT_ROOT=$tmp/occt-install"
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
-        run: cmake --build --preset release --parallel
+        run: cmake --build build-ci
 
       - name: Test (Windows)
         if: runner.os == 'Windows'
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ctest --preset release -E "gui_smoke|studio_model_smoke"
+        run: ctest --test-dir build-ci --output-on-failure -E "gui_smoke|studio_model_smoke"
 
       # ---- Packaging: every push builds versioned artifacts; a v* tag (or
       # ---- a manual dispatch with upload_to_release) attaches them to the
@@ -247,7 +262,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path build/bin/Release/* -DestinationPath `
+          Compress-Archive -Path build-ci/bin/Release/* -DestinationPath `
             "LEparagliding_v${{ steps.version.outputs.version }}_winx64.zip"
 
       - name: Upload build artifact
