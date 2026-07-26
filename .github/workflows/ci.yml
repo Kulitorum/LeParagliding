@@ -211,8 +211,28 @@ jobs:
         if: runner.os == 'Windows'
         run: cmake --build build-ci
 
+      # A missing DLL on Windows can surface as an invisible loader dialog
+      # that hangs the process forever, so probe the engine directly with a
+      # hard timeout and print its import table before running the suite.
+      - name: Preflight engine (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          Get-ChildItem build-ci/bin/Release -Filter *.dll | ForEach-Object Name
+          dumpbin /dependents build-ci\bin\Release\leparagliding-engine.exe
+          $p = Start-Process -FilePath build-ci\bin\Release\leparagliding-engine.exe `
+            -ArgumentList '--help' -PassThru -NoNewWindow -Wait:$false
+          if (-not $p.WaitForExit(60000)) {
+            Write-Host '::error::engine --help hung for 60s'
+            $p | Stop-Process -Force
+            exit 1
+          }
+          Write-Host "engine --help exit code: $($p.ExitCode)"
+
       - name: Test (Windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 30
         env:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build-ci --output-on-failure -E "gui_smoke|studio_model_smoke"
