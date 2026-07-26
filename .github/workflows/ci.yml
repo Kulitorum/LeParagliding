@@ -53,8 +53,7 @@ jobs:
         run: |
           ALL='[
             {"name":"Linux (Ubuntu 24.04)","os":"ubuntu-24.04","qt_arch":"linux_gcc_64","key":"linux"},
-            {"name":"macOS 15 (arm64)","os":"macos-15","qt_arch":"clang_64","key":"macos"},
-            {"name":"macOS 13 (x86_64)","os":"macos-13","qt_arch":"clang_64","key":"macos"},
+            {"name":"macOS (universal)","os":"macos-15","qt_arch":"clang_64","key":"macos"},
             {"name":"Windows (VS 2022)","os":"windows-latest","qt_arch":"win64_msvc2022_64","key":"windows"}
           ]'
           SEL='${{ inputs.platforms }}'
@@ -118,6 +117,32 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ninja freetype fontconfig
 
+      # Homebrew bottles are single-arch, and FreeType is OCCT's only external
+      # font dependency. Rebuild it as a universal (arm64+x86_64) dylib in
+      # place of the Homebrew copy so a universal OCCT/app can link its x86_64
+      # slice; OCCT's detection and macdeployqt's bundling are unchanged. Built
+      # to match the Homebrew version so the soname (libfreetype.6.dylib) lines
+      # up with what OCCT links and macdeployqt relocates.
+      - name: Rebuild FreeType as universal (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          FTV=$(brew list --versions freetype | awk '{print $2}')
+          echo "Rebuilding FreeType $FTV as universal in $(brew --prefix freetype)"
+          curl -fsSL "https://download.savannah.gnu.org/releases/freetype/freetype-${FTV}.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP"
+          cmake -S "$RUNNER_TEMP/freetype-${FTV}" -B "$RUNNER_TEMP/ft-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_INSTALL_PREFIX="$(brew --prefix freetype)" \
+            -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BROTLI=ON \
+            -DFT_DISABLE_BZIP2=ON -DFT_DISABLE_PNG=ON
+          cmake --build "$RUNNER_TEMP/ft-build" --target install
+          echo "== FreeType architectures now =="
+          lipo -archs "$(brew --prefix freetype)/lib/libfreetype.6.dylib"
+
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
@@ -137,7 +162,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/occt-install
-          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v2
+          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v3
 
       # The project builds with Ninja + MSVC in CI (the "windows" preset's
       # VS 2022 generator is for local use; the windows-latest image no
@@ -179,14 +204,14 @@ jobs:
         shell: bash
         run: |
           curl -fsSL "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/${OCCT_TAG}.tar.gz" | tar xz -C "$RUNNER_TEMP"
-          # Build OCCT with the same deployment target as the app so its
-          # libraries do not drag the minimum macOS version back up. Each
-          # macOS runner builds for its own native architecture (Homebrew's
-          # freetype/fontconfig are single-arch, so a cross-arch slice cannot
-          # link); the arm64 and x86_64 DMGs are produced by separate runners.
+          # Universal (arm64 + x86_64) OCCT with a deployment target a few
+          # releases back, so its libraries match the app and do not drag the
+          # minimum macOS version up. Links the universal FreeType installed
+          # over Homebrew's in an earlier step.
           EXTRA=()
           if [ "$RUNNER_OS" = "macOS" ]; then
-            EXTRA+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0)
+            EXTRA+=(-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+                    -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0)
           fi
           cmake -S "$RUNNER_TEMP"/OCCT-* -B "$RUNNER_TEMP/occt-build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -205,16 +230,21 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/occt-install
-          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v2
+          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v3
 
       - name: Configure
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          # Each host builds for its native architecture; the macOS deployment
-          # target is set in CMakeLists.txt so binaries run on older systems.
+          # macOS emits a universal (arm64+x86_64) binary; the deployment
+          # target is set in CMakeLists.txt. Other platforms build host-native.
+          EXTRA=()
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            EXTRA+=(-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64")
+          fi
           cmake -S . -B build-ci -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            "${EXTRA[@]}" \
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/occt-install;$QT_ROOT_DIR"
 
       - name: Build
@@ -348,7 +378,7 @@ jobs:
           ln -s /Applications dmg_contents/Applications
           hdiutil create -volname "LEparagliding" -srcfolder dmg_contents \
             -ov -format UDZO \
-            "LEparagliding_v${{ steps.version.outputs.version }}_macos-$(uname -m).dmg"
+            "LEparagliding_v${{ steps.version.outputs.version }}_macos-universal.dmg"
 
       - name: Sign, notarize, and staple the DMG (macOS)
         if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
@@ -358,7 +388,7 @@ jobs:
           APPLE_ID_APP_PASSWORD: ${{ secrets.APPLE_ID_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG="LEparagliding_v${{ steps.version.outputs.version }}_macos-$(uname -m).dmg"
+          DMG="LEparagliding_v${{ steps.version.outputs.version }}_macos-universal.dmg"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/app-signing.keychain-db"
           codesign --force --sign "Developer ID Application: Michael Holm (HKHN2RK2P4)" "$DMG"
           xcrun notarytool submit "$DMG" \
