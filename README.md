@@ -160,9 +160,9 @@ ctest --test-dir build --output-on-failure
 
 The release builds in `.github/workflows/ci.yml` run exactly this on
 Ubuntu 24.04 and macOS 15, caching the OCCT install tree between runs. A
-third job builds with Ninja/MSVC on Windows against an OCCT compiled the
-same way (freetype from vcpkg, `-DINSTALL_DIR_LAYOUT=Unix`) and runs the
-Fortran byte-compare reference test.
+third job builds with Ninja/MSVC on Windows against the official OCCT
+prebuilt vc14-64 binaries (with their third-party runtime DLLs merged in)
+and runs the Fortran byte-compare reference test.
 
 ## Releasing
 

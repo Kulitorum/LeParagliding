@@ -123,60 +123,48 @@ jobs:
           cache: true
           cache-key-prefix: qt-${{ matrix.os }}
 
-      # Open CASCADE 8.0 is newer than any distro or Homebrew package, so it
-      # is built from source once per OCCT tag and cached as an install tree.
-      # Restore and save are split so a ~50-minute OCCT build is banked even
-      # when a later step in the job fails.
+      # Open CASCADE 8.0 is newer than any distro or Homebrew package. On
+      # Linux/macOS it is built from source once and cached; restore and
+      # save are split so a long OCCT build is banked even when a later
+      # step in the job fails.
       - name: Cache Open CASCADE (restore)
+        if: runner.os != 'Windows'
         id: occt-cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/occt-install
           key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
 
-      # OCCT links freetype; on Windows it comes from vcpkg and its DLLs are
-      # dropped into the OCCT install tree so they travel with the cache.
-      - name: Install freetype via vcpkg (Windows)
-        if: runner.os == 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: vcpkg install freetype:x64-windows
-
-      # Unconditional: the project itself also builds with Ninja + MSVC in
-      # CI (the "windows" preset's VS 2022 generator is for local use; the
-      # windows-latest image no longer ships that Visual Studio version).
+      # The project builds with Ninja + MSVC in CI (the "windows" preset's
+      # VS 2022 generator is for local use; the windows-latest image no
+      # longer ships that Visual Studio version).
       - name: Set up MSVC environment (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Build Open CASCADE (Windows)
-        if: runner.os == 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
+      # Windows uses the official prebuilt vc14-64 binaries instead of a
+      # ~50-minute MSVC source build. The third-party runtime DLLs
+      # (freetype, FreeImage, ffmpeg, tbb, jemalloc, ...) are merged into
+      # the OCCT bin directory, where the project's runtime-deployment
+      # step picks up exactly the ones the toolkits import.
+      - name: Install Open CASCADE prebuilt (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          curl.exe -fsSL "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/$env:OCCT_TAG.tar.gz" -o "$env:RUNNER_TEMP\occt.tar.gz"
-          tar -xzf "$env:RUNNER_TEMP\occt.tar.gz" -C "$env:RUNNER_TEMP"
-          $src = (Get-ChildItem "$env:RUNNER_TEMP" -Directory -Filter 'OCCT-*')[0].FullName.Replace('\', '/')
           $tmp = "$env:RUNNER_TEMP".Replace('\', '/')
-          cmake -S "$src" -B "$tmp/occt-build" -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DINSTALL_DIR="$tmp/occt-install" `
-            -DINSTALL_DIR_LAYOUT=Unix `
-            -D3RDPARTY_FREETYPE_DIR='C:/vcpkg/installed/x64-windows' `
-            -DBUILD_MODULE_Draw=OFF `
-            -DBUILD_MODULE_DETools=OFF `
-            -DUSE_TK=OFF `
-            -DUSE_TCL=OFF `
-            -DBUILD_DOC_Overview=OFF
-          cmake --build "$tmp/occt-build" --target install
-          Copy-Item 'C:/vcpkg/installed/x64-windows/bin/*.dll' "$tmp/occt-install/bin/"
-
-      - name: Cache Open CASCADE (save)
-        if: steps.occt-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: ${{ runner.temp }}/occt-install
-          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
+          curl.exe -fsSL -o "$tmp/occt-combined.zip" `
+            "https://github.com/Open-Cascade-SAS/OCCT/releases/download/$env:OCCT_TAG/occt-combined-release-no-pch.zip"
+          tar -xf "$tmp/occt-combined.zip" -C "$env:RUNNER_TEMP"
+          $inner = (Get-ChildItem "$env:RUNNER_TEMP" -Filter 'opencascade-*-combined.zip')[0].FullName
+          New-Item -ItemType Directory "$tmp/occt-prebuilt" | Out-Null
+          tar -xf "$inner" -C "$tmp/occt-prebuilt"
+          $root = (Get-ChildItem "$tmp/occt-prebuilt" -Directory -Filter 'opencascade-*')[0].FullName
+          $bin = "$root/win64/vc14/bin"
+          Get-ChildItem "$tmp/occt-prebuilt/3rdparty-*" -Recurse -Filter *.dll |
+            Copy-Item -Destination $bin -Force
+          "LEP_OCCT_ROOT=$($root.Replace('\', '/'))" >> $env:GITHUB_ENV
 
       - name: Build Open CASCADE
         if: runner.os != 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
@@ -193,6 +181,13 @@ jobs:
             -DUSE_TCL=OFF \
             -DBUILD_DOC_Overview=OFF
           cmake --build "$RUNNER_TEMP/occt-build" --target install
+
+      - name: Cache Open CASCADE (save)
+        if: runner.os != 'Windows' && steps.occt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/occt-install
+          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
 
       - name: Configure
         if: runner.os != 'Windows'
@@ -222,12 +217,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tmp = "$env:RUNNER_TEMP".Replace('\', '/')
           $qt = "$env:QT_ROOT_DIR".Replace('\', '/')
           cmake -S . -B build-ci -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             "-DCMAKE_PREFIX_PATH=$qt" `
-            "-DLEP_OCCT_ROOT=$tmp/occt-install"
+            "-DLEP_OCCT_ROOT=$env:LEP_OCCT_ROOT"
 
       - name: Build (Windows)
         if: runner.os == 'Windows'

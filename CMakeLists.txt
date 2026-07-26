@@ -358,13 +358,25 @@ if(WIN32)
         list(APPEND lep_occt_runtime_files
             "${LEP_OCCT_BINARY_DIR}/${occt_toolkit}.dll")
     endforeach()
+    # Superset of the third-party runtimes across supported OCCT builds
+    # (local build2, CI source build, official prebuilt); each is copied
+    # only if the OCCT bin directory actually provides it.
     foreach(occt_dependency
             freetype.dll
             brotlicommon.dll
             brotlidec.dll
             bz2.dll
             libpng16.dll
-            zlib1.dll)
+            zlib1.dll
+            FreeImage.dll
+            avcodec-57.dll
+            avformat-57.dll
+            avutil-55.dll
+            swscale-4.dll
+            openvr_api.dll
+            tbb12.dll
+            tbbmalloc.dll
+            jemalloc.dll)
         if(EXISTS "${LEP_OCCT_BINARY_DIR}/${occt_dependency}")
             list(APPEND lep_occt_runtime_files
                 "${LEP_OCCT_BINARY_DIR}/${occt_dependency}")
