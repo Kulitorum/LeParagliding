@@ -3,6 +3,25 @@
 Deferred items from the section-editor work (2026-07-26). Roughly ordered by
 how often the missing piece has already caused confusion.
 
+## Preview performance (follow-ups to the 0.2.0 speedup)
+
+The 0.2.0 rebuild optimizations (single rib validation, parallel rib
+building, binary XCAF preview handoff) left the legacy core as the
+dominant preview cost (~1.4 s of ~1.75 s). Remaining levers, measured
+2026-07-26 on gnuA7/24:
+
+- **Gate the legacy exports behind `--preview`**: every preview run still
+  writes ~28 MB of DXF/STL/SCAD text the viewport never reads. Needs a
+  flag plumbed into the f2c core's WRITE units — the biggest remaining
+  win (rough estimate 0.5–1 s).
+- `ParagliderView::triangulateShape` calls `BRepTools::Clean` before
+  meshing, so unchanged shapes re-tessellate; mostly felt in the
+  resolution slider.
+- Per-section caching was examined and rejected: the engine is a fresh
+  process per rebuild and the translated Fortran core is one monolithic
+  pass, so nothing survives to reuse (see the 0dffb52 commit message for
+  the stage timings).
+
 ## Reinvent the value grid (v1 retired from the UI)
 
 The generic QTableWidget grid was worse than raw text and got removed from
