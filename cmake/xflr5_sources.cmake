@@ -6,7 +6,6 @@
 # tree; globals/main.cpp and globals/xflr5app.* are excluded
 # (LEparagliding provides the QApplication).
 set(XFLR5_CORE_SOURCES
-    "${LEP_XFLR5_V6_DIR}/RESOURCES"
     "${LEP_XFLR5_V6_DIR}/design/afoil.cpp"
     "${LEP_XFLR5_V6_DIR}/design/afoil.h"
     "${LEP_XFLR5_V6_DIR}/design/afoiltabledlg.cpp"
@@ -71,8 +70,6 @@ set(XFLR5_CORE_SOURCES
     "${LEP_XFLR5_V6_DIR}/misc/polarfilterdlg.h"
     "${LEP_XFLR5_V6_DIR}/misc/stlexportdialog.cpp"
     "${LEP_XFLR5_V6_DIR}/misc/stlexportdialog.h"
-    "${LEP_XFLR5_V6_DIR}/resources/images.qrc"
-    "${LEP_XFLR5_V6_DIR}/resources/qss.qrc"
     "${LEP_XFLR5_V6_DIR}/twodwidgets/foildesignwt.cpp"
     "${LEP_XFLR5_V6_DIR}/twodwidgets/foildesignwt.h"
     "${LEP_XFLR5_V6_DIR}/twodwidgets/foilwt.cpp"
@@ -152,8 +149,6 @@ set(XFLR5_CORE_SOURCES
     "${LEP_XFLR5_V6_DIR}/xfl3d/globals/gl_globals.h"
     "${LEP_XFLR5_V6_DIR}/xfl3d/globals/w3dprefs.cpp"
     "${LEP_XFLR5_V6_DIR}/xfl3d/globals/w3dprefs.h"
-    "${LEP_XFLR5_V6_DIR}/xfl3d/resources/shaders.qrc"
-    "${LEP_XFLR5_V6_DIR}/xfl3d/resources/text_files.qrc"
     "${LEP_XFLR5_V6_DIR}/xfl3d/testgl/boid.h"
     "${LEP_XFLR5_V6_DIR}/xfl3d/testgl/gl2dfractal.cpp"
     "${LEP_XFLR5_V6_DIR}/xfl3d/testgl/gl2dfractal.h"
@@ -348,7 +343,6 @@ set(XFLR5_CORE_SOURCES
     "${LEP_XFLR5_V6_DIR}/xflobjects/xml/xmlwpolarwriter.h"
     "${LEP_XFLR5_V6_DIR}/xflscript/logwt.cpp"
     "${LEP_XFLR5_V6_DIR}/xflscript/logwt.h"
-    "${LEP_XFLR5_V6_DIR}/xflscript/script.qrc"
     "${LEP_XFLR5_V6_DIR}/xflscript/xflscriptexec.cpp"
     "${LEP_XFLR5_V6_DIR}/xflscript/xflscriptexec.h"
     "${LEP_XFLR5_V6_DIR}/xflscript/xflscriptreader.cpp"
@@ -444,7 +438,6 @@ set(XFLR5_CORE_SOURCES
     "${LEP_XFLR5_V6_DIR}/xflwidgets/mvc/objecttreeitem.h"
     "${LEP_XFLR5_V6_DIR}/xflwidgets/mvc/objecttreemodel.cpp"
     "${LEP_XFLR5_V6_DIR}/xflwidgets/mvc/objecttreemodel.h"
-    "${LEP_XFLR5_V6_DIR}/xflwidgets/textfiles.qrc"
     "${LEP_XFLR5_V6_DIR}/xflwidgets/view/grid.cpp"
     "${LEP_XFLR5_V6_DIR}/xflwidgets/view/grid.h"
     "${LEP_XFLR5_V6_DIR}/xflwidgets/view/section2dwt.cpp"

@@ -22,8 +22,10 @@ def parse_qmake_lists(path):
     """Yield (variable, entry) pairs for SOURCES/HEADERS assignments."""
     with open(path, encoding="utf-8", errors="replace") as fh:
         text = fh.read()
-    # Join continuation lines.
-    text = re.sub(r"\\\s*\n", " ", text)
+    # Join continuation lines. Only the immediate newline may be consumed:
+    # \s would also swallow blank lines and splice the next assignment
+    # (e.g. RESOURCES +=) into the SOURCES list.
+    text = re.sub(r"\\[ \t]*\r?\n", " ", text)
     for line in text.splitlines():
         m = re.match(r"\s*(SOURCES|HEADERS)\s*\+?=\s*(.*)", line)
         if not m:
@@ -63,7 +65,9 @@ def main():
             if rel in EXCLUDE or rel in seen:
                 continue
             seen.add(rel)
-            if not os.path.exists(path):
+            # isfile, not exists: on case-insensitive filesystems a stray
+            # token can resolve to a directory and poison the source list.
+            if not os.path.isfile(path):
                 missing.append((manifest, entry))
                 continue
             collected.append(rel)
