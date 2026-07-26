@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=LEparagliding
+Comment=Paraglider design studio (Qt/OCCT port of LEparagliding)
+Exec=LEparagliding
+Icon=leparagliding
+Categories=Engineering;Science;
+Terminal=false

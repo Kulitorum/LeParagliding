@@ -3,8 +3,18 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      upload_to_release:
+        description: 'Upload artifacts to the GitHub release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -41,6 +51,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # The single source of truth for the application version is the
+      # project() VERSION in CMakeLists.txt; artifacts embed it.
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]/{print $2; exit}' CMakeLists.txt)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -54,7 +74,9 @@ jobs:
             libxi-dev \
             libgl1-mesa-dev \
             libglu1-mesa-dev \
-            libxkbcommon-dev
+            libxkbcommon-dev \
+            fuse \
+            libfuse2
 
       # App Store submissions must be built against a current SDK, so select
       # the newest stable Xcode on the runner instead of the image default.
@@ -177,3 +199,77 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: ctest --preset release -E "gui_smoke|studio_model_smoke"
+
+      # ---- Packaging: every push builds versioned artifacts; a v* tag (or
+      # ---- a manual dispatch with upload_to_release) attaches them to the
+      # ---- GitHub release.
+
+      - name: Package (Linux AppImage)
+        if: runner.os == 'Linux'
+        env:
+          QMAKE: ${{ env.QT_ROOT_DIR }}/bin/qmake
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          cp build-ci/bin/Release/LEparagliding AppDir/usr/bin/
+          cp build-ci/bin/Release/leparagliding-engine AppDir/usr/bin/
+          cp -R build-ci/bin/Release/presets AppDir/usr/bin/presets
+          cp resources/linux/leparagliding.desktop AppDir/usr/share/applications/
+          cp resources/linux/leparagliding.png AppDir/usr/share/icons/hicolor/256x256/apps/
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --executable AppDir/usr/bin/LEparagliding \
+            --executable AppDir/usr/bin/leparagliding-engine \
+            --plugin qt --output appimage
+          mv LEparagliding*-x86_64.AppImage "LEparagliding_v${{ steps.version.outputs.version }}_linux-x86_64.AppImage"
+
+      # Unsigned for now: signing/notarization needs Apple Developer ID
+      # secrets; Gatekeeper users right-click > Open the first time.
+      - name: Package (macOS DMG)
+        if: runner.os == 'macOS'
+        run: |
+          APP=build-ci/bin/Release/LEparagliding.app
+          cp build-ci/bin/Release/leparagliding-engine "$APP/Contents/MacOS/"
+          "$QT_ROOT_DIR/bin/macdeployqt" "$APP" \
+            -executable="$APP/Contents/MacOS/leparagliding-engine" -verbose=1
+          mkdir dmg_contents
+          cp -R "$APP" dmg_contents/
+          ln -s /Applications dmg_contents/Applications
+          hdiutil create -volname "LEparagliding" -srcfolder dmg_contents \
+            -ov -format UDZO \
+            "LEparagliding_v${{ steps.version.outputs.version }}_macos-arm64.dmg"
+
+      # The Release output folder is already self-contained (windeployqt +
+      # OCCT runtime + presets), so the Windows artifact is a plain zip. The
+      # signed installer remains the local installer/build_installer.ps1 flow.
+      - name: Package (Windows zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build/bin/Release/* -DestinationPath `
+            "LEparagliding_v${{ steps.version.outputs.version }}_winx64.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: LEparagliding-${{ matrix.os }}
+          path: LEparagliding_v*
+          retention-days: 7
+          overwrite: true
+
+      - name: Upload to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.upload_to_release == true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v${{ steps.version.outputs.version }}"
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "LEparagliding $TAG" --generate-notes || true
+          fi
+          gh release upload "$TAG" LEparagliding_v* --clobber

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
     LEparagliding
-    VERSION 3.28.0
+    VERSION 0.1.0
     DESCRIPTION "Qt C++ port of LEparagliding 3.28"
     LANGUAGES C CXX
 )
@@ -245,6 +245,17 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
     )
 endforeach()
+
+if(APPLE)
+    # Bundled so macdeployqt can produce a self-contained, DMG-able app.
+    set_target_properties(LEparagliding PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME "LEparagliding"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.kulitorum.leparagliding"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    )
+endif()
 
 if(WIN32)
     get_target_property(qmake_executable Qt6::qmake IMPORTED_LOCATION)

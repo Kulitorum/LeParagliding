@@ -164,6 +164,27 @@ preset with MSVC against an OCCT compiled the same way (freetype from
 vcpkg, `-DINSTALL_DIR_LAYOUT=Unix`) and runs the Fortran byte-compare
 reference test.
 
+## Releasing
+
+The application version has a single source of truth: the `project(...
+VERSION x.y.z)` line at the top of `CMakeLists.txt` (the ported calculation
+core remains LEparagliding 3.28 regardless). CI reads it and stamps every
+artifact name with it. To cut a release:
+
+1. Bump the version in `CMakeLists.txt`, commit, and push.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z`
+
+The tag build packages all three platforms — Windows zip (self-contained
+Release folder), Linux AppImage, macOS DMG — creates the GitHub release,
+and attaches the downloads. The same can be triggered without a tag from
+the Actions tab ("Run workflow" → "Upload artifacts to the GitHub
+release"). Regular pushes build the same artifacts and keep them as
+workflow artifacts for a week, so packaging stays continuously verified.
+
+The macOS app is currently unsigned (right-click → Open on first launch);
+the signed Windows installer remains the local
+`installer/build_installer.ps1` flow described in `CLAUDE.md`.
+
 ## Port architecture
 
 - `src/legacy/leparagliding_core.cpp` is the mechanically translated numerical
