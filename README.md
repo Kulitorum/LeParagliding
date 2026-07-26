@@ -158,11 +158,11 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-`.github/workflows/ci.yml` runs exactly this on Ubuntu 24.04 and macOS 15,
-caching the OCCT install tree between runs. A third job builds the Windows
-preset with MSVC against an OCCT compiled the same way (freetype from
-vcpkg, `-DINSTALL_DIR_LAYOUT=Unix`) and runs the Fortran byte-compare
-reference test.
+The release builds in `.github/workflows/ci.yml` run exactly this on
+Ubuntu 24.04 and macOS 15, caching the OCCT install tree between runs. A
+third job builds with Ninja/MSVC on Windows against an OCCT compiled the
+same way (freetype from vcpkg, `-DINSTALL_DIR_LAYOUT=Unix`) and runs the
+Fortran byte-compare reference test.
 
 ## Releasing
 
@@ -176,10 +176,9 @@ artifact name with it. To cut a release:
 
 The tag build packages all three platforms — Windows zip (self-contained
 Release folder), Linux AppImage, macOS DMG — creates the GitHub release,
-and attaches the downloads. The same can be triggered without a tag from
-the Actions tab ("Run workflow" → "Upload artifacts to the GitHub
-release"). Regular pushes build the same artifacts and keep them as
-workflow artifacts for a week, so packaging stays continuously verified.
+and attaches the downloads. CI runs only on `v*` tags; for a build
+without a release, use the Actions tab ("Run workflow", optionally with
+"Upload artifacts to the GitHub release").
 
 The macOS app is currently unsigned (right-click → Open on first launch);
 the signed Windows installer remains the local

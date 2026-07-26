@@ -1,10 +1,10 @@
 name: CI
 
+# Builds run only for release tags (plus the manual Run-workflow button):
+# ordinary pushes to main do not trigger CI.
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
     inputs:
       upload_to_release:
