@@ -1,7 +1,12 @@
 # LEparagliding C++ / Qt
 
+[![CI](https://github.com/Kulitorum/LeParagliding/actions/workflows/ci.yml/badge.svg)](https://github.com/Kulitorum/LeParagliding/actions/workflows/ci.yml)
+
 This project is a C++ port of Pere Casellas' LEparagliding 3.28 “Jardins”
-engineering program with a Qt 6 desktop interface.
+engineering program with a Qt 6 desktop interface. It is free software under
+the GNU GPL 3.0, like the
+[original program](https://www.laboratoridenvol.com/leparagliding/lep.en.html)
+it derives from.
 
 The application accepts the same design text file as the original program.
 Airfoil file references remain relative to the selected design file. Generated
@@ -117,6 +122,44 @@ characteristics, equilibrium calculations, XFLR5 export, and special
 parameters. Older 3.17 designs that end at section 32 remain usable: the
 command-line boundary appends disabled defaults for the five new sections to a
 temporary input file. It never rewrites the selected design.
+
+## Build on Linux and macOS
+
+The same CMake project builds with GCC or Clang. Two dependencies are
+required:
+
+- **Qt 6.5+** (Widgets) — distro packages, the Qt online installer, or
+  [aqtinstall](https://github.com/miurahr/aqtinstall).
+- **Open CASCADE 8.0** — newer than any distro or Homebrew package today, so
+  build it from source once and install it to a prefix:
+
+```sh
+curl -fsSL https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V8_0_0_p1.tar.gz | tar xz
+cmake -S OCCT-* -B occt-build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DINSTALL_DIR="$HOME/occt-install" \
+    -DCMAKE_INSTALL_RPATH='$ORIGIN;@loader_path' \
+    -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_DETools=OFF \
+    -DUSE_TK=OFF -DUSE_TCL=OFF -DBUILD_DOC_Overview=OFF
+cmake --build occt-build --target install
+```
+
+On Debian/Ubuntu the OCCT build needs
+`ninja-build libfreetype-dev libfontconfig1-dev libx11-dev libxext-dev
+libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxkbcommon-dev`; on macOS
+`brew install ninja freetype fontconfig`.
+
+Then configure the project with both prefixes visible:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH="$HOME/occt-install;/path/to/Qt/6.x.y/gcc_64"
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+`.github/workflows/ci.yml` runs exactly this on Ubuntu 24.04 and macOS 15,
+caching the OCCT install tree between runs.
 
 ## Port architecture
 

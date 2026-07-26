@@ -96,6 +96,9 @@ foreach(occt_toolkit IN LISTS LEP_OCCT_TOOLKITS)
         set(occt_library
             "${LEP_OCCT_LIBRARY_DIR}/${occt_toolkit}.lib")
     else()
+        # find_library skips the search when the result variable is already
+        # set, so clear it or every toolkit after the first reuses TKernel.
+        unset(occt_library)
         find_library(occt_library
             NAMES "${occt_toolkit}"
             HINTS "${LEP_OCCT_LIBRARY_DIR}"
@@ -110,6 +113,12 @@ foreach(occt_toolkit IN LISTS LEP_OCCT_TOOLKITS)
     target_link_libraries(lep_occt INTERFACE "${occt_library}")
 endforeach()
 message(STATUS "Using Open CASCADE at ${LEP_OCCT_ROOT}")
+
+if(NOT WIN32)
+    # OCCT usually lives in a custom prefix (see README); bake its library
+    # directory into the build-tree rpath so binaries and tests run directly.
+    list(APPEND CMAKE_BUILD_RPATH "${LEP_OCCT_LIBRARY_DIR}")
+endif()
 
 file(GLOB F2C_RUNTIME_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libf2c/*.c"
@@ -135,6 +144,9 @@ if(WIN32)
     target_compile_options(f2c_runtime PRIVATE /W0)
 else()
     target_compile_options(f2c_runtime PRIVATE -w)
+    if(UNIX)
+        target_link_libraries(f2c_runtime PUBLIC m)
+    endif()
 endif()
 
 add_executable(leparagliding-engine
@@ -155,6 +167,13 @@ target_link_libraries(leparagliding-engine PRIVATE f2c_runtime lep_occt)
 if(MSVC)
     set_source_files_properties(src/legacy/leparagliding_core.cpp PROPERTIES
         COMPILE_OPTIONS "/bigobj;/W0;/Zc:strictStrings-"
+    )
+else()
+    # The translated core is C89 wrapped in extern "C" guards; compiling it
+    # as C keeps GCC/Clang from rejecting f2c's literal-to-char* idioms.
+    set_source_files_properties(src/legacy/leparagliding_core.cpp PROPERTIES
+        LANGUAGE C
+        COMPILE_OPTIONS "-w"
     )
 endif()
 

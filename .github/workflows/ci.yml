@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OCCT_TAG: V8_0_0_p1
+  QT_VERSION: '6.8.3'
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (Ubuntu 24.04)
+            os: ubuntu-24.04
+            qt_arch: linux_gcc_64
+          - name: macOS 15 (arm64)
+            os: macos-15
+            qt_arch: clang_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libfreetype-dev \
+            libfontconfig1-dev \
+            libx11-dev \
+            libxext-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev \
+            libxkbcommon-dev
+
+      # App Store submissions must be built against a current SDK, so select
+      # the newest stable Xcode on the runner instead of the image default.
+      - name: Select latest stable Xcode
+        if: runner.os == 'macOS'
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja freetype fontconfig
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          target: desktop
+          arch: ${{ matrix.qt_arch }}
+          cache: true
+          cache-key-prefix: qt-${{ matrix.os }}
+
+      # Open CASCADE 8.0 is newer than any distro or Homebrew package, so it
+      # is built from source once per OCCT tag and cached as an install tree.
+      - name: Cache Open CASCADE
+        id: occt-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/occt-install
+          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
+
+      - name: Build Open CASCADE
+        if: steps.occt-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -fsSL "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/${OCCT_TAG}.tar.gz" | tar xz -C "$RUNNER_TEMP"
+          cmake -S "$RUNNER_TEMP"/OCCT-* -B "$RUNNER_TEMP/occt-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DINSTALL_DIR="$RUNNER_TEMP/occt-install" \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN;@loader_path' \
+            -DBUILD_MODULE_Draw=OFF \
+            -DBUILD_MODULE_DETools=OFF \
+            -DUSE_TK=OFF \
+            -DUSE_TCL=OFF \
+            -DBUILD_DOC_Overview=OFF
+          cmake --build "$RUNNER_TEMP/occt-build" --target install
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build-ci -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/occt-install;$QT_ROOT_DIR"
+
+      - name: Build
+        run: cmake --build build-ci
+
+      # The OpenGL viewport tests need a real display; everything else —
+      # engine runs, preprocessor parity, preset calculation, headless CLI —
+      # runs offscreen.
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build-ci --output-on-failure -E "gui_smoke|studio_model_smoke"

@@ -3,7 +3,12 @@
 This is the Netlib `libf2c` runtime distributed under the terms in `Notice`.
 The source list follows its Visual C++ makefile.
 
-Local changes are deliberately limited to the Windows boundary:
+One change is platform-width related: `f2c.h` pins `integer`, `logical`,
+`flag`, `ftnlen`, and `ftnint` to plain `int` instead of `long int`, so LP64
+platforms (Linux/macOS) keep the 4-byte Fortran INTEGER layout the reference
+outputs were validated with on Windows.
+
+The remaining changes are deliberately limited to the Windows boundary:
 
 - the Linux-specific custom `ctype.h` shim is not used (`NO_My_ctype`);
 - the five single-complex math sources undefine modern MSVC's `complex`
