@@ -159,7 +159,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 The release builds in `.github/workflows/ci.yml` run exactly this on
-Ubuntu 24.04 and macOS 15, caching the OCCT install tree between runs. A
+Ubuntu 22.04 (so AppImages run on any distro with glibc 2.35+) and macOS
+15, caching the OCCT install tree between runs. A
 third job builds with Ninja/MSVC on Windows against the official OCCT
 prebuilt vc14-64 binaries (with their third-party runtime DLLs merged in)
 and runs the Fortran byte-compare reference test.

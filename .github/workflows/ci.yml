@@ -55,7 +55,7 @@ jobs:
         shell: bash
         run: |
           ALL='[
-            {"name":"Linux (Ubuntu 24.04)","os":"ubuntu-24.04","qt_arch":"linux_gcc_64","key":"linux"},
+            {"name":"Linux (Ubuntu 22.04, glibc 2.35 baseline)","os":"ubuntu-22.04","qt_arch":"linux_gcc_64","key":"linux"},
             {"name":"macOS (universal)","os":"macos-15","qt_arch":"clang_64","key":"macos"},
             {"name":"Windows (VS 2022)","os":"windows-latest","qt_arch":"win64_msvc2022_64","key":"windows"}
           ]'
