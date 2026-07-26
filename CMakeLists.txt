@@ -472,6 +472,7 @@ endif()
 
 install(TARGETS LEparagliding leparagliding-engine
     RUNTIME DESTINATION .
+    BUNDLE DESTINATION .
 )
 install(DIRECTORY resources/presets
     DESTINATION .
