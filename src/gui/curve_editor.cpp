@@ -1,9 +1,11 @@
 #include "curve_editor.h"
 
 #include <QFontMetrics>
+#include <QHelpEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QToolTip>
 
 #include <algorithm>
 #include <cmath>
@@ -19,6 +21,8 @@ const QColor kHeaderInk(0xb9, 0xc6, 0xd8);
 const QColor kChipBackground(0x13, 0x1e, 0x30);
 const QColor kChipBorder(0x26, 0x35, 0x4a);
 const QColor kChipSelected(0x1f, 0x55, 0x71);
+const QColor kDisabledInk(0x5a, 0x6b, 0x80);
+const QColor kDisabledSwatch(0x3c, 0x4c, 0x62);
 const QColor kBubbleBackground(0x1b, 0x29, 0x3c);
 constexpr int kDimmedAlpha = 110;
 // One radius for both hover feedback and press, so the cursor never
@@ -78,7 +82,7 @@ void CurveEditor::setSeriesList(const QVector<CurveSeries> &series)
 
     selected_ = -1;
     for (int i = 0; i < series_.size(); ++i) {
-        if (series_.at(i).id == previousId) {
+        if (series_.at(i).id == previousId && series_.at(i).enabled) {
             selected_ = i;
             break;
         }
@@ -285,8 +289,10 @@ int CurveEditor::seriesNear(const QPointF &position, double maxDistance) const
     int best = -1;
     double bestDistance = maxDistance;
     for (int s = 0; s < series_.size(); ++s) {
-        const ValueRange range = paddedRange(s);
         const CurveSeries &candidate = series_.at(s);
+        if (!candidate.enabled)
+            continue;
+        const ValueRange range = paddedRange(s);
         const QVector<QPointF> &points =
             candidate.smooth.isEmpty() ? candidate.points : candidate.smooth;
         for (int i = 0; i + 1 < points.size(); ++i) {
@@ -306,7 +312,8 @@ int CurveEditor::seriesNear(const QPointF &position, double maxDistance) const
 
 void CurveEditor::selectSeries(int index)
 {
-    if (index == selected_ || index < 0 || index >= series_.size())
+    if (index == selected_ || index < 0 || index >= series_.size()
+        || !series_.at(index).enabled)
         return;
     selected_ = index;
     activePoint_ = -1;
@@ -355,13 +362,37 @@ void CurveEditor::updateHover(const QPointF &position)
         hoverPoint_ = point;
         update();
     }
-    if (chip >= 0) {
+    if (chip >= 0 && chip < series_.size() && series_.at(chip).enabled) {
         setCursor(Qt::PointingHandCursor);
     } else if (point >= 0 && series_.at(selected_).editable) {
         setCursor(Qt::SizeVerCursor);
     } else {
         unsetCursor();
     }
+}
+
+bool CurveEditor::event(QEvent *event)
+{
+    if (event->type() == QEvent::ToolTip) {
+        auto *helpEvent = static_cast<QHelpEvent *>(event);
+        const int chip = chipAt(helpEvent->pos());
+        if (chip >= 0 && chip < series_.size()) {
+            const CurveSeries &series = series_.at(chip);
+            QString text;
+            if (!series.enabled && !series.disabledNote.isEmpty()) {
+                text = series.disabledNote;
+            } else if (!series.description.isEmpty()) {
+                text = QStringLiteral("<b>%1</b> — %2")
+                           .arg(series.label, series.description);
+            }
+            if (!text.isEmpty()) {
+                QToolTip::showText(helpEvent->globalPos(), text, this);
+                return true;
+            }
+        }
+        QToolTip::hideText();
+    }
+    return QWidget::event(event);
 }
 
 void CurveEditor::paintEvent(QPaintEvent *)
@@ -379,19 +410,27 @@ void CurveEditor::paintEvent(QPaintEvent *)
         const QRect chip = chipRects_.at(i);
         const CurveSeries &series = series_.at(i);
         const bool isSelected = i == selected_;
-        painter.setPen(QPen(isSelected ? series.color : kChipBorder, 1.0));
-        painter.setBrush(isSelected ? kChipSelected
+        const bool isEnabled = series.enabled;
+        painter.setPen(QPen(isSelected && isEnabled ? series.color
+                                                    : kChipBorder,
+                            1.0));
+        painter.setBrush(!isEnabled ? kBackground
+                         : isSelected
+                             ? kChipSelected
                          : i == hoverChip_
                              ? kChipSelected.darker(150)
                              : kChipBackground);
         painter.drawRoundedRect(QRectF(chip).adjusted(0.5, 0.5, -0.5, -0.5),
                                 5.0, 5.0);
-        QPen swatchPen(series.color, 2.0, series.penStyle);
+        QPen swatchPen(isEnabled ? series.color : kDisabledSwatch, 2.0,
+                       series.penStyle);
         painter.setPen(swatchPen);
         const double swatchY = chip.center().y() + 0.5;
         painter.drawLine(QPointF(chip.left() + 8, swatchY),
                          QPointF(chip.left() + 24, swatchY));
-        painter.setPen(isSelected ? kBrightInk : kAxisInk);
+        painter.setPen(!isEnabled       ? kDisabledInk
+                       : isSelected     ? kBrightInk
+                                        : kAxisInk);
         painter.drawText(chip.adjusted(30, 0, -6, 0),
                          Qt::AlignVCenter | Qt::AlignLeft, series.label);
     }
@@ -494,7 +533,8 @@ void CurveEditor::paintEvent(QPaintEvent *)
             if ((pass == 0) == isSelected)
                 continue;
             const CurveSeries &series = series_.at(s);
-            if (series.points.isEmpty() && series.smooth.isEmpty())
+            if (!series.enabled
+                || (series.points.isEmpty() && series.smooth.isEmpty()))
                 continue;
             const ValueRange range = dragging_ && isSelected
                                          ? dragRange_

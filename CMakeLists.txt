@@ -285,13 +285,36 @@ target_include_directories(spline-fit-test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
 )
 
+add_executable(section-grid-test
+    tests/section_grid_test.cpp
+    src/gui/section_grid.cpp
+)
+target_include_directories(section-grid-test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
+)
+
+add_executable(airfoil-file-test
+    tests/airfoil_file_test.cpp
+    src/gui/airfoil_file.cpp
+    src/gui/spline_fit.cpp
+)
+target_include_directories(airfoil-file-test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
+)
+
 qt_add_executable(LEparagliding WIN32
+    src/gui/airfoil_file.cpp
+    src/gui/airfoil_file.h
+    src/gui/airfoil_panel.cpp
+    src/gui/airfoil_panel.h
     src/gui/design_document.cpp
     src/gui/design_document.h
     src/gui/geometry_preprocessor.cpp
     src/gui/geometry_preprocessor.h
     src/gui/geometry_preprocessor_dialog.cpp
     src/gui/geometry_preprocessor_dialog.h
+    src/gui/grid_curve_panel.cpp
+    src/gui/grid_curve_panel.h
     src/gui/main.cpp
     src/gui/mainwindow.cpp
     src/gui/mainwindow.h
@@ -305,8 +328,14 @@ qt_add_executable(LEparagliding WIN32
     src/gui/section1_curve_panel.h
     src/gui/section1_curves.cpp
     src/gui/section1_curves.h
+    src/gui/section_grid.cpp
+    src/gui/section_grid.h
+    src/gui/section_grid_panel.cpp
+    src/gui/section_grid_panel.h
     src/gui/section_help.cpp
     src/gui/section_help.h
+    src/gui/section_specs.cpp
+    src/gui/section_specs.h
     src/gui/spline_fit.cpp
     src/gui/spline_fit.h
     ${XFLR5_RESOURCES}
@@ -341,6 +370,8 @@ set_target_properties(
     preprocessor-reference-compare
     section1-curves-test
     spline-fit-test
+    section-grid-test
+    airfoil-file-test
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -353,6 +384,8 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         preprocessor-reference-compare
         section1-curves-test
         spline-fit-test
+        section-grid-test
+        airfoil-file-test
         PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
     )
@@ -445,6 +478,9 @@ enable_testing()
 add_test(NAME engine_help COMMAND leparagliding-engine --help)
 add_test(NAME section1_curves COMMAND section1-curves-test)
 add_test(NAME spline_fit COMMAND spline-fit-test)
+add_test(NAME section_grid COMMAND section-grid-test)
+add_test(NAME airfoil_file COMMAND airfoil-file-test
+    "${CMAKE_CURRENT_SOURCE_DIR}/Data/gnua.txt")
 add_test(NAME engine_rejects_missing_input
     COMMAND leparagliding-engine
         "${CMAKE_BINARY_DIR}/does-not-exist.txt"

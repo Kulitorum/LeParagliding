@@ -25,6 +25,11 @@ struct CurveSeries
     Qt::PenStyle penStyle = Qt::SolidLine;
     QVector<QPointF> points; // x ascending
     bool editable = true;
+    // Disabled series keep their legend chip (greyed, with disabledNote as
+    // its tooltip) but draw no curve and cannot be selected — for columns
+    // the engine ignores in the current data.
+    bool enabled = true;
+    QString disabledNote;
     double minValue = -1e300; // drag/nudge clamps
     double maxValue = 1e300;
     int decimals = 2; // display precision
@@ -80,6 +85,7 @@ signals:
     void editCommitted(const QString &seriesId);
 
 protected:
+    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;

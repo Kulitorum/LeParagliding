@@ -1,9 +1,12 @@
 #include "mainwindow.h"
 
+#include "airfoil_panel.h"
 #include "geometry_preprocessor_dialog.h"
+#include "grid_curve_panel.h"
 #include "paraglider_view.h"
 #include "section1_curve_panel.h"
 #include "section_help.h"
+#include "section_specs.h"
 
 #include <globals/mainframe.h>
 
@@ -872,7 +875,8 @@ void MainWindow::buildInterface()
             color: #b9c6d8;
             font-weight: 600;
         }
-        QLineEdit, QPlainTextEdit, QTreeWidget, QListWidget, QTextBrowser {
+        QLineEdit, QPlainTextEdit, QTreeWidget, QListWidget, QTextBrowser,
+        QTableWidget {
             background: #0e1726;
             border: 1px solid #2a3a50;
             border-radius: 6px;
@@ -1673,15 +1677,17 @@ void MainWindow::rebuildSectionEditors()
             QStringLiteral("Enter: rebuild 3D preview · Shift+Enter: insert a new record"));
         editor->buildRequested = [this] { startPreviewCalculation(); };
         new DesignSyntaxHighlighter(editor->document());
+        // Sections with a genuine curve representation get a graphical
+        // editor below the text, in a splitter so either half can take
+        // over the page: Section 1 the rib-matrix curve editor (B-spline
+        // definitions live in the document's Studio trailer, so a
+        // spline-only change must also enable Save), and the sections
+        // whose spec declares curve columns get the grid-curve view. The
+        // generic value grid was tried and retired — for everything else
+        // the raw text is the better editor (see BACKLOG.md).
+        QWidget *graphicalPanel = nullptr;
         if (section.number == 1) {
-            // Section 1 gets the graphical rib-matrix editor below the text;
-            // the splitter lets either half take over the page. B-spline
-            // definitions live in the document's Studio trailer, so a
-            // spline-only change must also enable Save.
-            auto *splitter = new QSplitter(Qt::Vertical, sectionPage);
-            splitter->setChildrenCollapsible(false);
-            splitter->addWidget(editor);
-            splitter->addWidget(new Section1CurvePanel(
+            graphicalPanel = new Section1CurvePanel(
                 editor, [this] { return document_.splinesData(); },
                 [this](const QJsonObject &data) {
                     document_.setSplinesData(data);
@@ -1691,8 +1697,36 @@ void MainWindow::rebuildSectionEditors()
                             process_->state() == QProcess::NotRunning);
                         updateWindowTitle();
                     }
+                });
+        } else if (section.number == 2) {
+            // Airfoils: show the referenced profile files and convert
+            // them to B-spline truth like Section 1. Conversion writes a
+            // regenerated copy beside the design; splines share the
+            // Studio-trailer persistence.
+            graphicalPanel = new AirfoilPanel(
+                editor,
+                [this] {
+                    return QFileInfo(document_.filePath()).absolutePath();
                 },
-                splitter));
+                [this] { return document_.splinesData(); },
+                [this](const QJsonObject &data) {
+                    document_.setSplinesData(data);
+                    if (document_.splinesDirty()) {
+                        documentDirty_ = true;
+                        saveButton_->setEnabled(
+                            process_->state() == QProcess::NotRunning);
+                        updateWindowTitle();
+                    }
+                });
+        } else if (const SectionSpec *spec = sectionSpec(section.number);
+                   spec != nullptr && !spec->curveColumns.isEmpty()) {
+            graphicalPanel = new GridCurvePanel(section.number, editor);
+        }
+        if (graphicalPanel != nullptr) {
+            auto *splitter = new QSplitter(Qt::Vertical, sectionPage);
+            splitter->setChildrenCollapsible(false);
+            splitter->addWidget(editor);
+            splitter->addWidget(graphicalPanel);
             splitter->setStretchFactor(0, 3);
             splitter->setStretchFactor(1, 2);
             layout->addWidget(splitter, 1);

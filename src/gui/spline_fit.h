@@ -43,4 +43,32 @@ BSpline fitBSpline(const std::vector<double> &parameters,
 // stored splines).
 std::vector<double> uniformParameters(int count);
 
+// Parametric planar B-spline (x(u), y(u)) with one shared knot vector —
+// for closed-nose shapes like airfoil segments where y(x) is not a
+// function. Control points are genuine 2D handles.
+struct BSpline2D
+{
+    int degree = 3;
+    std::vector<double> knots;
+    std::vector<double> controlX;
+    std::vector<double> controlY;
+
+    bool isValid() const;
+    void evaluate(double u, double *x, double *y) const;
+    std::vector<double> grevilleAbscissae() const;
+};
+
+// Least-squares fit of a point sequence within `tolerance` (maximum
+// euclidean deviation at the samples; end points interpolated exactly).
+// Parameters are chord-length based, both components share the adaptively
+// refined knot vector. *maxError receives the achieved deviation.
+BSpline2D fitBSpline2D(const std::vector<double> &xs,
+                       const std::vector<double> &ys, double tolerance,
+                       double *maxError);
+
+// Chord-length parameters in [0, 1] for a point sequence (the fit's own
+// parameterization; use it to resample at the original point layout).
+std::vector<double> chordParameters(const std::vector<double> &xs,
+                                    const std::vector<double> &ys);
+
 } // namespace lep

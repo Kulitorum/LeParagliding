@@ -284,4 +284,116 @@ std::vector<double> uniformParameters(int count)
     return result;
 }
 
+bool BSpline2D::isValid() const
+{
+    return degree >= 1 && controlX.size() == controlY.size()
+           && static_cast<int>(controlX.size()) >= degree + 1
+           && knots.size() == controlX.size() + degree + 1
+           && std::is_sorted(knots.begin(), knots.end());
+}
+
+void BSpline2D::evaluate(double u, double *x, double *y) const
+{
+    const BSpline sx{degree, knots, controlX};
+    const BSpline sy{degree, knots, controlY};
+    *x = sx.evaluate(u);
+    *y = sy.evaluate(u);
+}
+
+std::vector<double> BSpline2D::grevilleAbscissae() const
+{
+    return BSpline{degree, knots, controlX}.grevilleAbscissae();
+}
+
+std::vector<double> chordParameters(const std::vector<double> &xs,
+                                    const std::vector<double> &ys)
+{
+    std::vector<double> params(xs.size(), 0.0);
+    double total = 0.0;
+    for (std::size_t i = 1; i < xs.size(); ++i) {
+        total += std::hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
+        params[i] = total;
+    }
+    if (total <= 0.0)
+        return uniformParameters(static_cast<int>(xs.size()));
+    for (double &value : params)
+        value /= total;
+    return params;
+}
+
+BSpline2D fitBSpline2D(const std::vector<double> &xs,
+                       const std::vector<double> &ys, double tolerance,
+                       double *maxError)
+{
+    if (maxError != nullptr)
+        *maxError = 0.0;
+    BSpline2D best;
+    const int sampleCount = static_cast<int>(xs.size());
+    if (sampleCount < 2 || xs.size() != ys.size())
+        return best;
+
+    const std::vector<double> params = chordParameters(xs, ys);
+    const int degree = std::min(3, sampleCount - 1);
+    const double minSpan = 0.5 / (sampleCount - 1);
+
+    BSpline componentX;
+    componentX.degree = degree;
+    componentX.knots = initialKnots(degree);
+    componentX.control.assign(degree + 1, 0.0);
+    BSpline componentY = componentX;
+
+    double bestDeviation = 0.0;
+    while (true) {
+        if (!solveControls(params, xs, &componentX)
+            || !solveControls(params, ys, &componentY))
+            break;
+        double deviation = -1.0;
+        double worstAt = 0.0;
+        for (int i = 0; i < sampleCount; ++i) {
+            const double d =
+                std::hypot(componentX.evaluate(params[i]) - xs[i],
+                           componentY.evaluate(params[i]) - ys[i]);
+            if (d > deviation) {
+                deviation = d;
+                worstAt = params[i];
+            }
+        }
+        if (!best.isValid() || deviation < bestDeviation) {
+            best = BSpline2D{degree, componentX.knots, componentX.control,
+                             componentY.control};
+            bestDeviation = deviation;
+            if (maxError != nullptr)
+                *maxError = deviation;
+        }
+        if (deviation <= tolerance
+            || static_cast<int>(componentX.control.size()) >= sampleCount)
+            break;
+        double low = 0.0;
+        double high = 1.0;
+        for (std::size_t k = degree;
+             k + 1 < componentX.knots.size() - degree; ++k) {
+            if (componentX.knots[k + 1] <= componentX.knots[k])
+                continue;
+            if (worstAt >= componentX.knots[k]
+                && (worstAt < componentX.knots[k + 1]
+                    || componentX.knots[k + 1] >= 1.0)) {
+                low = componentX.knots[k];
+                high = componentX.knots[k + 1];
+                break;
+            }
+        }
+        if (high - low < minSpan)
+            break;
+        const double newKnot = 0.5 * (low + high);
+        componentX.knots.insert(
+            std::upper_bound(componentX.knots.begin(),
+                             componentX.knots.end(), newKnot),
+            newKnot);
+        componentY.knots = componentX.knots;
+        componentX.control.assign(componentX.control.size() + 1, 0.0);
+        componentY.control.assign(componentY.control.size() + 1, 0.0);
+    }
+    return best;
+}
+
 } // namespace lep
