@@ -29,6 +29,9 @@ concurrency:
 
 env:
   OCCT_TAG: V8_0_0_p1
+  # secrets.* is not allowed in step-level if expressions, so surface the
+  # signing capability as an env flag here.
+  MAC_SIGNING: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
   # Needs Qt >= 6.9: older QtGui link interfaces reference the AGL framework,
   # which the macOS 26 SDK (selected via latest-stable Xcode) no longer
   # ships. 6.11.1 is not yet resolvable by aqtinstall for windows desktop
@@ -281,7 +284,7 @@ jobs:
       # (same names as in the Decenza repo); without them the DMG ships
       # unsigned and Gatekeeper users right-click > Open the first time.
       - name: Install Apple Developer ID certificate (macOS)
-        if: ${{ runner.os == 'macOS' && secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
+        if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
         env:
           P12_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
@@ -309,7 +312,7 @@ jobs:
       # Hardened runtime + deep signing covers the bundled engine and all
       # deployed Qt/OCCT libraries; required for notarization.
       - name: Sign the app (macOS)
-        if: ${{ runner.os == 'macOS' && secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
+        if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
@@ -331,7 +334,7 @@ jobs:
             "LEparagliding_v${{ steps.version.outputs.version }}_macos-arm64.dmg"
 
       - name: Sign, notarize, and staple the DMG (macOS)
-        if: ${{ runner.os == 'macOS' && secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
+        if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
