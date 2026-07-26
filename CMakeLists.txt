@@ -1,5 +1,15 @@
 cmake_minimum_required(VERSION 3.21)
 
+# Ship binaries that run several macOS releases back rather than only on the
+# build host: without an explicit deployment target the minimum OS defaults to
+# the CI runner's version (macOS 15), so the app refuses to launch on older
+# systems. Must be set before project(). The CI release build additionally
+# passes -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" for a universal binary.
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING
+        "Minimum macOS version")
+endif()
+
 project(
     LEparagliding
     VERSION 0.1.0

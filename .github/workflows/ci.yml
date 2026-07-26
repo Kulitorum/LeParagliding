@@ -136,7 +136,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/occt-install
-          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
+          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v2
 
       # The project builds with Ninja + MSVC in CI (the "windows" preset's
       # VS 2022 generator is for local use; the windows-latest image no
@@ -174,8 +174,16 @@ jobs:
         shell: bash
         run: |
           curl -fsSL "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/${OCCT_TAG}.tar.gz" | tar xz -C "$RUNNER_TEMP"
+          # macOS ships a universal (arm64 + x86_64) build with a deployment
+          # target a few releases back, so OCCT's libraries match the app.
+          EXTRA=()
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            EXTRA+=(-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+                    -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0)
+          fi
           cmake -S "$RUNNER_TEMP"/OCCT-* -B "$RUNNER_TEMP/occt-build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            "${EXTRA[@]}" \
             -DINSTALL_DIR="$RUNNER_TEMP/occt-install" \
             -DCMAKE_INSTALL_RPATH='$ORIGIN;@loader_path' \
             -DBUILD_MODULE_Draw=OFF \
@@ -190,14 +198,21 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/occt-install
-          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v1
+          key: occt-${{ env.OCCT_TAG }}-${{ matrix.os }}-v2
 
       - name: Configure
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          # macOS: emit a universal binary (the deployment target is set in
+          # CMakeLists.txt). Other platforms build for the host arch.
+          EXTRA=()
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            EXTRA+=(-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64")
+          fi
           cmake -S . -B build-ci -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            "${EXTRA[@]}" \
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/occt-install;$QT_ROOT_DIR"
 
       - name: Build
@@ -331,7 +346,7 @@ jobs:
           ln -s /Applications dmg_contents/Applications
           hdiutil create -volname "LEparagliding" -srcfolder dmg_contents \
             -ov -format UDZO \
-            "LEparagliding_v${{ steps.version.outputs.version }}_macos-arm64.dmg"
+            "LEparagliding_v${{ steps.version.outputs.version }}_macos-universal.dmg"
 
       - name: Sign, notarize, and staple the DMG (macOS)
         if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
@@ -341,7 +356,7 @@ jobs:
           APPLE_ID_APP_PASSWORD: ${{ secrets.APPLE_ID_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG="LEparagliding_v${{ steps.version.outputs.version }}_macos-arm64.dmg"
+          DMG="LEparagliding_v${{ steps.version.outputs.version }}_macos-universal.dmg"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/app-signing.keychain-db"
           codesign --force --sign "Developer ID Application: Michael Holm (HKHN2RK2P4)" "$DMG"
           xcrun notarytool submit "$DMG" \
