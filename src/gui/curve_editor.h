@@ -28,6 +28,23 @@ struct CurveSeries
     double minValue = -1e300; // drag/nudge clamps
     double maxValue = 1e300;
     int decimals = 2; // display precision
+
+    // Spline mode: when `handles` is non-empty they are the editable set
+    // (drawn as squares joined by a thin control polygon) and `points`
+    // become passive markers; `smooth` is the densely sampled curve drawn
+    // instead of the point-to-point polyline. Signals still report indexes
+    // into the editable set, whichever it is.
+    QVector<QPointF> handles;
+    QVector<QPointF> smooth;
+
+    const QVector<QPointF> &editableSet() const
+    {
+        return handles.isEmpty() ? points : handles;
+    }
+    QVector<QPointF> &editableSet()
+    {
+        return handles.isEmpty() ? points : handles;
+    }
 };
 
 class CurveEditor final : public QWidget
@@ -46,6 +63,11 @@ public:
 
     QString selectedSeriesId() const;
     void setSelectedSeriesId(const QString &id);
+
+    // Replaces the selected series' smooth polyline in place (no reset of
+    // selection or drag state) — lets hosts morph a spline curve live while
+    // one of its handles is being dragged.
+    void setSelectedSeriesSmooth(const QVector<QPointF> &smooth);
 
     QSize minimumSizeHint() const override { return {380, 200}; }
     QSize sizeHint() const override { return {720, 280}; }

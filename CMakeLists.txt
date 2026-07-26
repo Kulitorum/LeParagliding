@@ -277,6 +277,14 @@ target_include_directories(section1-curves-test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
 )
 
+add_executable(spline-fit-test
+    tests/spline_fit_test.cpp
+    src/gui/spline_fit.cpp
+)
+target_include_directories(spline-fit-test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
+)
+
 qt_add_executable(LEparagliding WIN32
     src/gui/design_document.cpp
     src/gui/design_document.h
@@ -299,6 +307,8 @@ qt_add_executable(LEparagliding WIN32
     src/gui/section1_curves.h
     src/gui/section_help.cpp
     src/gui/section_help.h
+    src/gui/spline_fit.cpp
+    src/gui/spline_fit.h
     ${XFLR5_RESOURCES}
 )
 set_target_properties(LEparagliding PROPERTIES AUTORCC ON AUTOMOC ON)
@@ -330,6 +340,7 @@ set_target_properties(
     reference-report-compare
     preprocessor-reference-compare
     section1-curves-test
+    spline-fit-test
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -341,6 +352,7 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         reference-report-compare
         preprocessor-reference-compare
         section1-curves-test
+        spline-fit-test
         PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
     )
@@ -432,6 +444,7 @@ endif()
 enable_testing()
 add_test(NAME engine_help COMMAND leparagliding-engine --help)
 add_test(NAME section1_curves COMMAND section1-curves-test)
+add_test(NAME spline_fit COMMAND spline-fit-test)
 add_test(NAME engine_rejects_missing_input
     COMMAND leparagliding-engine
         "${CMAKE_BINARY_DIR}/does-not-exist.txt"

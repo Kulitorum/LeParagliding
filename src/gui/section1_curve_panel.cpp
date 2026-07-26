@@ -2,14 +2,21 @@
 
 #include "curve_editor.h"
 
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QHBoxLayout>
+#include <QJsonArray>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSlider>
 #include <QStringList>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 
@@ -44,10 +51,53 @@ const QString kOkColor = QStringLiteral("#93a4ba");
 const QString kWarningColor = QStringLiteral("#fab219");
 const QString kErrorColor = QStringLiteral("#e66767");
 
+QJsonObject splineToJson(const lep::BSpline &spline)
+{
+    QJsonObject object;
+    object.insert(QStringLiteral("degree"), spline.degree);
+    QJsonArray knots;
+    for (const double knot : spline.knots)
+        knots.append(knot);
+    object.insert(QStringLiteral("knots"), knots);
+    QJsonArray control;
+    for (const double value : spline.control)
+        control.append(value);
+    object.insert(QStringLiteral("control"), control);
+    return object;
+}
+
+lep::BSpline splineFromJson(const QJsonObject &object)
+{
+    lep::BSpline spline;
+    spline.degree = object.value(QStringLiteral("degree")).toInt();
+    for (const QJsonValue &value :
+         object.value(QStringLiteral("knots")).toArray())
+        spline.knots.push_back(value.toDouble());
+    for (const QJsonValue &value :
+         object.value(QStringLiteral("control")).toArray())
+        spline.control.push_back(value.toDouble());
+    return spline;
+}
+
+// Slider position (0..300) <-> tolerance percent (0.01..10, log scale).
+double sliderToPercent(int position)
+{
+    return std::pow(10.0, position / 100.0 - 2.0);
+}
+
+int percentToSlider(double percent)
+{
+    const double clamped = std::clamp(percent, 0.01, 10.0);
+    return static_cast<int>(std::lround((std::log10(clamped) + 2.0) * 100.0));
+}
+
 } // namespace
 
-Section1CurvePanel::Section1CurvePanel(QPlainTextEdit *editor, QWidget *parent)
-    : QWidget(parent), editor_(editor)
+Section1CurvePanel::Section1CurvePanel(
+    QPlainTextEdit *editor, std::function<QJsonObject()> loadSplines,
+    std::function<void(const QJsonObject &)> storeSplines, QWidget *parent)
+    : QWidget(parent), editor_(editor), loadSplines_(std::move(loadSplines)),
+      storeSplines_(std::move(storeSplines))
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -62,44 +112,224 @@ Section1CurvePanel::Section1CurvePanel(QPlainTextEdit *editor, QWidget *parent)
     description_->setWordWrap(true);
     layout->addWidget(description_);
 
+    auto *statusRow = new QHBoxLayout;
+    statusRow->setSpacing(6);
     status_ = new QLabel(this);
     status_->setWordWrap(true);
-    layout->addWidget(status_);
+    statusRow->addWidget(status_, 1);
+    refitButton_ = new QPushButton(QStringLiteral("Re-fit spline"), this);
+    refitButton_->setObjectName(QStringLiteral("quietButton"));
+    refitButton_->setToolTip(QStringLiteral(
+        "Fit new B-splines to the edited matrix values"));
+    statusRow->addWidget(refitButton_);
+    applyButton_ = new QPushButton(QStringLiteral("Apply spline"), this);
+    applyButton_->setObjectName(QStringLiteral("quietButton"));
+    applyButton_->setToolTip(QStringLiteral(
+        "Overwrite the edited matrix values with the stored B-spline"));
+    statusRow->addWidget(applyButton_);
+    convertButton_ =
+        new QPushButton(QStringLiteral("Convert to B-splines…"), this);
+    convertButton_->setObjectName(QStringLiteral("quietButton"));
+    convertButton_->setToolTip(QStringLiteral(
+        "Fit editable curves with B-splines; the spline becomes the "
+        "source of truth and the matrix its sampled output"));
+    statusRow->addWidget(convertButton_);
+    removeButton_ = new QPushButton(QStringLiteral("Remove spline"), this);
+    removeButton_->setObjectName(QStringLiteral("quietButton"));
+    removeButton_->setToolTip(QStringLiteral(
+        "Return the selected curve to plain point-by-point editing"));
+    statusRow->addWidget(removeButton_);
+    layout->addLayout(statusRow);
 
     connect(curves_, &CurveEditor::selectionChanged, this,
-            [this](const QString &seriesId) { updateDescription(seriesId); });
+            [this](const QString &seriesId) {
+                updateDescription(seriesId);
+                updateToolbar();
+            });
     connect(curves_, &CurveEditor::editCommitted, this,
             [this](const QString &seriesId) { commitSeries(seriesId); });
+    connect(curves_, &CurveEditor::pointMoved, this,
+            [this](const QString &seriesId, int index, double value) {
+                // Morph the spline curve live while a control point drags.
+                const auto spline = splines_.find(seriesId.toStdString());
+                if (previewActive_ || spline == splines_.end()
+                    || index < 0
+                    || index >= static_cast<int>(
+                           spline->second.control.size())
+                    || matrix_.rows.empty())
+                    return;
+                lep::BSpline moved = spline->second;
+                moved.control[index] = value;
+                const double firstRib = matrix_.rows.front().values[0];
+                const double span =
+                    matrix_.rows.back().values[0] - firstRib;
+                QVector<QPointF> smooth;
+                const int sampleCount = 150;
+                smooth.reserve(sampleCount);
+                for (int i = 0; i < sampleCount; ++i) {
+                    const double u =
+                        static_cast<double>(i) / (sampleCount - 1);
+                    smooth.append(QPointF(firstRib + u * span,
+                                          moved.evaluate(u)));
+                }
+                curves_->setSelectedSeriesSmooth(smooth);
+            });
+    connect(convertButton_, &QPushButton::clicked, this,
+            [this] { showConvertDialog(); });
+    connect(removeButton_, &QPushButton::clicked, this,
+            [this] { removeSelectedSpline(); });
+    connect(refitButton_, &QPushButton::clicked, this,
+            [this] { refitStaleColumns(); });
+    connect(applyButton_, &QPushButton::clicked, this,
+            [this] { applyStaleSplines(); });
     connect(editor_, &QPlainTextEdit::textChanged, this, [this] {
         if (!applyingEdit_)
             syncFromText();
     });
 
+    loadSplinesFromDocument();
     updateDescription(QString());
     syncFromText();
+}
+
+void Section1CurvePanel::loadSplinesFromDocument()
+{
+    splines_.clear();
+    const QJsonObject root = loadSplines_ ? loadSplines_() : QJsonObject();
+    const QJsonObject section =
+        root.value(QStringLiteral("section1")).toObject();
+    tolerancePercent_ =
+        section.value(QStringLiteral("tolerancePercent")).toDouble(1.0);
+    const QJsonObject columns =
+        section.value(QStringLiteral("columns")).toObject();
+    for (auto it = columns.constBegin(); it != columns.constEnd(); ++it) {
+        const lep::BSpline spline = splineFromJson(it.value().toObject());
+        if (spline.isValid())
+            splines_[it.key().toStdString()] = spline;
+    }
+}
+
+void Section1CurvePanel::persistSplines()
+{
+    if (!storeSplines_)
+        return;
+    QJsonObject root = loadSplines_ ? loadSplines_() : QJsonObject();
+    if (splines_.empty()) {
+        root.remove(QStringLiteral("section1"));
+    } else {
+        QJsonObject columns;
+        for (const auto &[columnId, spline] : splines_)
+            columns.insert(QString::fromStdString(columnId),
+                           splineToJson(spline));
+        QJsonObject section;
+        section.insert(QStringLiteral("version"), 1);
+        section.insert(QStringLiteral("tolerancePercent"), tolerancePercent_);
+        section.insert(QStringLiteral("columns"), columns);
+        root.insert(QStringLiteral("section1"), section);
+    }
+    storeSplines_(root);
+}
+
+int Section1CurvePanel::columnIndexById(const std::string &id) const
+{
+    const auto &columns = lep::section1Columns();
+    for (size_t c = 0; c < columns.size(); ++c) {
+        if (id == columns[c].id)
+            return static_cast<int>(c);
+    }
+    return -1;
+}
+
+std::vector<double> Section1CurvePanel::columnValues(int column) const
+{
+    std::vector<double> values;
+    values.reserve(matrix_.rows.size());
+    for (const lep::Section1Row &row : matrix_.rows)
+        values.push_back(column < static_cast<int>(row.values.size())
+                             ? row.values[column]
+                             : 0.0);
+    return values;
+}
+
+double Section1CurvePanel::absoluteTolerance(int column,
+                                             double percent) const
+{
+    const std::vector<double> values = columnValues(column);
+    double low = values.empty() ? 0.0 : values.front();
+    double high = low;
+    for (const double value : values) {
+        low = std::min(low, value);
+        high = std::max(high, value);
+    }
+    const int decimals = lep::section1Columns()[column].decimals;
+    // Never demand more precision than the text format can express: half of
+    // the last printed decimal is pure rounding noise.
+    const double floor = 0.5 * std::pow(10.0, -decimals);
+    return std::max(percent / 100.0 * (high - low), floor);
+}
+
+const std::map<std::string, lep::BSpline> &
+Section1CurvePanel::activeSplines() const
+{
+    return previewActive_ ? previewSplines_ : splines_;
 }
 
 void Section1CurvePanel::syncFromText()
 {
     std::vector<std::string> problems;
-    const bool usable = lep::parseSection1Matrix(
+    matrixUsable_ = lep::parseSection1Matrix(
         editor_->toPlainText().toStdString(), &matrix_, &problems);
-
-    QStringList problemList;
+    matrixProblems_.clear();
     for (const std::string &problem : problems)
-        problemList << QString::fromStdString(problem);
+        matrixProblems_ << QString::fromStdString(problem);
 
-    if (!usable) {
-        curves_->setMessage(problemList.join(QLatin1Char('\n')));
-        status_->setStyleSheet(
-            QStringLiteral("color: %1;").arg(kErrorColor));
+    // Staleness: a stored spline whose sampled values no longer match the
+    // matrix beyond the text's own rounding was overtaken by manual edits.
+    staleColumns_.clear();
+    if (matrixUsable_) {
+        const std::vector<double> stations =
+            lep::uniformParameters(static_cast<int>(matrix_.rows.size()));
+        for (const auto &[columnId, spline] : splines_) {
+            const int column = columnIndexById(columnId);
+            if (column < 1 || column >= matrix_.columnCount)
+                continue;
+            const std::vector<double> sampled =
+                lep::sampleBSpline(spline, stations);
+            const std::vector<double> current = columnValues(column);
+            const double roundingSlack =
+                0.75
+                * std::pow(10.0,
+                           -lep::section1Columns()[column].decimals);
+            for (size_t i = 0; i < current.size(); ++i) {
+                if (std::abs(sampled[i] - current[i]) > roundingSlack) {
+                    staleColumns_.push_back(columnId);
+                    break;
+                }
+            }
+        }
+    }
+    rebuildDisplay();
+}
+
+void Section1CurvePanel::rebuildDisplay()
+{
+    if (!matrixUsable_) {
+        curves_->setMessage(matrixProblems_.join(QLatin1Char('\n')));
+        status_->setStyleSheet(QStringLiteral("color: %1;").arg(kErrorColor));
         status_->setText(
             QStringLiteral("The rib matrix cannot be read — fix the text "
                            "above to edit it graphically."));
+        updateToolbar();
         return;
     }
 
     const auto &columns = lep::section1Columns();
+    const auto &active = activeSplines();
+    const int rowCount = static_cast<int>(matrix_.rows.size());
+    const double firstRib = matrix_.rows.front().values[0];
+    const double lastRib = matrix_.rows.back().values[0];
+    const double span = lastRib - firstRib;
+
     QVector<CurveSeries> series;
     const int columnCount =
         std::min<int>(matrix_.columnCount, static_cast<int>(columns.size()));
@@ -115,9 +345,28 @@ void Section1CurvePanel::syncFromText()
         s.maxValue = column.maxValue;
         s.decimals = column.decimals;
         styleForColumn(c, &s.color, &s.penStyle);
-        s.points.reserve(static_cast<int>(matrix_.rows.size()));
+        s.points.reserve(rowCount);
         for (const lep::Section1Row &row : matrix_.rows)
             s.points.append(QPointF(row.values[0], row.values[c]));
+
+        const auto spline = active.find(column.id);
+        if (spline != active.end() && spline->second.isValid()) {
+            const std::vector<double> greville =
+                spline->second.grevilleAbscissae();
+            s.handles.reserve(static_cast<int>(greville.size()));
+            for (size_t i = 0; i < greville.size(); ++i)
+                s.handles.append(
+                    QPointF(firstRib + greville[i] * span,
+                            spline->second.control[i]));
+            const int sampleCount = 150;
+            s.smooth.reserve(sampleCount);
+            for (int i = 0; i < sampleCount; ++i) {
+                const double u =
+                    static_cast<double>(i) / (sampleCount - 1);
+                s.smooth.append(QPointF(firstRib + u * span,
+                                        spline->second.evaluate(u)));
+            }
+        }
         series.append(s);
     }
     curves_->setMessage(QString());
@@ -125,35 +374,64 @@ void Section1CurvePanel::syncFromText()
     if (curves_->selectedSeriesId().isEmpty() && !series.isEmpty())
         curves_->setSelectedSeriesId(series.first().id);
 
-    if (!problemList.isEmpty()) {
+    QStringList notes = matrixProblems_;
+    for (const std::string &columnId : staleColumns_) {
+        const int column = columnIndexById(columnId);
+        notes << QStringLiteral(
+                     "The %1 values no longer match their B-spline — re-fit "
+                     "the spline or apply it to restore the matrix.")
+                     .arg(QLatin1String(
+                         lep::section1Columns()[column].label));
+    }
+    if (previewActive_) {
+        status_->setStyleSheet(
+            QStringLiteral("color: %1;").arg(kWarningColor));
+        status_->setText(QStringLiteral(
+            "Previewing B-spline conversion — Convert applies it, Cancel "
+            "restores the current curves."));
+    } else if (!notes.isEmpty()) {
         status_->setStyleSheet(
             QStringLiteral("color: %1;").arg(kWarningColor));
         status_->setText(QStringLiteral("⚠ ")
-                         + problemList.join(QStringLiteral("\n⚠ ")));
+                         + notes.join(QStringLiteral("\n⚠ ")));
     } else {
         status_->setStyleSheet(QStringLiteral("color: %1;").arg(kOkColor));
-        status_->setText(
-            QStringLiteral("Geometry matrix OK · %1 rib rows × %2 columns · "
-                           "drag points to edit · ↑/↓ nudges the highlighted "
-                           "point (Shift = ×10)")
+        const int splineCount = static_cast<int>(splines_.size());
+        QString text =
+            QStringLiteral("Geometry matrix OK · %1 rib rows × %2 columns")
                 .arg(matrix_.rows.size())
-                .arg(matrix_.columnCount));
+                .arg(matrix_.columnCount);
+        if (splineCount > 0) {
+            text += QStringLiteral(" · %1 curve%2 B-spline backed")
+                        .arg(splineCount)
+                        .arg(splineCount == 1 ? QString()
+                                              : QStringLiteral("s"));
+        }
+        text += QStringLiteral(" · drag points to edit · ↑/↓ nudges "
+                               "(Shift = ×10)");
+        status_->setText(text);
     }
+    updateToolbar();
+    updateDescription(curves_->selectedSeriesId());
+}
+
+void Section1CurvePanel::updateToolbar()
+{
+    const bool stale = !staleColumns_.empty() && !previewActive_;
+    refitButton_->setVisible(stale);
+    applyButton_->setVisible(stale);
+    convertButton_->setEnabled(matrixUsable_ && !previewActive_);
+    const std::string selected =
+        curves_->selectedSeriesId().toStdString();
+    removeButton_->setVisible(!previewActive_
+                              && splines_.count(selected) > 0);
 }
 
 void Section1CurvePanel::commitSeries(const QString &seriesId)
 {
-    const auto &columns = lep::section1Columns();
-    int column = -1;
-    for (size_t c = 0; c < columns.size(); ++c) {
-        if (seriesId == QLatin1String(columns[c].id)) {
-            column = static_cast<int>(c);
-            break;
-        }
-    }
-    if (column < 1)
+    const int column = columnIndexById(seriesId.toStdString());
+    if (column < 1 || !matrixUsable_ || previewActive_)
         return;
-
     const CurveSeries *series = nullptr;
     for (const CurveSeries &candidate : curves_->seriesList()) {
         if (candidate.id == seriesId) {
@@ -161,25 +439,57 @@ void Section1CurvePanel::commitSeries(const QString &seriesId)
             break;
         }
     }
-    if (!series
-        || series->points.size() != static_cast<int>(matrix_.rows.size()))
+    if (!series)
         return;
 
+    const auto spline = splines_.find(seriesId.toStdString());
+    if (spline != splines_.end()) {
+        // Spline truth: handles are the control values; the matrix becomes
+        // the spline sampled at the current stations.
+        if (series->handles.size()
+            != static_cast<int>(spline->second.control.size()))
+            return;
+        for (int i = 0; i < series->handles.size(); ++i)
+            spline->second.control[i] = series->handles.at(i).y();
+        const std::vector<double> sampled = lep::sampleBSpline(
+            spline->second,
+            lep::uniformParameters(static_cast<int>(matrix_.rows.size())));
+        patchRows({{column, sampled}}, false);
+        persistSplines();
+        return;
+    }
+
+    if (series->points.size() != static_cast<int>(matrix_.rows.size()))
+        return;
+    std::vector<double> values;
+    values.reserve(series->points.size());
+    for (const QPointF &point : series->points)
+        values.push_back(point.y());
+    patchRows({{column, values}}, true);
+}
+
+void Section1CurvePanel::patchRows(
+    const std::map<int, std::vector<double>> &valuesByColumn,
+    bool skipUnchangedValues)
+{
     QTextDocument *document = editor_->document();
     applyingEdit_ = true;
     QTextCursor cursor(document);
     cursor.beginEditBlock();
     for (size_t i = 0; i < matrix_.rows.size(); ++i) {
         lep::Section1Row &row = matrix_.rows[i];
-        if (column >= static_cast<int>(row.values.size()))
+        bool rowTouched = false;
+        for (const auto &[column, values] : valuesByColumn) {
+            if (column >= static_cast<int>(row.values.size())
+                || i >= values.size())
+                continue;
+            if (skipUnchangedValues && values[i] == row.values[column])
+                continue;
+            row.values[column] = values[i];
+            rowTouched = true;
+        }
+        if (!rowTouched)
             continue;
-        const double value = series->points.at(static_cast<int>(i)).y();
-        // Untouched points round-trip bit-identically from the parse; only
-        // genuinely edited rows get rewritten (and thereby reformatted), so
-        // a drag never rewrites the whole matrix.
-        if (value == row.values[column])
-            continue;
-        row.values[column] = value;
         const QString newLine =
             QString::fromStdString(lep::formatSection1Row(row));
         const QTextBlock block = document->findBlockByNumber(row.lineIndex);
@@ -191,8 +501,231 @@ void Section1CurvePanel::commitSeries(const QString &seriesId)
     }
     cursor.endEditBlock();
     applyingEdit_ = false;
-    // Re-parse once so the curves show the rounded values now in the text.
+    // Re-parse once so curves and staleness reflect the rounded text.
     syncFromText();
+}
+
+void Section1CurvePanel::showConvertDialog()
+{
+    if (!matrixUsable_)
+        return;
+    const auto &columns = lep::section1Columns();
+    const int columnCount =
+        std::min<int>(matrix_.columnCount, static_cast<int>(columns.size()));
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Convert curves to B-splines"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *intro = new QLabel(
+        QStringLiteral(
+            "Enabled curves are fitted with a B-spline within the chosen "
+            "tolerance and become spline-edited; the rib matrix turns into "
+            "the spline sampled at the current rib stations. Disabled "
+            "curves stay point-by-point — convert them later with a "
+            "different tolerance if needed."),
+        &dialog);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    // One checkable button per editable column.
+    auto *chipRow = new QHBoxLayout;
+    chipRow->setSpacing(6);
+    std::vector<std::pair<int, QPushButton *>> toggles;
+    const bool anyUnconverted = [&] {
+        for (int c = 1; c < columnCount; ++c) {
+            if (columns[c].editable && splines_.count(columns[c].id) == 0)
+                return true;
+        }
+        return false;
+    }();
+    for (int c = 1; c < columnCount; ++c) {
+        if (!columns[c].editable)
+            continue;
+        auto *toggle =
+            new QPushButton(QLatin1String(columns[c].label), &dialog);
+        toggle->setCheckable(true);
+        QColor color;
+        Qt::PenStyle penStyle = Qt::SolidLine;
+        styleForColumn(c, &color, &penStyle);
+        toggle->setStyleSheet(
+            QStringLiteral("QPushButton { border: 1px solid #26354a; "
+                           "border-radius: 5px; padding: 4px 10px; }"
+                           "QPushButton:checked { border-color: %1; "
+                           "background: #1f5571; }")
+                .arg(color.name()));
+        // Default: convert what is not yet spline backed; if everything is,
+        // offer a full re-fit.
+        toggle->setChecked(!anyUnconverted
+                           || splines_.count(columns[c].id) == 0);
+        chipRow->addWidget(toggle);
+        toggles.emplace_back(c, toggle);
+    }
+    chipRow->addStretch();
+    layout->addLayout(chipRow);
+
+    auto *sliderRow = new QHBoxLayout;
+    sliderRow->addWidget(new QLabel(QStringLiteral("Tolerance"), &dialog));
+    auto *slider = new QSlider(Qt::Horizontal, &dialog);
+    slider->setRange(0, 300);
+    slider->setValue(percentToSlider(tolerancePercent_));
+    sliderRow->addWidget(slider, 1);
+    auto *sliderLabel = new QLabel(&dialog);
+    sliderLabel->setMinimumWidth(150);
+    sliderRow->addWidget(sliderLabel);
+    layout->addLayout(sliderRow);
+
+    auto *summary = new QLabel(&dialog);
+    summary->setWordWrap(true);
+    summary->setObjectName(QStringLiteral("hint"));
+    layout->addWidget(summary);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)
+        ->setText(QStringLiteral("Convert"));
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    const std::vector<double> stations =
+        lep::uniformParameters(static_cast<int>(matrix_.rows.size()));
+    const auto updatePreview = [&] {
+        const double percent = sliderToPercent(slider->value());
+        sliderLabel->setText(
+            QStringLiteral("%1 % of curve range")
+                .arg(QString::number(percent, 'f', 2)));
+        previewSplines_ = splines_;
+        int converted = 0;
+        int worstControls = 0;
+        double worstPercent = 0.0;
+        for (const auto &[column, toggle] : toggles) {
+            if (!toggle->isChecked()) {
+                toggle->setToolTip(QString());
+                continue;
+            }
+            const std::vector<double> values = columnValues(column);
+            double maxError = 0.0;
+            const lep::BSpline fitted =
+                lep::fitBSpline(stations, values,
+                                absoluteTolerance(column, percent),
+                                &maxError);
+            if (!fitted.isValid())
+                continue;
+            previewSplines_[lep::section1Columns()[column].id] = fitted;
+            ++converted;
+            worstControls = std::max(
+                worstControls, static_cast<int>(fitted.control.size()));
+            double low = values.front();
+            double high = low;
+            for (const double value : values) {
+                low = std::min(low, value);
+                high = std::max(high, value);
+            }
+            const double range = std::max(high - low, 1e-12);
+            worstPercent =
+                std::max(worstPercent, maxError / range * 100.0);
+            toggle->setToolTip(
+                QStringLiteral("%1 control points · max deviation %2 %3 "
+                               "(%4 %)")
+                    .arg(fitted.control.size())
+                    .arg(QString::number(maxError, 'f', 3))
+                    .arg(QLatin1String(
+                        lep::section1Columns()[column].unit))
+                    .arg(QString::number(maxError / range * 100.0, 'f',
+                                         2)));
+        }
+        summary->setText(
+            converted == 0
+                ? QStringLiteral("No curves enabled.")
+                : QStringLiteral("%1 curve%2 fitted · up to %3 control "
+                                 "points · worst deviation %4 % of range")
+                      .arg(converted)
+                      .arg(converted == 1 ? QString() : QStringLiteral("s"))
+                      .arg(worstControls)
+                      .arg(QString::number(worstPercent, 'f', 2)));
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(converted > 0);
+        previewActive_ = true;
+        rebuildDisplay();
+    };
+    connect(slider, &QSlider::valueChanged, &dialog,
+            [&updatePreview](int) { updatePreview(); });
+    for (const auto &[column, toggle] : toggles) {
+        connect(toggle, &QPushButton::toggled, &dialog,
+                [&updatePreview](bool) { updatePreview(); });
+    }
+    updatePreview();
+
+    const int result = dialog.exec();
+    previewActive_ = false;
+    if (result != QDialog::Accepted) {
+        previewSplines_.clear();
+        rebuildDisplay();
+        return;
+    }
+
+    tolerancePercent_ = sliderToPercent(slider->value());
+    std::map<int, std::vector<double>> valuesByColumn;
+    for (const auto &[column, toggle] : toggles) {
+        if (!toggle->isChecked())
+            continue;
+        const auto fitted =
+            previewSplines_.find(lep::section1Columns()[column].id);
+        if (fitted == previewSplines_.end())
+            continue;
+        splines_[fitted->first] = fitted->second;
+        valuesByColumn[column] =
+            lep::sampleBSpline(fitted->second, stations);
+    }
+    previewSplines_.clear();
+    persistSplines();
+    patchRows(valuesByColumn, false);
+}
+
+void Section1CurvePanel::removeSelectedSpline()
+{
+    const std::string selected = curves_->selectedSeriesId().toStdString();
+    if (splines_.erase(selected) > 0) {
+        persistSplines();
+        syncFromText();
+    }
+}
+
+void Section1CurvePanel::refitStaleColumns()
+{
+    if (!matrixUsable_)
+        return;
+    const std::vector<double> stations =
+        lep::uniformParameters(static_cast<int>(matrix_.rows.size()));
+    for (const std::string &columnId : staleColumns_) {
+        const int column = columnIndexById(columnId);
+        if (column < 1)
+            continue;
+        double maxError = 0.0;
+        const lep::BSpline fitted = lep::fitBSpline(
+            stations, columnValues(column),
+            absoluteTolerance(column, tolerancePercent_), &maxError);
+        if (fitted.isValid())
+            splines_[columnId] = fitted;
+    }
+    persistSplines();
+    syncFromText();
+}
+
+void Section1CurvePanel::applyStaleSplines()
+{
+    if (!matrixUsable_)
+        return;
+    const std::vector<double> stations =
+        lep::uniformParameters(static_cast<int>(matrix_.rows.size()));
+    std::map<int, std::vector<double>> valuesByColumn;
+    for (const std::string &columnId : staleColumns_) {
+        const int column = columnIndexById(columnId);
+        const auto spline = splines_.find(columnId);
+        if (column < 1 || spline == splines_.end())
+            continue;
+        valuesByColumn[column] = lep::sampleBSpline(spline->second, stations);
+    }
+    patchRows(valuesByColumn, false);
 }
 
 void Section1CurvePanel::updateDescription(const QString &seriesId)
@@ -203,9 +736,18 @@ void Section1CurvePanel::updateDescription(const QString &seriesId)
                 column.unit[0] == '\0'
                     ? QString()
                     : QStringLiteral(" (%1)").arg(QLatin1String(column.unit));
-            description_->setText(QStringLiteral("<b>%1</b>%2 — %3")
-                                      .arg(QLatin1String(column.label), unit,
-                                           QLatin1String(column.description)));
+            QString text = QStringLiteral("<b>%1</b>%2 — %3")
+                               .arg(QLatin1String(column.label), unit,
+                                    QLatin1String(column.description));
+            const auto spline = activeSplines().find(column.id);
+            if (spline != activeSplines().end()) {
+                text += QStringLiteral(
+                            " · <b>B-spline</b> with %1 control points — "
+                            "drag the squares; the dots are the sampled "
+                            "matrix rows.")
+                            .arg(spline->second.control.size());
+            }
+            description_->setText(text);
             return;
         }
     }

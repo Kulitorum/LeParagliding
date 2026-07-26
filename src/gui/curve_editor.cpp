@@ -84,9 +84,10 @@ void CurveEditor::setSeriesList(const QVector<CurveSeries> &series)
         }
     }
     if (selected_ >= 0) {
-        const int pointCount = series_.at(selected_).points.size();
-        activePoint_ = pointCount > 0
-                           ? std::clamp(activePoint_, -1, pointCount - 1)
+        const int editableCount =
+            static_cast<int>(series_.at(selected_).editableSet().size());
+        activePoint_ = editableCount > 0
+                           ? std::clamp(activePoint_, -1, editableCount - 1)
                            : -1;
     } else {
         activePoint_ = -1;
@@ -96,13 +97,15 @@ void CurveEditor::setSeriesList(const QVector<CurveSeries> &series)
     xMax_ = 1.0;
     bool first = true;
     for (const CurveSeries &s : series_) {
-        for (const QPointF &point : s.points) {
-            if (first) {
-                xMin_ = xMax_ = point.x();
-                first = false;
-            } else {
-                xMin_ = std::min(xMin_, point.x());
-                xMax_ = std::max(xMax_, point.x());
+        for (const QVector<QPointF> *set : {&s.points, &s.handles, &s.smooth}) {
+            for (const QPointF &point : *set) {
+                if (first) {
+                    xMin_ = xMax_ = point.x();
+                    first = false;
+                } else {
+                    xMin_ = std::min(xMin_, point.x());
+                    xMax_ = std::max(xMax_, point.x());
+                }
             }
         }
     }
@@ -148,6 +151,14 @@ void CurveEditor::setSelectedSeriesId(const QString &id)
     }
 }
 
+void CurveEditor::setSelectedSeriesSmooth(const QVector<QPointF> &smooth)
+{
+    if (selected_ < 0 || selected_ >= series_.size())
+        return;
+    series_[selected_].smooth = smooth;
+    update();
+}
+
 QRectF CurveEditor::plotRect() const
 {
     const QFontMetrics metrics(font());
@@ -163,13 +174,21 @@ CurveEditor::ValueRange CurveEditor::paddedRange(int seriesIndex) const
 {
     ValueRange range;
     const CurveSeries &series = series_.at(seriesIndex);
-    if (series.points.isEmpty())
-        return range;
-    range.low = range.high = series.points.first().y();
-    for (const QPointF &point : series.points) {
-        range.low = std::min(range.low, point.y());
-        range.high = std::max(range.high, point.y());
+    bool first = true;
+    for (const QVector<QPointF> *set :
+         {&series.points, &series.handles, &series.smooth}) {
+        for (const QPointF &point : *set) {
+            if (first) {
+                range.low = range.high = point.y();
+                first = false;
+            } else {
+                range.low = std::min(range.low, point.y());
+                range.high = std::max(range.high, point.y());
+            }
+        }
     }
+    if (first)
+        return range;
     const double span = range.high - range.low;
     if (span < 1e-9) {
         const double pad =
@@ -244,12 +263,12 @@ int CurveEditor::pointNear(int seriesIndex, const QPointF &position,
     const ValueRange range =
         dragging_ && seriesIndex == selected_ ? dragRange_
                                               : paddedRange(seriesIndex);
-    const CurveSeries &series = series_.at(seriesIndex);
+    const QVector<QPointF> &editable = series_.at(seriesIndex).editableSet();
     int best = -1;
     double bestDistance = maxDistance;
-    for (int i = 0; i < series.points.size(); ++i) {
-        const QPointF pixel(xToPixel(series.points.at(i).x(), plot),
-                            valueToPixel(series.points.at(i).y(), range, plot));
+    for (int i = 0; i < editable.size(); ++i) {
+        const QPointF pixel(xToPixel(editable.at(i).x(), plot),
+                            valueToPixel(editable.at(i).y(), range, plot));
         const double distance = std::hypot(pixel.x() - position.x(),
                                            pixel.y() - position.y());
         if (distance <= bestDistance) {
@@ -267,7 +286,9 @@ int CurveEditor::seriesNear(const QPointF &position, double maxDistance) const
     double bestDistance = maxDistance;
     for (int s = 0; s < series_.size(); ++s) {
         const ValueRange range = paddedRange(s);
-        const QVector<QPointF> &points = series_.at(s).points;
+        const CurveSeries &candidate = series_.at(s);
+        const QVector<QPointF> &points =
+            candidate.smooth.isEmpty() ? candidate.points : candidate.smooth;
         for (int i = 0; i + 1 < points.size(); ++i) {
             const QPointF a(xToPixel(points.at(i).x(), plot),
                             valueToPixel(points.at(i).y(), range, plot));
@@ -299,12 +320,13 @@ void CurveEditor::nudgeActivePoint(double direction, bool large)
     if (selected_ < 0 || selected_ >= series_.size())
         return;
     CurveSeries &series = series_[selected_];
-    if (!series.editable || series.points.isEmpty())
+    QVector<QPointF> &editable = series.editableSet();
+    if (!series.editable || editable.isEmpty())
         return;
     if (activePoint_ < 0)
         activePoint_ = 0;
     activePoint_ = std::clamp(activePoint_, 0,
-                              static_cast<int>(series.points.size()) - 1);
+                              static_cast<int>(editable.size()) - 1);
 
     const ValueRange range = paddedRange(selected_);
     double step = std::max((range.high - range.low) / 100.0,
@@ -312,9 +334,9 @@ void CurveEditor::nudgeActivePoint(double direction, bool large)
     if (large)
         step *= 10.0;
     const double value =
-        std::clamp(series.points.at(activePoint_).y() + direction * step,
+        std::clamp(editable.at(activePoint_).y() + direction * step,
                    series.minValue, series.maxValue);
-    series.points[activePoint_].setY(value);
+    editable[activePoint_].setY(value);
     update();
     const QString id = series.id;
     const int index = activePoint_;
@@ -472,18 +494,24 @@ void CurveEditor::paintEvent(QPaintEvent *)
             if ((pass == 0) == isSelected)
                 continue;
             const CurveSeries &series = series_.at(s);
-            if (series.points.isEmpty())
+            if (series.points.isEmpty() && series.smooth.isEmpty())
                 continue;
             const ValueRange range = dragging_ && isSelected
                                          ? dragRange_
                                          : paddedRange(s);
-            QPolygonF polyline;
-            polyline.reserve(series.points.size());
-            for (const QPointF &point : series.points) {
-                polyline.append(
-                    QPointF(xToPixel(point.x(), plot),
-                            valueToPixel(point.y(), range, plot)));
-            }
+            const auto toPixels = [&](const QVector<QPointF> &set) {
+                QPolygonF result;
+                result.reserve(set.size());
+                for (const QPointF &point : set) {
+                    result.append(
+                        QPointF(xToPixel(point.x(), plot),
+                                valueToPixel(point.y(), range, plot)));
+                }
+                return result;
+            };
+            const QPolygonF polyline =
+                toPixels(series.smooth.isEmpty() ? series.points
+                                                 : series.smooth);
             QColor color = series.color;
             if (!isSelected)
                 color.setAlpha(kDimmedAlpha);
@@ -495,26 +523,62 @@ void CurveEditor::paintEvent(QPaintEvent *)
 
             if (!isSelected)
                 continue;
-            for (int i = 0; i < polyline.size(); ++i) {
+
+            const bool splineMode = !series.handles.isEmpty();
+            if (splineMode) {
+                // Passive data markers: the spline samples the matrix rows.
+                painter.setPen(Qt::NoPen);
+                QColor dot = series.color;
+                dot.setAlpha(190);
+                painter.setBrush(dot);
+                for (const QPointF &pixel : toPixels(series.points))
+                    painter.drawEllipse(pixel, 2.4, 2.4);
+            }
+
+            // Editable markers: control-point squares in spline mode,
+            // round data handles otherwise.
+            const QPolygonF editablePixels = toPixels(series.editableSet());
+            if (splineMode) {
+                QColor polygonColor = series.color;
+                polygonColor.setAlpha(150);
+                painter.setPen(QPen(polygonColor, 1.0, Qt::DashLine));
+                painter.setBrush(Qt::NoBrush);
+                painter.drawPolyline(editablePixels);
+            }
+            for (int i = 0; i < editablePixels.size(); ++i) {
                 const bool emphasized =
                     i == hoverPoint_ || i == activePoint_
                     || (dragging_ && i == dragPoint_);
                 painter.setPen(QPen(kBackground, 2.0));
                 painter.setBrush(series.color);
-                painter.drawEllipse(polyline.at(i), emphasized ? 6.0 : 4.0,
-                                    emphasized ? 6.0 : 4.0);
+                const double radius = emphasized ? 6.0 : 4.0;
+                if (splineMode) {
+                    painter.drawRect(QRectF(
+                        editablePixels.at(i).x() - radius,
+                        editablePixels.at(i).y() - radius, radius * 2.0,
+                        radius * 2.0));
+                } else {
+                    painter.drawEllipse(editablePixels.at(i), radius,
+                                        radius);
+                }
             }
 
-            // Value bubble for the hovered or dragged point.
+            // Value bubble for the hovered or dragged editable marker.
             const int bubblePoint = dragging_ ? dragPoint_ : hoverPoint_;
-            if (bubblePoint >= 0 && bubblePoint < series.points.size()) {
-                const QPointF anchor = polyline.at(bubblePoint);
-                const QPointF dataPoint = series.points.at(bubblePoint);
+            if (bubblePoint >= 0
+                && bubblePoint < series.editableSet().size()) {
+                const QPointF anchor = editablePixels.at(bubblePoint);
+                const QPointF dataPoint =
+                    series.editableSet().at(bubblePoint);
+                const bool integralX =
+                    std::abs(dataPoint.x() - std::round(dataPoint.x()))
+                    < 1e-6;
                 QString text = QStringLiteral("%1 %2 · %3")
                                    .arg(xAxisLabel_.isEmpty()
                                             ? QStringLiteral("x")
                                             : xAxisLabel_)
-                                   .arg(formatValue(dataPoint.x(), 0))
+                                   .arg(formatValue(dataPoint.x(),
+                                                    integralX ? 0 : 2))
                                    .arg(formatValue(dataPoint.y(),
                                                     series.decimals));
                 if (!series.unit.isEmpty())
@@ -590,7 +654,7 @@ void CurveEditor::mouseMoveEvent(QMouseEvent *event)
     const double value =
         std::clamp(pixelToValue(pixelY, dragRange_, plot), series.minValue,
                    series.maxValue);
-    series.points[dragPoint_].setY(value);
+    series.editableSet()[dragPoint_].setY(value);
     update();
     emit pointMoved(series.id, dragPoint_, value);
 }

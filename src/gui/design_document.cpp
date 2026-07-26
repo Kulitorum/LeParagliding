@@ -287,6 +287,8 @@ bool DesignDocument::load(const QString &path, QString *errorMessage)
     revisions_.clear();
     historyPersisted_ = encodedHistory.present;
     historyDirty_ = false;
+    splines_ = encodedHistory.root.value(QStringLiteral("splines")).toObject();
+    splinesDirty_ = false;
 
     if (encodedHistory.present) {
         if (encodedHistory.root.value(QStringLiteral("format")).toString()
@@ -449,7 +451,26 @@ bool DesignDocument::save(QString *errorMessage)
     savedPayload_ = currentPayload;
     historyPersisted_ = true;
     historyDirty_ = false;
+    splinesDirty_ = false;
     return true;
+}
+
+QJsonObject DesignDocument::splinesData() const
+{
+    return splines_;
+}
+
+void DesignDocument::setSplinesData(const QJsonObject &data)
+{
+    if (splines_ == data)
+        return;
+    splines_ = data;
+    splinesDirty_ = true;
+}
+
+bool DesignDocument::splinesDirty() const
+{
+    return splinesDirty_;
 }
 
 bool DesignDocument::saveAs(const QString &path, QString *errorMessage)
@@ -691,6 +712,9 @@ QString DesignDocument::serializedText() const
         revisions.append(object);
     }
     root.insert(QStringLiteral("revisions"), revisions);
+    if (!splines_.isEmpty()) {
+        root.insert(QStringLiteral("splines"), splines_);
+    }
 
     const QByteArray encoded =
         QJsonDocument(root).toJson(QJsonDocument::Compact).toBase64();

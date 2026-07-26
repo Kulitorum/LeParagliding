@@ -1675,11 +1675,24 @@ void MainWindow::rebuildSectionEditors()
         new DesignSyntaxHighlighter(editor->document());
         if (section.number == 1) {
             // Section 1 gets the graphical rib-matrix editor below the text;
-            // the splitter lets either half take over the page.
+            // the splitter lets either half take over the page. B-spline
+            // definitions live in the document's Studio trailer, so a
+            // spline-only change must also enable Save.
             auto *splitter = new QSplitter(Qt::Vertical, sectionPage);
             splitter->setChildrenCollapsible(false);
             splitter->addWidget(editor);
-            splitter->addWidget(new Section1CurvePanel(editor, splitter));
+            splitter->addWidget(new Section1CurvePanel(
+                editor, [this] { return document_.splinesData(); },
+                [this](const QJsonObject &data) {
+                    document_.setSplinesData(data);
+                    if (document_.splinesDirty()) {
+                        documentDirty_ = true;
+                        saveButton_->setEnabled(
+                            process_->state() == QProcess::NotRunning);
+                        updateWindowTitle();
+                    }
+                },
+                splitter));
             splitter->setStretchFactor(0, 3);
             splitter->setStretchFactor(1, 2);
             layout->addWidget(splitter, 1);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QJsonObject>
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -42,6 +43,13 @@ public:
     QString assembledText() const;
     bool isEmpty() const;
 
+    // Studio-only data (B-spline curve definitions and similar) carried in
+    // the embedded trailer JSON next to the version history; the engine
+    // never sees it. An empty object means "none".
+    QJsonObject splinesData() const;
+    void setSplinesData(const QJsonObject &data);
+    bool splinesDirty() const;
+
 private:
     struct StoredRevision
     {
@@ -56,6 +64,8 @@ private:
     QString preamble_;
     QList<DesignSection> sections_;
     QList<StoredRevision> revisions_;
+    QJsonObject splines_;
+    bool splinesDirty_ = false;
     QString savedPayload_;
     int activeRevisionIndex_ = -1;
     bool historyPersisted_ = false;
