@@ -1,0 +1,164 @@
+<b>SECTION
+9: DESCRIPTION OF LINES</b><br>
+<br>
+&nbsp;
+We define the following concepts, per lines:<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>integer</i>
+: Control parameter with the following meanings</span><br>
+
+</div>
+
+<br>
+
+0 = lower branches lined only by geometric mean of the anchor points<br>
+
+1 = lower branches lined by weighting type 1<br>
+
+2 = lower branches lined by weighting type 2<br>
+
+3 = lower branches lined by weighting type 3 (spanwise and chordwise optimization). Read <a href="https://www.laboratoridenvol.com/leparagliding/linesopt/lineopt.en.html">more details here</a>.<br>
+
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>integer
+</i>: Line plans number (2,3,4...)</span><br>
+
+</div>
+
+<br>
+
+<br>
+
+Denotes the number of plans of lines that start from each of the risers
+of the glider. Will be considered as many plans as risers. The "plans"
+do not necessarily have lines in a plan, and may have different
+alignments anchors in various rows (pyramid lines)<br>
+<br>
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>integer
+</i>: Paths number for first plan</span><br>
+
+</div>
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>11
+integers </i>: i1, i2, i3, i4, i5, i6, i7, i8 ,i9, i19, i11
+Ramifications and levels</span><br>
+
+<br>
+
+<div style="margin-left:40px;"><span style="color:#8080ff;">(i1)
+number of branches (ramifications) of the path</span><br>
+
+<br>
+
+<span style="color:#8080ff;">(i2) branching level 1</span><br>
+
+<span style="color:#8080ff;">(i3) order at level 1</span><br>
+
+<br>
+
+<span style="color:#8080ff;">(i4) level of ramification 2</span><br>
+
+<span style="color:#8080ff;">(i5) order at level 2</span><br>
+
+<br>
+
+<span style="color:#8080ff;">(i6) level of ramification 3</span><br>
+
+<span style="color:#8080ff;">(i7) order at level 3</span><br>
+
+<br>
+
+<span style="color:#8080ff;">(i8) branching level 4</span><br>
+
+<span style="color:#8080ff;">(i9) order at level 4</span><br>
+
+<br>
+
+<span style="color:#8080ff;">(i10) anchor line (1 = A, 2 = B, 3
+= C, 4 = c 5 = D, 6 = brake)</span><br>
+
+<span style="color:#8080ff;">(i11) anchor rib number</span><br>
+
+</div>
+
+</div>
+
+<br>
+
+- These are considered the ramifications from to the bottom to up. The
+main riser are considered the branch level "1", the next line that
+starts from maillons "2", the one above is the "3" ... and so on. <br>
+
+- Within a branch level are numbered consecutively in the same lines
+from left to right 1,2,3,<br>
+
+- Path: Is any path through the ramifications, upward, started in the
+main carabiner and ended in a sail anchor.<br>
+
+- With these definitions, this section should be written the array of
+lines for each plan<br>
+
+- The first section number indicates the number of planes to be
+considered.<br>
+
+- The next number indicates the total number of different paths in the
+plane.<br>
+
+- Each line of the matrix is a "path"<br>
+
+- If there is no level 3 or 4 is denoted by "0"<br>
+
+- It is only allowed up to 4 levels of branching.<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>integer</i>
+: Paths number for second plan</span><br>
+
+</div>
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>11
+integers </i>: i1, i2, i3, i4, i5, i6, i7, i8 ,i9, i19, i11
+Ramifications and levels<br>
+
+...<br>
+
+</span></div>
+
+<br>
+
+Do likewise with
+the other plans of the paraglider line design. The example of clear
+matrix writing is exposed in gnuLAB2 data file.<br>
+
+<br>
+
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S09_lines_matrix_definition.jpg"><img src="qrc:/manual/images/S09_lines_matrix_definition_p.jpg" width="640" height="485"></a><br>
+
+
+FIGURE 15:
+Suspension
+lines matrix<br>
+
+</div>
+
+
+<br>
+
+<b><br>
+
+</b>

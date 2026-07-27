@@ -1,0 +1,151 @@
+SECTION 33: DETAILED RISERS<br>
+
+<span style="color:#ff8080;"><span style="color:#e6edf7;"><br>
+
+</span></span>
+
+
+	
+	
+	
+	
+
+
+
+
+	
+	
+	
+	Type
+a single parameter "0" to bypass this section and use
+pre-set values :) <br>
+
+<br>
+
+Example:<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><code>*******************************************************</code></span><br>
+
+<span style="color:#8080ff;"><code>
+*
+      33. DETAILED RISERS</code></span><br>
+
+<span style="color:#8080ff;"><code>
+*******************************************************</code></span><br>
+
+<span style="color:#8080ff;"><code>
+0</code></span><br>
+
+</div>
+
+
+<br>
+
+Type
+1 and additional parameters to design a paraglider with risers of
+different lengths A, B, C, D, E (not usual, but sometimes it may be
+necessary). Works.<br>
+
+Type
+2,3 or 4 to project the risers of a vario seat system of two, three,
+four points (types 2,3,4 still not available).
+<br>
+
+<br>
+
+Example:<br>
+
+
+
+
+	
+	
+	
+	
+
+
+
+
+
+
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><code>*******************************************************<br>
+
+*
+      33. DETAILED RISERS<br>
+
+*******************************************************<br>
+
+1<br>
+
+1<br>
+
+A	45.0
+ cm<br>
+
+B	50.0
+ cm<br>
+
+C	60.0
+ cm</code></span></div>
+
+<br>
+
+<span style="color:#ff8080;"><span style="color:#e6edf7;">Explanation of the parameters in section 33:<br>
+
+<br>
+
+</span></span>
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+
+
+
+
+if integer = 0 then use default internal parameters, and finish writting the section.<br>
+
+
+
+
+
+
+
+
+
+if integer = 1 then use control parameters, and continue writting ten lines:<br>
+
+<br>
+
+
+Line 2: <i><span style="color:#8080ff;">integer<br>
+&nbsp;<span style="color:#e6edf7;">integer=
+risers type (1= risers of defined length, 2= vario seat two points,
+3=vario seat three points, 4=vario seat four points)</span><br>
+<span style="color:#e6edf7;"><br>
+
+And then write N lines, being N=number of risers according definition in section <br>
+
+</span></span></i>
+
+<b><br>
+
+</b>Lines 3 to 3+N-1: <i><span style="color:#8080ff;">character1 real character2<br>
+
+<span style="color:#e6edf7;">character = write A,B,C,D,E... according riser definition in SECTION 8 (nrisers=plans number)</span><br>
+<span style="color:#e6edf7;">real= </span></span></i>riser length in cm<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">character = cm </span></span></i><br>
+
+<b>
+<br>
+
+</b>

@@ -492,6 +492,8 @@ void MainWindow::buildInterface()
     hero->addWidget(preferencesButton);
     auto *manualButton = new QPushButton(QStringLiteral("Manual"), central);
     manualButton->setObjectName(QStringLiteral("quietButton"));
+    manualButton->setToolTip(QStringLiteral(
+        "Open the complete LEparagliding manual (bundled offline copy)"));
     hero->addWidget(manualButton);
     auto *version = new QLabel(QStringLiteral("3.28 Jardins · Qt 6"), central);
     version->setObjectName(QStringLiteral("badge"));
@@ -1036,8 +1038,8 @@ void MainWindow::buildInterface()
     connect(inputBrowseButton_, &QPushButton::clicked, this, [this] {
         browseForInput();
     });
-    connect(manualButton, &QPushButton::clicked, this, [] {
-        QDesktopServices::openUrl(QUrl(QString::fromLatin1(manualUrl)));
+    connect(manualButton, &QPushButton::clicked, this, [this] {
+        showManualDialog();
     });
     connect(preferencesButton, &QPushButton::clicked, this, [this] {
         showPreferences();
@@ -2236,20 +2238,19 @@ void MainWindow::showSectionHelp(int index)
     QDialog dialog(this);
     dialog.setWindowTitle(
         QStringLiteral("Section %1 · %2").arg(section.number).arg(help.title));
-    dialog.resize(620, 440);
+    dialog.resize(820, 640);
     auto *layout = new QVBoxLayout(&dialog);
 
     auto *browser = new QTextBrowser(&dialog);
     browser->setOpenExternalLinks(true);
-    browser->setHtml(
+    QString html =
         QStringLiteral(
             "<h2>Section %1 · %2</h2>"
             "<h3>Purpose</h3><p>%3</p>"
             "<h3>Format rules</h3><p>%4</p>"
             "<h3>Editing notes</h3><p>%5</p>"
             "%6"
-            "%7"
-            "<p><a href=\"%8\">Open the complete LEparagliding manual</a></p>")
+            "%7")
             .arg(section.number)
             .arg(help.title.toHtmlEscaped())
             .arg(help.purpose)
@@ -2260,14 +2261,71 @@ void MainWindow::showSectionHelp(int index)
                      : QStringLiteral("<h3>Field reference</h3>%1").arg(details))
             .arg(help.experiment.isEmpty()
                      ? QString()
-                     : QStringLiteral("<h3>Try it</h3>%1").arg(help.experiment))
-            .arg(QString::fromLatin1(manualUrl)));
+                     : QStringLiteral("<h3>Try it</h3>%1").arg(help.experiment));
+    if (!help.manual.isEmpty()) {
+        // Appended verbatim: the manual text contains "%<digit>" sequences
+        // that QString::arg would corrupt.
+        html += QStringLiteral(
+            "<hr><h3>From the LEparagliding manual</h3>"
+            "<p><i>Original documentation by Pere Casellas, "
+            "<a href=\"https://www.laboratoridenvol.com\">Laboratori "
+            "d'envol</a>.</i></p>");
+        html += help.manual;
+    }
+    html += QStringLiteral(
+                "<p><a href=\"%1\">Open the complete LEparagliding manual</a></p>")
+                .arg(QString::fromLatin1(manualUrl));
+    browser->setHtml(html);
     layout->addWidget(browser);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
     dialog.exec();
+}
+
+void MainWindow::showManualDialog()
+{
+    if (!manualDialog_) {
+        // Non-modal so the manual can stay open beside the section editors.
+        manualDialog_ = new QDialog(this);
+        manualDialog_->setWindowTitle(QStringLiteral("LEparagliding manual"));
+        manualDialog_->setWindowFlags(
+            manualDialog_->windowFlags() | Qt::WindowMinMaxButtonsHint);
+        manualDialog_->resize(880, 720);
+        auto *layout = new QVBoxLayout(manualDialog_);
+
+        auto *browser = new QTextBrowser(manualDialog_);
+        browser->setOpenExternalLinks(true);
+        // Loading via a qrc source URL (rather than setHtml) makes the
+        // table-of-contents #anchors and Back navigation work in-place.
+        browser->setSource(
+            QUrl(QStringLiteral("qrc:/manual/manual_full.html")));
+        layout->addWidget(browser);
+
+        auto *buttons =
+            new QDialogButtonBox(QDialogButtonBox::Close, manualDialog_);
+        auto *backButton = buttons->addButton(
+            QStringLiteral("Back"), QDialogButtonBox::ActionRole);
+        backButton->setEnabled(false);
+        connect(browser, &QTextBrowser::backwardAvailable, backButton,
+                &QPushButton::setEnabled);
+        connect(backButton, &QPushButton::clicked, browser,
+                &QTextBrowser::backward);
+        auto *onlineButton = buttons->addButton(
+            QStringLiteral("Open online"), QDialogButtonBox::ActionRole);
+        onlineButton->setToolTip(
+            QStringLiteral("Open the latest manual at laboratoridenvol.com"));
+        connect(onlineButton, &QPushButton::clicked, this, [] {
+            QDesktopServices::openUrl(QUrl(QString::fromLatin1(manualUrl)));
+        });
+        connect(buttons, &QDialogButtonBox::rejected, manualDialog_,
+                &QDialog::hide);
+        layout->addWidget(buttons);
+    }
+    manualDialog_->show();
+    manualDialog_->raise();
+    manualDialog_->activateWindow();
 }
 
 void MainWindow::startPreviewCalculation(bool automatic)

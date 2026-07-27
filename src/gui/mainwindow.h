@@ -13,6 +13,7 @@
 #include <memory>
 
 class QCloseEvent;
+class QDialog;
 class QDragEnterEvent;
 class QDropEvent;
 class QFrame;
@@ -74,6 +75,7 @@ private:
     bool saveDesign(bool showConfirmation = true);
     bool maybeSaveChanges();
     void showSectionHelp(int index);
+    void showManualDialog();
     void showPreferences();
     void showVersionHistory();
     void restoreVersion(int revisionIndex);
@@ -162,5 +164,6 @@ private:
     QSlider *xraySlider_ = nullptr;
     QHash<int, QTreeWidgetItem *> partsTreeItems_;
     bool syncingPartsTree_ = false;
+    QDialog *manualDialog_ = nullptr;
     QProcess *process_ = nullptr;
 };

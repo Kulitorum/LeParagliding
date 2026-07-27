@@ -1,0 +1,88 @@
+SECTION 30: AIRFOIL THICKNESS MODIFICATION<br>
+
+<br>
+
+Coefficients of amplification or reduction of the thickness of the cells. Normally define as "1.0", or "0.0" in the wingtip.<br>
+
+
+<br>
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+
+if integer = 0 then no airfoil amplification set<br>
+
+
+
+
+
+
+if integer = 1 then add:<br>
+
+<br>
+
+Lines 1,2,3,...,maxrib: <i><span style="color:#8080ff;">integer&nbsp;&nbsp; real<br>
+
+<i><span style="color:#e6edf7;">I</span></i></span></i><i>nteger: </i>set rib number (1,2,3...) in all ribs<br>
+
+<i>real:</i> set amplification coefficient, for example 1.0 as default<br>
+
+<b><br>
+
+</b>Example:<b><br>
+
+</b>
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 30. AIRFOIL THICKNESS MODIFICATION</code><br>
+
+
+<code>*******************************************************</code><br>
+
+
+<code>1</code><br>
+
+
+<code>1&nbsp;&nbsp;&nbsp; 1.2</code><br>
+
+
+<code>2&nbsp;&nbsp;&nbsp; 1.1</code><br>
+
+
+<code>3&nbsp;&nbsp;&nbsp; 1.0</code><br>
+
+
+<code>4&nbsp;&nbsp;&nbsp; 1.0</code><br>
+
+
+<code>5&nbsp;&nbsp;&nbsp; 1.0</code><br>
+
+
+<code>6&nbsp;&nbsp;&nbsp; 1.0</code><br>
+
+
+<code>7&nbsp;&nbsp;&nbsp; 1.0</code><br>
+
+
+<code>8&nbsp;&nbsp;&nbsp; 1.0</code><br>
+
+
+<code>9&nbsp;&nbsp;&nbsp; 1.0</code><br>
+
+<code>
+(...)</code><br>
+
+
+<code>23 &nbsp; 0.0</code><br>
+
+</div>
+
+<b>
+<br>
+
+</b>

@@ -1,0 +1,680 @@
+SECTION 21: JONCS DEFINITION (NYLON RODS)<br>
+
+
+
+
+<br>
+
+
+
+
+<div>Section
+is fully functional. Now it is possible to define type 1 and type 2
+rods, which
+are the most used. Type "1" is&nbsp; rod on the nose with small
+deflections at both
+ends, which are completely controllable in position, transition, and
+depth of deflection, with 8 parameters. Type "2" is straight or arched
+rod defined to any position within the profile, which can be at any
+position within the profile, defined by coordinates. The structure of
+the section is a bit complex, but it has its own logic. The program calculates the rods
+and shapes of the pockets, which are also fully controllable in widths,
+with 4 parameters. It is possible to define different rods for each
+cell, individually or by groups. If
+you don't need rods, leave the value to "0". In this section we will
+use the following basic concepts: scheme, bloc (of data), type (of
+rod), group (of ribs).<br>
+
+<br>
+
+The first number in the section is an integer, which we called the "scheme". <br>
+
+<br>
+
+<b>The scheme "0"</b> means, not defining any rod. And here ends the section. Easy!<br>
+
+<br>
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+if integer = 0 rods are not considered<br>
+
+<span style="color:#8080ff;"><br>
+
+</span><span style="color:#8080ff;">
+Example 1: Scheme "0" means do not use rods</span><br>
+
+
+
+<code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+
+
+<code><span style="color:#8080ff;">*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 21. JONCS DEFINITION (NYLON RODS)</span></code><br>
+
+
+
+<code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+
+
+<code><span style="color:#8080ff;">0</span></code><br>
+
+<br>
+
+<b>The scheme "1"</b> means use rods
+type "1" in the nose. At the bottom line write the number of groups.
+Then write each group consecutively using four lines. This is the
+detailed structure of the scheme 1:<br>
+
+<br>
+
+</div>
+
+
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+if integer = 0 rods are not considered<br>
+
+
+if integer = 1 add some others parametes to define and draw rods<br>
+
+<br>
+
+
+Only if first integer is 1 (use joncs "type 1") then add:<br>
+
+<br>
+
+Line 2: <i><span style="color:#8080ff;">integer </span></i><br>
+
+<i>integer:</i> number of groups to define<br>
+
+<br>
+
+Line 3: <i><span style="color:#8080ff;">integer1&nbsp; integer2&nbsp; integer3<br>
+
+<span style="color:#e6edf7;">integer1: </span></span></i>1 (group number 1)<br>
+
+<i>integer2:</i> number of first rib in group 1<br>
+
+<i>integer3:</i> number of last rib in group 1 <br>
+
+
+<br>
+
+
+Line 4: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4<br>
+
+<span style="color:#e6edf7;">real1: </span></span></i>extrados init point deflection in % of chord<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>extrados final point deflection in % of chord<br>
+
+<i>real3:</i> value of max deflection in intrados % of chord<br>
+
+<i>real4:</i> value n of exponent in curve of deflection type y=k·x^n (normaly use n=2.0, parabolic)<br>
+
+<br>
+
+
+
+Line 5: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4<br>
+
+<span style="color:#e6edf7;">real1: </span></span></i>intrados init point deflection in % of chord<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>intrados final point deflection in % of chord<br>
+
+<i>real3:</i> value of max deflection in intrados % of chord<br>
+
+<i>real4:</i> value n of exponent in curve of deflection type y=k·x^n (normaly use n=2.0, parabolic)<br>
+
+<br>
+
+
+Line 6: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4<br>
+
+<span style="color:#e6edf7;">real1: </span></span></i>line 1, offset (mm) defining the rod (see figure)<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>line 2, external width of pocket (mm)<br>
+
+<i>real3:</i> line 3, width for rod between sewing lines (mm)<br>
+
+<i>real4:</i> line 4, internal  width of pocket (mm)<br>
+
+<br>
+
+Lines 7,8,9,10 repeat same definitions for the group 2, and so on until final group.<br>
+
+<br>
+
+Note that it is possible to define as many groups as profiles have the wing, and thus define a different rod for each profile. But normally with a group or two it is sufficient for the whole wing.<br>
+
+
+
+<br>
+
+<code><br>
+
+</code>
+Example 2: Scheme "1". Using two groups. Group 1 from rib 1 to 15, and group 2 from rib 16 to 19<br>
+
+
+<code>*******************************************************<br>
+
+*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 21. JONCS DEFINITION (NYLON RODS)<br>
+
+*******************************************************<br>
+
+1<br>
+
+2<br>
+
+1 1 15<br>
+
+5.5&nbsp; 10.&nbsp;&nbsp;&nbsp; 1.5&nbsp;&nbsp; 2.0<br>
+
+5.&nbsp;&nbsp; 11.&nbsp;&nbsp;&nbsp; 2.2&nbsp;&nbsp; 2.0<br>
+
+0.0&nbsp; 9.35&nbsp; 6.3&nbsp; 9.35<br>
+
+2&nbsp;&nbsp; 16 19<br>
+
+5.&nbsp;&nbsp; 9.&nbsp;&nbsp;&nbsp; 2.5&nbsp; 2.0<br>
+
+5.&nbsp;&nbsp; 12&nbsp;&nbsp;&nbsp; 3.&nbsp;&nbsp; 2.0<br>
+
+0.0&nbsp; 9.35&nbsp; 6.3 9.35<br>
+
+<br>
+
+</code>
+<div align="center"><code><u><img src="qrc:/manual/images/S21.jpg" width="700" height="972"></u></code><br>
+
+
+Figure 27a. Section 21 joncs type 1 used in scheme "1"<br>
+
+</div>
+
+
+<br>
+
+<br>
+
+The <b>scheme "2"</b>:<br>
+
+<br>
+
+Starting from version 3.12 of the program, the definition can be
+extended... :-) Now it is possible to define a more general model,
+called "scheme 2". In the scheme 2, we can add rods type "1" and many
+(not limited)&nbsp; rods type "2 " within the profile. Type 2 are
+arc-shaped or straight-line rods. If deemed necessary, other types may
+be added later. <br>
+
+<br>
+
+The structure is as follows:<br>
+
+<br>
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+integer: 2 means use scheme "2"<br>
+
+
+
+<br>
+
+Line 2: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+integer: number of data blocs to define<br>
+
+
+<br>
+
+Line 3: <i><span style="color:#8080ff;">integer1 integer2</span></i><br>
+
+<i>integer1:</i> number of data bloc, starting with 1 and increasing by 1 the subsequent bloc<br>
+
+<i>integer2:</i> rod type can be 1, 2, or 3<br>
+
+<br>
+
+Line 4: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+integer: number of groups to define<br>
+
+<br>
+<b>
+If integer2 in line3 was 1</b>, then write consecutively the four lines
+that define the geometry of the rods type 1 (lines 3,4,5,6 from scheme
+1) and continue with more four lines for next group.<br>
+
+<br>
+<b>
+If integer2 in line3 was 2</b>, then write consecutively the tree lines that define the geometry of the rods type 2: <br>
+
+<br>
+
+
+<div align="center"><img src="qrc:/manual/images/S21-jtype2.jpeg" width="700" height="694"><br>
+
+
+Figure 27b. Rods type 2 (arch or straight line)<br>
+
+</div>
+
+
+
+<br>
+
+Line 5: <i><span style="color:#8080ff;">integer1&nbsp; integer2&nbsp; integer3<br>
+
+<span style="color:#e6edf7;">integer1: </span></span></i>1 (group number 1)<br>
+
+<i>integer2:</i> number of first rib in group 1<br>
+
+<i>integer3:</i> number of last rib in group 1 <br>
+
+
+
+<br>
+
+
+Line 6: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4 real5<br>
+
+<span style="color:#e6edf7;">real1: </span></span></i>x-coordinate of rod starting at point 1 (x1,y1) in % of airfoil chord<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>y-coordinate of rod starting at point 1 (x1,y1) in % of airfoil chord<br>
+
+
+<i>real3:</i> x-coordinate of rod ending at point 2 (x2,y2) in % of airfoil chord<br>
+
+<i>real4:</i> y-coordinate of rod ending at point 2 (x2,y2) in % of airfoil chord<br>
+
+<i>real5:</i> max deflection of the arc in % of airfoil chord. If 0.0 draws a straight line<br>
+
+<br>
+
+
+Line 7: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4<br>
+
+<span style="color:#e6edf7;">real1: </span></span></i>line 1, offset not used and put 0.0 value<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>line 2, external width of pocket (mm)<br>
+
+<i>real3:</i> line 3, width for rod between sewing lines (mm)<br>
+
+<i>real4:</i> line 4, internal  width of pocket (mm)<br>
+
+<br>
+
+Continue with next group...<br>
+
+<br>
+
+Continue with next bloc of data...<br>
+<br>
+<b>If
+integer2 in line3 was 3,</b> means use two rods per nose (upper and lower)
+for use in "shark nose" airfoils. Then write consecutively the
+following lines:<br>
+
+<br>
+
+Line 4: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+
+integer: number of groups to define<br>
+
+<br>
+
+Line 5: <i><span style="color:#8080ff;">integer1&nbsp; integer2&nbsp; integer3<br>
+
+<span style="color:#e6edf7;">integer1: </span></span></i>1 (group number 1)<br>
+
+<i>integer2:</i> number of first rib in group 1<br>
+
+<i>integer3:</i> number of last rib in group 1 <br>
+
+<br>
+
+
+Line 6: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4&nbsp; <span style="color:#e6edf7;">(same as rod type 1)</span><br>
+
+<span style="color:#e6edf7;">real1: </span></span></i>extrados init point deflection in % of chord<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>extrados final point deflection in % of chord<br>
+
+<i>real3:</i> value of max deflection in intrados % of chord<br>
+
+<i>real4:</i> value n of exponent in curve of deflection type y=k·x^n (normaly use n=2.0, parabolic)<br>
+
+<br>
+
+
+Line 7: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4&nbsp; <span style="color:#e6edf7;">(same as rod type 1)</span><br>
+
+<span style="color:#e6edf7;">real1: </span></span></i>bottom part of upper rod init point deflection in % of chord<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>parabolic deflection length in % of chord<br>
+
+<i>real3:</i> value of max deflection in % of chord<br>
+
+<i>real4:</i> value n of exponent in curve of deflection type y=k·x^n (normaly use n=2.0, parabolic)<br>
+
+<br>
+
+
+Line 8: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4&nbsp; <span style="color:#e6edf7;">(same as rod type 1)</span><br>
+
+<span style="color:#e6edf7;">real1: </span></span></i>upper part of lower rod init point deflection in % of chord<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>parabolic deflection length in % of chord<br>
+
+<i>real3:</i> value of max deflection in % of chord<br>
+
+<i>real4:</i> value n of exponent in curve of deflection type y=k·x^n (normaly use n=2.0, parabolic)<br>
+
+
+<br>
+
+
+
+
+Line 9: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4 </span></i><i>(same as rod type 1)</i><br>
+
+<i><span style="color:#8080ff;">
+<span style="color:#e6edf7;">real1: </span></span></i>intrados init point deflection in % of chord<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>intrados final point deflection in % of chord<br>
+
+<i>real3:</i> value of max deflection in intrados % of chord<br>
+
+<i>real4:</i> value n of exponent in curve of deflection type y=k·x^n (normaly use n=2.0, parabolic)<br>
+
+<br>
+
+
+Line 10: <i><span style="color:#8080ff;">real1&nbsp; real2&nbsp; real3&nbsp; real4 </span></i><i>(same as rod type 1)</i><br>
+
+<i><span style="color:#8080ff;">
+<span style="color:#e6edf7;">real1: </span></span></i>line 1, offset (mm) defining the rod (see figure)<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i>line 2, external width of pocket (mm)<br>
+
+<i>real3:</i> line 3, width for rod between sewing lines (mm)<br>
+
+<i>real4:</i> line 4, internal  width of pocket (mm)<br>
+
+<br>
+
+(continue same structure with next group if defined...)<br>
+
+<br>
+
+
+View parameters interpretation:<br>
+
+
+<br>
+
+
+xeini extrados deflection initial point %<br>
+
+
+xefin extradon deflection final point %<br>
+
+
+ye&nbsp;&nbsp;&nbsp; extrados deflection %<br>
+
+
+ne&nbsp;&nbsp;&nbsp; extrados exponent parabolic deflection<br>
+
+
+<br>
+
+xsne&nbsp; extrados rod (lower part) init of deflection %<br>
+
+ae&nbsp;&nbsp;&nbsp; deflection length %<br>
+
+be&nbsp;&nbsp;&nbsp; deflection %<br>
+
+nsne&nbsp; parabolic exponent<br>
+
+<br>
+
+xsni&nbsp; intrados rod(upper part) init of deflection %<br>
+
+
+ai &nbsp;&nbsp; deflection length %<br>
+
+
+bi &nbsp;&nbsp; deflection %<br>
+
+
+nsni&nbsp; parabolic exponent<br>
+
+<br>
+
+
+xiini intrados deflection initial point %<br>
+
+
+xifin intrados deflection final point %<br>
+
+
+yi &nbsp;&nbsp; intrados deflection length %<br>
+
+
+ni &nbsp;&nbsp; intrados exponent parabolic deflection<br>
+
+
+<br>
+
+s1&nbsp;&nbsp;&nbsp; 
+offset (mm) defining the rod (see figure rod type "1")<br>
+
+
+s2&nbsp;&nbsp;&nbsp; external width of pocket (mm)<br>
+
+s3&nbsp;&nbsp;&nbsp; width for rod between sewing lines (mm)<br>
+
+s4&nbsp;&nbsp;&nbsp; internal  width of pocket (mm)<br>
+
+<br>
+
+
+<div align="center"><img src="qrc:/manual/images/S21.t3.jpg" width="600" height="827"><br>
+
+Figure 27c. Rods type 3 definition (shark nose)<br>
+
+</div>
+
+
+<br>
+
+This definition may seem complicated (and it is!) but is understood better with examples and doing tests and seeing the results.<br>
+
+<br>
+
+Example
+3: Comented scheme "2". Using only one data bloc type 2 and two group.
+Group 1 from rib 1 to 15, and group 2 from rib 16 to 19<br>
+
+<code><span style="color:#8080ff;">*******************************************************<br>
+
+*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 21. JONCS DEFINITION (NYLON RODS)<br>
+
+*******************************************************<br>
+
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &lt; scheme 2<br>
+1&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; only one bloc<br>
+
+1
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; bloc 1 uses rods type 2<br>
+
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; bloc 1 uses two groups<br>
+
+1 1 15&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt; group 1 from rib 1 to 15<br>
+
+20. 2.&nbsp; 30. -2.0 3.0&nbsp; &lt; coordinates (x1,y1) (x2,y2) and deflection all in % of chord<br>
+
+0.0&nbsp; 9.35&nbsp; 6.3&nbsp; 9.35&nbsp; &lt; rod pocket sizes in mm<br>
+
+2 16 20 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt; group 2 from rib 16 to 20<br>
+
+40. 4.&nbsp; 30. -3.2 0.0&nbsp; &lt; coordinates (x1,y1) (x2,y2) and deflection all in % of chord<br>
+
+0.0&nbsp; 9.35&nbsp; 6.3&nbsp; 9.35&nbsp; &lt; rod pocket sizes in mm</span></code><br>
+
+<br>
+
+
+Example 4: Comented scheme "2". Using two data blocs and two groups in each bloc.<br>
+
+
+
+<code><span style="color:#8080ff;">*******************************************************<br>
+
+*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 21. JONCS DEFINITION (NYLON RODS)<br>
+
+*******************************************************<br>
+
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &lt; scheme 2<br>
+2
+&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; use two blocs<br>
+
+1 1
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; first bloc uses rods type 1<br>
+
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; first bloc uses two groups<br>
+
+
+1 1 15&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt; group 1 from rib 1 to 15</span></code><br>
+
+<code><span style="color:#8080ff;">
+5.5&nbsp; 10.&nbsp;&nbsp; 1.5&nbsp;&nbsp; 2.0<br>
+
+5.&nbsp;&nbsp; 11.&nbsp;&nbsp; 2.2&nbsp;&nbsp; 2.0<br>
+
+0.0&nbsp; 9.35&nbsp; 6.3&nbsp; 9.35<br>
+
+2&nbsp;&nbsp; 16 19&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt; group 2 from rib 16 to 20</span></code><br>
+
+<code><span style="color:#8080ff;">
+5.&nbsp;&nbsp; 9.&nbsp;&nbsp;&nbsp; 2.5&nbsp;&nbsp; 2.0<br>
+
+5.&nbsp;&nbsp; 12&nbsp;&nbsp;&nbsp; 3.&nbsp;&nbsp;&nbsp; 2.0<br>
+
+0.0&nbsp; 9.35&nbsp; 6.3&nbsp; 9.35</span></code><br>
+
+<code><span style="color:#8080ff;">2
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; second bloc uses rods type 2<br>
+
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; second bloc uses two groups<br>
+
+1 1 15&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt; group 1 from rib 1 to 15<br>
+
+20. 2.&nbsp; 30. -2.0 3.0&nbsp; &lt; coordinates (x1,y1) (x2,y2) and deflection all in % of chord<br>
+
+0.0&nbsp; 9.35&nbsp; 6.3&nbsp; 9.35&nbsp; &lt; rod pocket sizes in mm<br>
+
+</span></code><code><span style="color:#8080ff;">2 16 20 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt; group 2 from rib 16 to 20</span><br>
+<span style="color:#8080ff;">
+40. 4.&nbsp; 30. -3.2 0.0&nbsp; &lt; coordinates (x1,y1) (x2,y2) and deflection all in % of chord</span><br>
+<span style="color:#8080ff;">
+0.0&nbsp; 9.35&nbsp; 6.3&nbsp; 9.35&nbsp; &lt; rod pocket sizes in mm</span><br>
+
+<br>
+
+Example 5: Scheme "2" using one data bloc, fisrt data bloc type 3 "shark nose", one group from rib 1 to 30
+<br>
+
+<span style="color:#8080ff;">*******************************************************</span><br>
+
+<span style="color:#8080ff;">*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 21. JONCS DEFINITION (NYLON RODS)</span><br>
+
+<span style="color:#8080ff;">*******************************************************</span><br>
+
+<span style="color:#8080ff;">2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; scheme 2</span><br>
+
+<span style="color:#8080ff;">1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; one bloc</span><br>
+
+<span style="color:#8080ff;">1
+3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; first bloc type 3 "shark nose"</span><br>
+
+<span style="color:#8080ff;">1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt; one group</span><br>
+
+<span style="color:#8080ff;">1 1 30&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt; </span></code><code><span style="color:#8080ff;">first group group from rib 1 to 30</span></code><br>
+
+<code><span style="color:#8080ff;">4.2&nbsp;&nbsp;
+10.8&nbsp;&nbsp;&nbsp; 1.0&nbsp;&nbsp; 2.0&nbsp; &lt; coordinates
+(x1,y1) (x2,y2) and deflection all in % of chord</span></code><br>
+
+<code><span style="color:#8080ff;">3.5&nbsp;&nbsp;
+5.0&nbsp;&nbsp;&nbsp;&nbsp; 1.0&nbsp;&nbsp; 0.7&nbsp; &lt; upper rod
+initial point % of parabolic modification, length, deflection, exponent<br>
+
+4.5&nbsp;&nbsp; 5.0&nbsp;&nbsp;&nbsp;&nbsp; 2.2&nbsp;&nbsp; 1.0&nbsp;
+&lt; upper rod initial point % of parabolic modification, length,
+deflection, exponent</span></code><br>
+
+<code><span style="color:#8080ff;">3.67&nbsp; 12.1&nbsp;&nbsp;&nbsp; 0.79&nbsp; 2.0&nbsp; &lt; coordinates (x1,y1) (x2,y2) and deflection all in % of chord</span></code><br>
+
+<code><span style="color:#8080ff;">0.0&nbsp;&nbsp; 10.35&nbsp;&nbsp; 6.3&nbsp;&nbsp; 9.35 &lt; rod pocket sizes in mm</span></code><br>
+
+<code><br>
+
+<br>
+
+</code>Number of data blocs limited to 20, and number of groups to 100, then a lot of rods in each airfoil!<br>
+
+Test and see the results!<br>
+
+<br>
+
+
+<div align="center"><img src="qrc:/manual/images/S21-jtype2-example.png" width="700" height="238"><br>
+
+
+Figure 27c. Rods type 1 (nose reinforcement) and type 2 (arch or straight line)<br>
+
+</div>
+
+
+<br>
+
+
+<br>

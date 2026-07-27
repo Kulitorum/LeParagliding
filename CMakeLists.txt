@@ -344,6 +344,7 @@ qt_add_executable(LEparagliding WIN32
     src/gui/section_specs.h
     src/gui/spline_fit.cpp
     src/gui/spline_fit.h
+    resources/manual/manual.qrc
     ${XFLR5_RESOURCES}
 )
 set_target_properties(LEparagliding PROPERTIES AUTORCC ON AUTOMOC ON)

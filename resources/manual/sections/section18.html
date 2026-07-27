@@ -1,0 +1,112 @@
+<b>SECTION
+</b><b>18:
+ELASTIC LINES CORRECTION</b><br>
+
+<br>
+
+Option to estimate the elastic elongation of the lines in
+normal flight configuration.
+These elongations are subtracted from strictly
+geometric length, so that in flight, are the exact lengths of project. Option fully
+functional but still under
+development. To calculate the elongation, we take into
+account the loads on each
+line, and the rigidly coefficient of each line, the elongation estimated by Hook's law: F = k·dx<br>
+
+<br>
+
+This load distribution is also used when calculating line branches, optimized according to option number 3 (SECTION 9).<br>
+
+
+<br>
+
+
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">real</span></i> : load in
+flight (kg)<br>
+
+<br>
+
+<i><span style="color:#8080ff;">real, real</span></i> :
+% load distribution in 2 lines rib<br>
+
+<br>
+
+<i><span style="color:#8080ff;">real, real, real</span></i>
+: % load distribution in 3 lines rib<br>
+
+<br>
+
+<i><span style="color:#8080ff;">real, real, real,
+real</span></i> : % load distribution in 4 lines rib<br>
+
+<br>
+
+<i><span style="color:#8080ff;">real, real, </span></i><i><span style="color:#8080ff;">real, real, real</span></i> :&nbsp; % load
+distribution in 5 lines rib<br>
+
+<br>
+
+<i><span style="color:#8080ff;">integer, real,
+real, real, real</span></i> :&nbsp; p, d1, d2, d3 where<br>
+
+<br>
+
+<div style="margin-left:40px;">p = number of lines per rib (p 1 to 5)<br>
+
+d1 =
+deformation in lower level with 10 kg<br>
+
+d2 =
+deformation in medium level with 10 kg<br>
+
+d3 =
+deformation in higher level with 10 kg<br>
+
+<br>
+
+</div>
+
+</div>
+
+<br>
+
+Example:<br>
+
+<br>
+
+<code>*****************************************************</code><br>
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 18. Elastic lines corrections</code><br>
+
+<code>*****************************************************</code><br>
+
+<code>100</code><br>
+
+<code>75&nbsp;&nbsp;&nbsp;
+25&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt;&lt;&lt; A=75% B=25%</code><br>
+
+<code>40&nbsp;&nbsp;&nbsp;
+40&nbsp;&nbsp;&nbsp;
+20&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+</code>&lt;&lt;&lt; A=40% B=40% C=20%<br>
+
+<code>35&nbsp;&nbsp;&nbsp; 35&nbsp;&nbsp;&nbsp; 20&nbsp;&nbsp;&nbsp; 10&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code>&lt;&lt;&lt; A=35% B=35% C=20% D=10%<br>
+
+<code>35&nbsp;&nbsp;&nbsp; 35&nbsp;&nbsp;&nbsp; 15&nbsp;&nbsp;&nbsp; 10&nbsp;&nbsp;&nbsp; 5&nbsp;&nbsp;&nbsp;&nbsp; </code>&lt;&lt;&lt; A=35% B=35% C=15% D=10% E=5%<br>
+
+<code>1&nbsp;&nbsp;&nbsp; 0.08&nbsp;&nbsp;&nbsp; 0.2&nbsp;&nbsp;&nbsp; 0.2&nbsp;&nbsp;&nbsp; </code><br>
+
+<code>2&nbsp;&nbsp;&nbsp; 0.08&nbsp;&nbsp;&nbsp; 0.2&nbsp;&nbsp;&nbsp; 0.2</code><br>
+
+<code>3&nbsp;&nbsp;&nbsp; 0.08&nbsp;&nbsp;&nbsp; 0.2&nbsp;&nbsp;&nbsp; 0.2</code><br>
+
+<code>4&nbsp;&nbsp;&nbsp; 0.08&nbsp;&nbsp;&nbsp; 0.2&nbsp;&nbsp;&nbsp; 0.2</code><br>
+
+<code>5&nbsp;&nbsp;&nbsp; 0.08&nbsp;&nbsp;&nbsp; 0.2&nbsp;&nbsp;&nbsp; 0.2</code><br>
+<br>
+If
+you are using version until 2.60 of leparagliding, you do not need to
+continue typing, as it will not be considered. If you are using version
+2.70 or higher, continue typing more settings.<br>
+<br>

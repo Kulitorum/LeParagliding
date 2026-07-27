@@ -1,0 +1,249 @@
+SECTION 35: SOLVE EQUILIBRIUM EQUATIONS<br>
+
+<br>
+
+
+
+
+	
+	
+	
+	<span style="color:#80ff80;"><span style="color:#e6edf7;">Read <a href="https://www.laboratoridenvol.com/leparagliding/archives3/20220920%20LEP-3.20V.pdf">full report here</a> about improvements added since version 3.20V (pdf)</span></span><br>
+
+<br>
+
+Type
+a single parameter "0" to bypass this complicated section!
+:)
+
+
+
+<div><span style="color:#8080ff;"><code>*******************************************************<br>
+
+*
+      35. SOLVE EQUILIBRIUM EQUATIONS<br>
+
+*******************************************************<br>
+
+0</code></span></div>
+
+
+
+
+
+<div>Section 35 sets the initial basic parameters used to solve the
+longitudinal equilibrium of the paraglider. This section is
+informative and is used by the designer, to study the values of the
+forces involved in the balance of the wing, the flight speed, the
+angles, and the glide coefficient.</div>
+
+<div>
+To find realistic values, it is necessary to do the study
+simultaneously with the XFLR5 program or CFD programs, and perform
+several iterations until satisfactory values are obtained. Currently,
+it is not yet possible to fully automate this calculation. The
+designer must apply his criteria according to the type of wing under
+study. 
+</div>
+
+<div>
+We have discussed this section extensively with
+Francois de Villiers during the last few weeks, using different
+approaches to the final solution.</div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div><span style="color:#8080ff;">*******************************************************<br>
+
+*
+      35. SOLVE EQUILIBRIUM EQUATIONS<br>
+
+*******************************************************<br>
+
+1<br>
+
+g
+       9.807  m/s2 gravity of Eart<br>
+
+ro
+      1.225  kg/m3 air mass density<br>
+
+mu
+      18.46  muPa·s air dynamic viscosity (microPascals)<br>
+
+V
+       12.7   m/s  estimated flow speed<br>
+
+Alpha
+   9.45    deg  estimated wing angle of attact at trim speed<br>
+
+Cl
+      0.55619     wing lift coefficient<br>
+
+cle
+     1.0         lift correction coefficient<br>
+
+Cd	
+  0.03560     wing drag coefficient<br>
+
+cde
+     1.35        drag correction coefficient<br>
+
+Cm
+      0.0         wing moment coefficient<br>
+
+Spilot
+  0.438  m2   pilot+harness frontal surface<br>
+
+Cdpilot
+ 0.6         pilot+harness drag coefficient<br>
+
+Mw
+      5.0    kg   wing mass<br>
+
+Mp
+      65.9   kg   pilot mass included harness and instruments<br>
+
+Pmc
+     0.2    m    pilot mass center below main karabiners<br>
+
+Mql
+     8.0    g    one quick link mass (riser-lines)<br>
+
+Ycp
+     0.489  m   y-coordinate center of pressure<br>
+
+Zcp
+     0.299  m   z-coordinate center of pressure</span></div>
+
+
+<div>Explanations:</div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+	
+	
+	
+
+
+
+
+
+
+
+<div>
+g → gravity of Earth (9.80665 m/s2 standard gravity)<br>
+
+ro → air mas density kg/m3<br>
+
+mu → air dynamic viscosity microPascals·s<br>
+
+V → estimated initial flow speed m/s, used for first Cl, Cd, Cm
+values<br>
+
+Alpha → estimated ideal angle of attack deg. Max glide ratio
+according wing aerodynamic analysis<br>
+
+Cl → Wing lift coefficient, obtained by analysis with individual
+profiles, XFLR5, or CFD<br>
+
+Cle → multiplier coefficient of Cl, to consider non-modeled
+geometries, use 1.0 in case of doubt<br>
+
+Cd → Wing drag coefficient, obtained by analysis with individual
+profiles, XFLR5, or CFD<br>
+
+Cde → multiplier coefficient of Cd, to consider non-modeled
+geometries, use 1.15 in case of doubt. If the Cd data comes from CFD
+this coefficient can be very close to 1.0. Currently studying how
+this coefficient affects the results. Probably by adjusting through
+Cde the expected GR, the rest of the parameters will be very
+close to reality.<br>
+
+Cm → Wing moment coefficient, obtained by analysis with individual
+profiles XFLR5, or CFD<br>
+
+Spilot → Pilot + harness frontal surface (m2)<br>
+
+Cdpilot
+→ Pilot+harness drag coefficient (depends on the type of harness,
+especially if have fairings)<br>
+
+Mw →
+Wing mass (kg) without lines and risers<br>
+
+Mp →
+Pilot+harness+instruments mass (kg)<br>
+
+Pmc
+→ Pilot+harness mass center distance from main carabiners (m)<br>
+
+Mql
+→ Mass of one quicklink used to connect riser with lines (kg)<br>
+
+Ycp
+→ Y-coordinate of center of pressure (m), obtained by analysis with
+individual profiles, XFLR5, or CFD<br>
+
+Zcp
+→ Z-coordinate of center of pressure (m), obtained by analysis with
+individual profiles, XFLR5, or CFD<br>
+
+</div>
+
+<div>Remember
+that the axes used in LEparagliding are:</div>
+
+
+
+
+
+<div>
+Origin (0,0,0)= at the nose of the central profile section.<br>
+
+X-axis horizontal and in the span direction<br>
+
+Y-axis along the central chord<br>
+
+Z-axis perpendicular to the XY plane and pointing down (not coincides
+with gravity axis)</div>
+
+<b><br>
+
+</b>

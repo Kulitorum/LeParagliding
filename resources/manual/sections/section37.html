@@ -1,0 +1,364 @@
+SECTION 37: SOME SPECIAL PARAMETERS<br>
+
+
+<br>
+
+
+
+
+
+
+	
+	
+	
+	
+
+This section will be a "wildcard", to add special
+parameters to control things from previous or future data sections…
+It is an unorthodox and somewhat “dangerous” section, because any
+parameter or modification of previous or future ones could be added
+here. (!).
+<br>
+
+
+It will consist of an initial control parameter "0" to end
+and define nothing! :)
+<br>
+
+
+Or the parameter "1" to activate the section, and below the
+parameter N which means add N lines with special parameters.
+<br>
+
+
+Each line will start with a control code, an integer that will have a
+meaning to be specified. And then, on the same line, one or more
+parameters (integers, reals, or characters) related to the subject of
+the control code.
+<br>
+
+
+It may seem a little abstract..., but you will see that it will be
+very practical...
+<br>
+
+
+For example, it can be used to activate transitions in the thickness
+of miniribs (HEGALA style...), or add nylons in the middle of the
+inlets...<br>
+
+&nbsp;<br>
+
+The codes available in LEP-3.23 are:
+
+
+
+	
+	
+	
+	
+
+<br>
+
+
+- <b>Code 1146</b>, which means that it is necessary add a real
+estimated mass center % of a typical section (0% leading edge, 100%
+trailing edge). Used only to calculate the estimated wing center of
+mass. Default value is 36%. 
+
+<br>
+
+
+- <b>Code 1291</b>, which means that it is necessary to write on the
+right an integer number which is the number of transversal segments
+to use on the STL surfaces (related to section 29)
+<br>
+
+
+- <b>Code 1341</b>, if code is followed by a "1", then the
+lines will be drawn according to the colors by type defined in
+section 34. If it is a "0" the colors will be drawn
+according to the risers, in accordance with sections 24 and 25 . If
+code 1341 does not exist, the colors are defined by sections 24 and
+25.
+<br>
+
+
+And some “<span style="color:#f28d90;"><i>Programmer secret parameters</i></span>”
+(maybe, they will be removed soon):
+<br>
+
+
+- <b>Code 1351</b>, set the solve method of equilibrium equations.
+Six different methods are currently being calibrated. Use only parameter (method 1 or 6). Method 1 used by default 
+
+
+
+
+	
+	
+	
+	
+
+<br>
+
+- <b>Code 1352</b>, set 1 to use flat area, or 2 to use projected
+area, in Lift, Drag, and speed calculus. Due to the internal
+adjustments made, this aspect has almost no influence on the results.
+By default the value used is 2. Use value 2 when using method 4 in
+code 1352. It is a code that the regular user does not need to
+specify
+<br>
+
+
+- <b>Code 1353</b>, set 0 to output the standard report in section 17
+of lep-out.txt, or set to 1 or 2 for more detailed output used for
+studies and calibrating methods. Default is 0. Most verbose mode is
+2.<br>
+
+- <b>Code 2000</b>. 
+
+
+	The optional parameter "2000" which means,
+then add a date in text format, for example 2026-01-28 or "December
+28, 2026", which serves to remember the date the project was
+last saved. If the optional code
+2000 is present, the date is printed in the leparagliding.txt and
+lep-out.txt files:
+
+<div>Example:<span style="color:#8784fb;"><code><br>
+
+</code></span></div>
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+</div>
+
+
+
+
+
+
+
+<div style="margin-left:40px;"><code>*
+      37. SOME SPECIAL PARAMETERS</code><br>
+
+<code>*******************************************************</code><br>
+
+<code>1</code><br>
+
+<code>1</code><br>
+
+<code>2000
+   2026-01-28</code></div>
+
+
+
+<div><br>
+
+- <b>Code 2003</b>, force the assiette angle and use it for calculus os "phi" and "chi" in lep-out.txt section 12.<br>
+
+</div>
+- <b>Code 3001</b>,
+It serves to add a thickness transition to the miniribs, that is, to
+progressively and smoothly adapt the thickness of the minirib to that
+of the ovalized profile (non-existent) in the central area of ​​each
+panel.<br>
+
+<br>
+
+
+<div style="margin-left:40px;">Code 3001 parameters format <br>
+
+<br>
+
+<span style="color:#8080ff;">integer1 integer2 real1 real</span>2<br>
+
+<br>
+
+<i><span style="color:#8080ff;">integer1</span></i>: 3001 (special code)<br>
+
+<i><span style="color:#8080ff;">integer2</span></i>: can take the values ​​0,1,2, or 3;
+0 means not to make any transition, the result is the same as not
+activating code 3001; 1 means to make a linear transition in a distance
+"S" with a maximum thickness variation "t" up to zero, according to the
+attached drawing; 2 means to make a double parabolic transition
+according to the attached figure (case not yet available); 3 means to
+make a smooth transition with a cosine type function according to the
+attached drawing, I recommend always using this case.<br>
+
+<i><span style="color:#8080ff;">real1</span></i>: It indicates the length of the
+transition in % of the length of the profile chord. It is the parameter
+"s" in the figure below.<br>
+
+<i><span style="color:#8080ff;">real2</span></i>: It indicates the amplification
+coefficient on the thickness "t" calculated automatically by the
+program. "t" is the difference in thickness between the ovalized
+profile and the minirib profile. Normally we will use the value 1.0. If
+we use 0.0 it is equivalent to not making any type of transition.<br>
+
+</div>
+
+
+
+
+	
+	
+	
+	
+<div style="margin-left:40px;">
+Example:</div>
+
+<div style="margin-left:80px;"><br>
+
+</div>
+
+
+
+
+
+
+
+
+<div style="margin-left:40px;"><span style="color:#8784fb;">*******************************************************</span><br>
+
+<span style="color:#8784fb;">
+*
+      37. SOME SPECIAL PARAMETERS</span><br>
+
+<span style="color:#8784fb;">
+*******************************************************</span><br>
+
+<span style="color:#8784fb;">
+1</span><br>
+
+<span style="color:#8784fb;">
+1</span><br>
+
+<span style="color:#8784fb;">
+3001
+   3 	6.0	1.0</span>
+<br>
+
+</div>
+
+<br>
+
+<div style="margin-left:40px;"><span style="color:#8784fb;">Interpretation figure:</span></div>
+
+
+<div align="center" style="margin-left:40px;"><span style="color:#8784fb;"><img src="qrc:/manual/images/S37_Minirib_transitions.jpg" width="600" height="825"></span></div>
+
+<div align="center"><span style="color:#8784fb;"><span style="color:#e6edf7;">Figure 38. Minirib transitions</span></span><br>
+
+</div>
+
+
+<br>
+
+
+
+
+
+<br>
+
+
+
+
+	
+	
+	
+	Examples section 37:
+
+
+
+
+
+
+
+
+
+
+
+<div style="margin-left:40px;">
+<code>*******************************************************<br>
+
+
+*
+      37. SOME SPECIAL PARAMETERS<br>
+
+
+*******************************************************<br>
+
+
+1<br>
+
+
+7<br>
+
+
+1291	
+ 12   nsegments in transverse direction (stl surfaces)<br>
+
+
+1341
+   1    use CAD colors for each line type according table 34<br>
+
+
+1146	
+36.   gravity center in % of a typical section (default is 36%)<br>
+
+
+1351	
+ 1    Solve method (1 or 6), default is 1<br>
+
+
+1352	
+ 2    Use flat area (1) or projected area (2), default is 2<br>
+
+
+1353
+   2    Print normal (0) or advanced detailed output (1),(2)</code></div>
+
+<div style="margin-left:40px;"><code><span style="color:#8080ff;">2003 -1.1</span></code><br>
+
+
+3001
+   3 	6.0	1.0 use minirib transitions<br>
+
+</div>
+
+
+<code><span style="color:#8080ff;"><br>
+
+</span>
+<br>
+
+</code>
+Type a single parameter "0" to bypass this section! :)<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+<code>
+
+*
+      37. SOME SPECIAL PARAMETERS</code><br>
+
+<code>
+
+*******************************************************</code><br>
+
+<code>
+
+0</code><br>
+
+</div>
+
+
+
+<br>
+
+<br>

@@ -1,0 +1,215 @@
+SECTION 28 PARAMETERS FOR CALAGE VARIATION<br>
+
+<br>
+
+Study
+the variations in the riser lengths and calage when applying speed
+system or trim system. It is interesting to experiment with new calages
+in prototypes or to define the speed or trim systems.<br>
+
+
+<div align="center"><img src="qrc:/manual/images/S28a.jpg" width="700" height="703"><br>
+
+
+Figure 33. Principles of the study of the calage variations.<br>
+
+</div>
+
+
+<br>
+
+We
+ study the variations in the riser lengths when applying 
+accelerator (speed system) pivoting in the last riser (most common case), which remains 
+with constant length. For 
+practical purposes we define a negative alpha&nbsp; angle of pitch increased in N1 
+spaces gradually, and then we compute&nbsp; the variations in the line&nbsp; lengths and calage. We do the same study, assuming a trim system that increases the picth angle in N2 spaces gradually. In this case, the most usual is to consider the constant length A riser and the other variables in length. <br>
+
+<br>
+
+The program analyzes a total of 4 cases, depending on the pivot point and if it is reduction or increase in angle:<br>
+
+
+<div align="center"><img src="qrc:/manual/images/S28b.jpg" width="700" height="643"><br>
+
+
+Figure 34. Cases a,b,c,d reported in file <b>lep-out.txt </b><br>
+
+</div>
+
+
+<br>
+
+In output file SECTION 7: <b>lep-out.txt</b> we see the tables
+that relate in detail the variations of angle, with the calage
+variations, and increments or decrements of length in each riser. It is
+interesting to experiment with new calages in prototypes or to define
+the speed or trim systems. Four cases:<br>
+
+a) Speed system pivot in last riser<br>
+
+b) Speed system pivot in first riser<br>
+
+c) Trimer system pivot in first riser<br>
+
+d) Trimer system pivot in last riser<br>
+
+<br>
+
+&nbsp;Example lep-out.txt:<br>
+
+<code>a) Speed system pivot in last riser:</code><br>
+
+<code>&nbsp;-------------------------------------------</code><br>
+
+<code>&nbsp;i&nbsp;&nbsp;
+alpha&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+A&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+B&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; C&nbsp; Calage</code><br>
+
+<code>&nbsp;1&nbsp;&nbsp;&nbsp;&nbsp;
+.00&nbsp;&nbsp;&nbsp;&nbsp; .00&nbsp;&nbsp;&nbsp;&nbsp;
+.00&nbsp;&nbsp;&nbsp;&nbsp; .00&nbsp;&nbsp; 25.00</code><br>
+
+<code>&nbsp;2&nbsp;&nbsp; -1.00&nbsp;&nbsp; -2.18&nbsp;&nbsp; -1.29&nbsp;&nbsp;&nbsp;&nbsp; .00&nbsp;&nbsp; 21.19</code><br>
+
+<code>&nbsp;3&nbsp;&nbsp; -2.00&nbsp;&nbsp; -4.35&nbsp;&nbsp; -2.59&nbsp;&nbsp;&nbsp;&nbsp; .00&nbsp;&nbsp; 17.40</code><br>
+
+<code>&nbsp;4&nbsp;&nbsp; -3.00&nbsp;&nbsp; -6.52&nbsp;&nbsp; -3.88&nbsp;&nbsp;&nbsp;&nbsp; .00&nbsp;&nbsp; 13.66</code><br>
+
+Column 2 &gt; angle alpha in degrees<br>
+
+Column 3 &gt; Decrease of length A riser (amount of accelerator) in cm<br>
+
+Column 4 &gt; Decrease of length B riser in cm<br>
+
+Column 5 &gt; Decrease of length C riser in cm = 0 (pivot in C riser)<br>
+
+Column 6 &gt; New calage %<br>
+
+<br>
+
+
+Write data in in SECTION 28 with one or four lines:<br>
+
+<br>
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+
+
+if integer = 0 do nothing<br>
+
+
+
+
+
+
+
+if integer = 1 do calage study "type 1"<br>
+
+<br>
+
+Only if first integer is 1 then add:<br>
+
+<br>
+
+
+Line 2: <i><span style="color:#8080ff;">integer<br>
+
+</span></i><i><span style="color:#8080ff;"><span style="color:#e6edf7;">integer: </span></span></i><i>number of risers to be considered (2,3,4,5 or 6)</i><br>
+
+<i><span style="color:#8080ff;"><br>
+
+</span></i>
+Line 3: <i><span style="color:#8080ff;">real1 real2 real3 real4 real5 real6<br>
+
+<span style="color:#e6edf7;">real1: </span></span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">% of central chord for riser A (</span></span>is not necessary to match anchor position)<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">...<br>
+
+</span></span></i><i><span style="color:#8080ff;"><span style="color:#e6edf7;">real6: </span></span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">% of central chord for riser E (</span></span>is not necessary to match anchor position)<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;"><br>
+
+</span></span></i>
+Line 4: <i><span style="color:#8080ff;">real1 integer1 real2 integer2<br>
+
+<span style="color:#e6edf7;">real1: </span></span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">max angle (negative) in degrees set by the speed system</span></span><br>
+
+
+<i>integer1:</i> number of steps in angle for study purpose<br>
+
+<i><span style="color:#8080ff;"><span style="color:#e6edf7;">real2: </span></span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">max angle (positive) in degrees set by the trim system</span></span><br>
+
+
+
+<i>integer2:</i> number of steps in angle for study purpose<br>
+
+<br>
+
+Example:<br>
+
+
+<div style="margin-left:40px;"><code><span style="color:#ff8080;"><code><span style="color:#8080ff;">*******************************************************</span></code></span></code><br>
+
+<code><span style="color:#ff8080;">
+<code><span style="color:#8080ff;">*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 28. PARAMETERS FOR CALAGE VARIATION</span></code></span></code><br>
+
+<code><span style="color:#ff8080;">
+<code><span style="color:#8080ff;">*******************************************************</span></code></span></code><br>
+
+<code><span style="color:#ff8080;">
+<code><span style="color:#8080ff;">1</span></code></span></code><br>
+
+<code><span style="color:#ff8080;">
+<code><span style="color:#8080ff;">3</span></code></span></code><br>
+
+<code><span style="color:#ff8080;">
+<code><span style="color:#8080ff;">10. 30.35&nbsp; 60&nbsp; 0&nbsp; 0&nbsp; 0</span></code></span></code><br>
+
+<code><span style="color:#ff8080;">
+<code><span style="color:#8080ff;">-4 4 5 10</span></code></span></code><br>
+
+</div>
+
+
+
+<div style="margin-left:40px;"><code><span style="color:#ff8080;"><code>*******************************************************</code></span></code><br>
+
+</div>
+
+<code><span style="color:#ff8080;">
+<br>
+
+<span style="color:#e6edf7;">Explanation:</span><br>
+
+<span style="color:#e6edf7;">Set to calage type "1" (first line), only type "1" available</span><br>
+
+<span style="color:#e6edf7;">"3" risers to be considered</span><br>
+
+<span style="color:#e6edf7;">A=10.%&nbsp; B=30.35%&nbsp; C=60%&nbsp; D=&nbsp; E=&nbsp; F=&nbsp;&nbsp; (set % to be considered)</span><br>
+
+<span style="color:#e6edf7;">Speed angle set to -4º and compute in 4 steps</span><br>
+
+<span style="color:#e6edf7;">Trim angle set to 5º and compute in 10 steps<br>
+
+<br>
+
+</span></span></code>
+<div align="center"><code><span style="color:#ff8080;"><span style="color:#e6edf7;"><img src="qrc:/manual/images/S28c.png" width="557" height="490"></span></span></code><br>
+
+<code><span style="color:#ff8080;"><span style="color:#e6edf7;">Figure 35. New graphic in plan 2-1 (.dxf output)</span></span></code><br>
+
+</div>
+
+<code><span style="color:#ff8080;">
+<br>
+
+<br>
+
+</span></code>

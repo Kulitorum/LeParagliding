@@ -1,0 +1,307 @@
+SECTION 20: MARKS TYPES<br>
+
+
+
+<br>
+
+
+
+<div>
+<div>This section allows the user to choose different types of marking elements in DXF files (one-dimensional points, minicircles, triangles, segments, ...). This is especially useful for laser cutting plotters, and the ability to adapt marking to manufacturer preferences. Remember that 
+leparagliding generates two types of plans, some for use with 
+conventional printer ("print" version), and others for professional use with computerized 
+cutting plotters ("laser" version).<br>
+
+</div>
+
+
+<br>
+
+By lines, and regardless of the lines beginning with *
+which are comments
+or notes for help:<br>
+
+
+
+
+<br>
+
+
+Line 1:<i><span style="color:#8080ff;"> integer<br>
+
+<span style="color:#e6edf7;">integer</span></span></i> : &nbsp; max number of different marks, now is 10<br>
+
+
+<br>
+
+
+Line 2:<i><span style="color:#8080ff;"> text integer real real integer real real &nbsp; </span></i><span style="color:#8080ff;"><span style="color:#ff8080;">(OK)</span></span><i><br>
+
+text:&nbsp; </i>typepoint&nbsp; is the point for general use<i><br>
+
+integer: </i>1=constructed point, 2=minicircle - print<br>
+
+real: radius of minicircle in mm - print<br>
+
+real: offset in mm - print<br>
+
+<i>
+integer: </i>1=unidimensional, 2=minicircle - laser<br>
+
+real: radius of minicircle in mm - laser<br>
+
+real: offset in mm - laser<br>
+
+<br>
+
+Line 3:<i><span style="color:#8080ff;"> text integer real real integer real real&nbsp;&nbsp; </span></i><span style="color:#ff8080;">(still not used, set defaults)</span><i><br>
+
+text:&nbsp; </i>typepoint2<i><br>
+
+integer: </i>1=unidimensional, 2=minicircle - print<br>
+
+real: radius of minicircle in mm - print<br>
+
+real: offset in mm - print<br>
+
+<i>
+integer: </i>1=unidimensional, 2=minicircle - laser<br>
+
+real: radius of minicircle in mm - laser<br>
+
+real: offset in mm - laser<br>
+
+<br>
+
+Line 4:<i><span style="color:#8080ff;"> text integer real real integer real real </span></i><span style="color:#ff8080;">&nbsp; (still not used, set defaults)</span><i><br>
+
+text:&nbsp; </i>typepoint3 <i><br>
+
+integer: </i>1=unidimensional, 2=minicircle - print<br>
+
+real: radius of minicircle in mm - print<br>
+
+real: offset in mm - print<br>
+
+<i>
+integer: </i>1=unidimensional, 2=minicircle - laser<br>
+
+real: radius of minicircle in mm - laser<br>
+
+real: offset in mm - laser<br>
+
+<br>
+
+Line 5:<i><span style="color:#8080ff;"> text integer real real integer real real&nbsp; </span></i><span style="color:#8080ff;"><span style="color:#ff8080;">(OK)</span></span><i><br>
+
+text:&nbsp; </i>typevent<i><br>
+
+integer: </i>1=two green points, 2=segment, 3=double segment - print<br>
+
+real: points separation or segment in mm - print<br>
+
+real: offset in mm - print<br>
+
+<i>
+integer:&nbsp;</i>1=two green points, 2=segment, 3=double segment  - laser<br>
+
+real: points separation or segment in mm - laser<br>
+
+real: offset in mm - laser<br>
+
+<br>
+
+Line 6:<i><span style="color:#8080ff;"> text integer real real integer real real&nbsp; </span></i><span style="color:#8080ff;"><span style="color:#ff8080;">(OK)</span></span><i><br>
+
+text:&nbsp; </i>typetab<i><br>
+
+integer: </i>1=tree orange points, 2=tree orange full control, 3=triangle - print<br>
+
+real: points separation or segment in mm - print<br>
+
+real: offset in mm - print<br>
+
+<i>
+integer: </i>1=tree orange points, 2=tree orange full control, 3=triangle - laser<br>
+
+real: points separation or triangle height in mm - laser<br>
+
+real: offset in mm - laser<br>
+
+<br>
+
+Line 7:<i><span style="color:#8080ff;"> text integer real real integer real real </span></i><span style="color:#ff8080;">(still not used, set defaults)</span><i><br>
+
+text:&nbsp; </i>typejonc<i><br>
+
+integer: </i>1=single point, 2=segment, 3=double segment - print<br>
+
+real: points separation or segment in mm - print<br>
+
+real: offset in mm - print<br>
+
+<i>
+integer:&nbsp;</i>1=single point, 2=segment, 3=double segment  - laser<br>
+
+real: points separation or segment in mm - laser<br>
+
+real: offset in mm - laser<br>
+
+<br>
+
+Line 8:<i><span style="color:#8080ff;"> text integer real real integer real real&nbsp; </span></i><span style="color:#ff8080;">(still not used, set defaults)</span><i><br>
+
+text:&nbsp; </i>typeref<i><br>
+
+integer: </i>1,2,3 - print<br>
+
+real: dimesion in mm - print<br>
+
+real: offset in mm - print<br>
+
+<i>
+integer:&nbsp;</i>1,2,3  - laser<br>
+
+real: dimension in mm - laser<br>
+
+real: offset in mm - laser<br>
+
+<br>
+
+Line 9:<i><span style="color:#8080ff;"> text integer real real integer real real&nbsp; </span></i><span style="color:#8080ff;"><span style="color:#ff8080;">(OK)</span></span><i><br>
+
+text:&nbsp; </i>type8 - romano numbering in panels generated using section 29<i><br>
+
+integer: </i>1 not used<br>
+<i>
+real</i>: 0.2 spanning
+from 0.0 to 1.0  means the position of the roman number (0.0 totally
+to the left and 1.0 totally to the right, normal values 0.2 or 0.5 - print and laser<br>
+<i>
+real</i>: 4.0 means the
+vertical offset in mm with respect to the baseline. May be
+positive or negative number - print and laser<br>
+
+<i>
+integer: </i>1 not used<br>
+<i>
+real</i>: 0.0 not used<br>
+<i>
+real</i>: 4.4 means the offset in mm between dots of the roman
+numeral (global size of the roman numerals) - print and laser<br>
+
+<br>
+
+
+
+
+	
+	
+	
+	Line 10:<i><span style="color:#8080ff;"> text integer real real integer real real&nbsp; </span></i><span style="color:#ff8080;">(OK)</span><i><br>
+
+text:&nbsp; </i>type9 -&nbsp; general numbers size, and roman marks size in ribs,<i><br>
+
+integer: </i>1 not used<br>
+
+real: 0.0 not used<br>
+
+real: 7.0 decimal integer numbers size in cm, in leading edge, ribs, trailing edge panels<br>
+
+<i>
+integer:&nbsp;</i>1 not used<br>
+
+real: 3.3 means the offset in mm between dots of the roman
+numeral (global size of the roman numerals) in rod pockets. If set to 0.0 then roman is not drawn<br>
+
+real: 4.5 means the offset in mm between dots of the roman
+numeral (global size of the roman numerals) in ribs - print and laser<br>
+
+<br>
+
+Line 11:<i><span style="color:#8080ff;"> text integer real real integer real real&nbsp; </span></i><span style="color:#ff8080;">(OK)</span><i><br>
+
+text:&nbsp; </i>type10 -&nbsp; general numbers size in VH-ribs, and roman marks size in VH-ribs,<i><br>
+
+integer: </i>1 not used<br>
+
+real: 0.0 not used<br>
+
+real: 6.0 decimal integer numbers size in cm, in VH-ribs<br>
+
+<i>
+integer:&nbsp;</i>1 not used<br>
+
+real: 0.0 not used<br>
+
+real: 4.5 means the offset in mm between dots of the roman
+numeral (global size of the roman numerals in VH-ribs) - laser<br>
+
+<br>
+
+</div>
+
+
+
+
+
+<div align="center"><img src="qrc:/manual/images/S20.jpg" width="700" height="990"><br>
+
+
+Figure 26a. Section 20 reference marks. Types 1,2,3,4,5,8,9,10 now fully functional.<br>
+
+</div>
+
+
+<br>
+
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S20-romanop-position.png"><img src="qrc:/manual/images/S20-romanop-position.p.png" width="700" height="294"></a><br>
+
+
+Figure 26b. Type8 marks parameters interpretation<br>
+
+</div>
+
+
+<br>
+
+Check that the
+parameters you use are correct, otherwise the size of the Roman
+numerals or decimals will not be appropriate. Since version 3.14 is
+VERY recommended to use this (or similar) example invariant bloc:<br>
+
+<br>
+
+
+
+
+<code>******************************************************<br>
+
+*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 20. Marks types<br>
+
+******************************************************<br>
+
+10<br>
+
+typepoint&nbsp;&nbsp; 1&nbsp; 0.25&nbsp; 1.2&nbsp;&nbsp;&nbsp;&nbsp; 2&nbsp; 0.3&nbsp; 1.2<br>
+
+typepoint2&nbsp; 1&nbsp; 0.25&nbsp; 1.2&nbsp;&nbsp;&nbsp;&nbsp; 2&nbsp; 0.2&nbsp; 1.2<br>
+
+typepoint3&nbsp; 1&nbsp; 0.25&nbsp; 1.2&nbsp;&nbsp;&nbsp;&nbsp; 2&nbsp; 0.2&nbsp; 1.2<br>
+
+typevent&nbsp;&nbsp;&nbsp; 1&nbsp; 10.&nbsp;&nbsp; 0.0&nbsp;&nbsp;&nbsp;&nbsp; 2&nbsp; 2.0&nbsp; 0.0<br>
+
+
+typetab&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 10.&nbsp;&nbsp; 0.0&nbsp;&nbsp;&nbsp;&nbsp; 3&nbsp; 2.0&nbsp; 0.0<br>
+
+typejonc&nbsp;&nbsp;&nbsp; 1&nbsp; 10.&nbsp;&nbsp; 0.0&nbsp;&nbsp;&nbsp;&nbsp; 2&nbsp; 2.0&nbsp; 0.0<br>
+
+typeref&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 5.0&nbsp;&nbsp; 1.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 2.0&nbsp; 0.0<br>
+
+type8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 0.2&nbsp;&nbsp; 5.0&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 0.0&nbsp; 5.0<br>
+
+type9&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 0.0&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 3.2&nbsp; 4.5<br>
+
+type10&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 0.0&nbsp;&nbsp; 6.0&nbsp;&nbsp;&nbsp;&nbsp; 1&nbsp; 0.0&nbsp; 3.33</code><br>
+<br>

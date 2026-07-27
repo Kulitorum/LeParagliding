@@ -1,0 +1,411 @@
+<b>SECTION
+</b><b>12:
+H V and VH RIBS<br>
+
+<br>
+
+</b>
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">integer </span></i>:
+mini-ribs number<br>
+
+<br>
+
+<i><span style="color:#8080ff;">real, real </span></i>:
+x-spacing, y-spacing (when drawing mini-ribs)<br>
+
+<br>
+
+</div>
+
+Then, for each mini-rib, and in a row:<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>integer,
+integer, </i></span><i><span style="color:#8080ff;">integer, integer, </span></i><span style="color:#8080ff;"><i>integer,
+integer, real, real real, real, real :</i></span><br>
+
+</div>
+
+<br>
+
+with the following meanings,
+<b><br>
+
+</b>If it
+is a mini-rib horizontal ribbon type:<br>
+
+<br>
+<b>
+Type 1: Horizontal strap between rib i1 and rib i2</b><b><br>
+
+<br>
+
+</b>
+<div align="center"><b><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S12_Minirib1.jpg"><img src="qrc:/manual/images/S12_Minirib1_p.jpg" width="400" height="296"></a></b><br>
+
+
+Figure
+18. Mini-rib 1 (horizontal strap)<br>
+
+</div>
+
+
+<br>
+
+<br>
+<b>
+Type 2: Diagonal partial V-rib cintered in rib i</b><br>
+
+<br>
+
+
+<div align="center"><b><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S12_Minirib2.jpg"><img src="qrc:/manual/images/S12_Minirib2_p.jpg" width="400" height="290"></a></b><br>
+
+
+Figure
+19. Mini-rib 2 (V-rib)<br>
+
+</div>
+
+
+<br>
+
+<b>Type 3: Diagonal full V-rib centered in rib i</b><br>
+
+<br>
+
+
+<div align="center"><b><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S12_Minirib3.jpg"><img src="qrc:/manual/images/S12_Minirib3_p.jpg" width="400" height="311"></a></b><br>
+
+
+Figure 20. Mini-rib 3 (full V-rib<br>
+
+</div>
+
+
+<br>
+<b>Type 4: "VH-rib"</b> <b>between rib i-1 to i+2</b><br>
+
+<br>
+
+
+<div align="center"><b><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S12_Minirib4.jpg"><img src="qrc:/manual/images/S12_Minirib4_p.jpg" width="400" height="269"></a></b><br>
+
+</div>
+
+<div align="center">
+Figure 21. Mini-rib 4 (VH-rib)<br>
+
+</div>
+
+
+<b><br>
+
+</b><b>Type 5: full continous</b> <b>VH-rib centered in rib i</b><br>
+
+<br>
+
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S12_VRF-p.jpg"><img src="qrc:/manual/images/S12_VRF-p.p.jpg" width="548" height="393"></a><br>
+
+
+Figure 22. Full continous V-ribs type 5 using parabolic holes (if t&lt;100%)<br>
+
+</div>
+
+
+<br>
+
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S12_VRF-e.jpg"><img src="qrc:/manual/images/S12_VRF-e.p.jpg" width="546" height="375"></a><br>
+
+
+Figure 23. Full continous V-ribs type 5 using elliptical holes (if t&gt;100%)<br>
+
+</div>
+
+
+<br>
+
+When using type 5 ribs keep in mind the following:<br>
+
+- The number of anchorages on the rib "i" must be equal to the number
+of anchors on the right and left, even if they are not used (they can
+be virtual, ie without lines)<br>
+
+- To define the Type 5 rib, use a number of lines equal to the number of anchors. Example:<br>
+
+<br>
+
+<code>1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 5 1&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 7.</code><br>
+
+<code>2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 5 2&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 7.</code><br>
+
+<code>3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 5 3&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 7.</code><br>
+
+<code>4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 5 4&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 7.</code><br>
+
+<br>
+
+<b>Type 6: general diagonal</b> <b>"VH-rib"</b> <b>between rib i and rib i+1</b><br>
+
+<br>
+
+Type 6 is a general diagonal. It's very simple. A trapezoidal diagonal ranging from rib number i to rib number i+1. But the rib is totally configurable in size and position. It has been designed to develop competition paragliders CCC types, which need to jump between 4 and 5 cells without lines. But it can also serve to design simplest paragliders, and replacing some of the types of diagonals described above. It is also very useful to define transverse horizontal strips located in all parts of the wing (the tapes have not necessarily coincide  with the anchor points).<br>
+
+<br>
+
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S12_V-ribtype6.jpg"><img src="qrc:/manual/images/S12_V-ribtype6.p.jpg" width="527" height="745"></a><br>
+
+
+Figure 24 V-rib type 6 general diagonal<br>
+
+</div>
+
+
+<br>
+
+
+<div style="margin-left:40px;">Parameters:<br>
+
+<br>
+
+n = number of V-rib (consecutive order)<br>
+
+ 6 = define V-rib "type 6"<br>
+
+ i = number of initial rib<br>
+
+ x1 = starting position as a percentage of the chord of the profile<br>
+
+ h1 = initial height in percent of the local thickness profile<br>
+
+ r1 = radius backwards (cm)<br>
+
+ r1- = radius forward (cm)<br>
+
+ i +1 = number of final rib<br>
+
+
+ x2 = starting position as a percentage of the chord of the profile<br>
+
+
+ h2 = initial height in percent of the local thickness profile<br>
+
+
+ r2+ = radius backwards (cm)<br>
+
+
+ r2- = radius forward (cm)<br>
+
+<br>
+
+Type 6 uses 12 parameters, while the other V-ribs types, use only 10 parameters. This is no problem. The program can read the data file correctly. Simply, interpret the scheme. Try and see the results. Type-6 is now working and fully implemented<span style="color:#ff8080;">.<br>
+
+<br>
+
+</span>Very important: The pieces "Type 6", must be defined consecutively, and line by line. With the following order: From the leading edge to the trailing edge, and from the center&nbsp;of the wing, to the wingtip. That is, first define all the pieces consecutively in rib number "i", before defining pieces in a rib greater than "i".<br>
+
+
+</div>
+
+<br>
+<b>
+Ribs Types 11,12,13,14,15,16</b><br>
+
+<br>
+
+Since version 3.14 of the program, six additional VH-rib types can be
+used, named Type 11,12,13,14,15, and 16. Type 11 is the same as type 1, but absolute definitions of
+lengths in cm, now are now set in % of the profile chord. The same for type
+12 with respect to type 2, and so on until type 16, which is similar to
+type 6. Types 11 and 1, 12 and 2, 13 and 3, 14 and 4, cannot be
+combined in the same model. An auxiliary model can be made if
+necessary.<br>
+
+<br>
+
+When you enter the settings to the types 1,2,3,4,5,6, the absolute
+lengths will be affected by the scaling factor of the wing (before this
+does not happen). This allows you to scale the wings more uniformly. <br>
+
+<br>
+
+Since version 3.14 the graphical presentation of the VH-ribs in 2D has
+been greatly improved, and ensuring that the reference decimal numbers
+are not shifted with respect to the pieces, as happened before.&nbsp;
+The roman numbers fit much better and its size may be defined in
+section 20.<br>
+
+<br>
+
+Study examples, section 12 is very powerful and allows for almost any type of rib you can imagine. Example:<br>
+
+<br>
+
+<code>***************************************************</code><br>
+
+<code>*&nbsp;&nbsp;&nbsp; 12. H V and VH ribs</code><br>
+
+<code>***************************************************</code><br>
+
+<code>24&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&gt; Use 24 VH-ribs</code><br>
+
+<code>80&nbsp;&nbsp;&nbsp;
+150&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&gt; X Y spacing</code><br>
+
+<code>1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+11&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0 1&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.5&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&gt; VH-rib 1, Type 11</code><br>
+
+<code>2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+11&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1 1&nbsp;&nbsp;&nbsp;&nbsp; 2
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.5&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0</code><br>
+
+<code>3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+11&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2 1&nbsp;&nbsp;&nbsp;&nbsp; 3
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.5&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0</code><br>
+
+<code>4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+11&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3 1&nbsp;&nbsp;&nbsp;&nbsp; 4
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.5&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0</code><br>
+
+<code>5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+11&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 8 4&nbsp;&nbsp;&nbsp;&nbsp; 9
+4&nbsp;&nbsp;&nbsp;&nbsp; 6.0&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0</code><br>
+
+<code>6&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+12&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3 3&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp;
+90.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&gt; VH-rib 6, Type 12</code><br>
+
+<code>7&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+12&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 5 3&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 90.</code><br>
+
+<code>8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+12&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 7 3&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 90.</code><br>
+
+<code>9&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+12&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 9 3&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 90.</code><br>
+
+<code>10&nbsp;&nbsp;&nbsp;&nbsp;
+13&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2 4&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 10.0&nbsp;&nbsp;&nbsp;
+0.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+0.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code><code>&gt; VH-rib 10, Type 13</code><br>
+
+<code>11&nbsp;&nbsp;&nbsp;&nbsp;
+13&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 4 4&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 10.0&nbsp;&nbsp;&nbsp;
+0.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0.</code><br>
+
+<code>12&nbsp;&nbsp;&nbsp;&nbsp;
+13&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 6 4&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 10.0&nbsp;&nbsp;&nbsp;
+0.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0.</code><br>
+
+<code>13&nbsp;&nbsp;&nbsp;&nbsp;
+14&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2 2&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp;
+90.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code><code>&gt; VH-rib 13, Type 14</code><br>
+
+<code>14&nbsp;&nbsp;&nbsp;&nbsp;
+14&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 5 2&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 90.</code><br>
+
+<code>15&nbsp;&nbsp;&nbsp;&nbsp;
+14&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 8 2&nbsp;&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 90.</code><br>
+
+<code>16&nbsp;&nbsp;&nbsp;&nbsp;
+14&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 11 2&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 3.0&nbsp;&nbsp;&nbsp; 7.0&nbsp;&nbsp;&nbsp;
+80.&nbsp;&nbsp;&nbsp;&nbsp; 90.</code><br>
+
+<code>17&nbsp;&nbsp;&nbsp;&nbsp;
+15&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3&nbsp; 1&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 60.&nbsp;&nbsp;&nbsp; 50.&nbsp;&nbsp;&nbsp;
+81.&nbsp;&nbsp;&nbsp;&nbsp;
+2.0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code><code>&gt; VH-rib 17 to 20, Type 15</code><br>
+
+<code>18&nbsp;&nbsp;&nbsp;&nbsp;
+15&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3&nbsp; 2&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 60.&nbsp;&nbsp;&nbsp; 50.&nbsp;&nbsp;&nbsp;
+81.&nbsp;&nbsp;&nbsp;&nbsp; 2.0</code><br>
+
+<code>19&nbsp;&nbsp;&nbsp;&nbsp;
+15&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3&nbsp; 3&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 60.&nbsp;&nbsp;&nbsp; 50.&nbsp;&nbsp;&nbsp;
+81.&nbsp;&nbsp;&nbsp;&nbsp; 2.0</code><br>
+
+<code>20&nbsp;&nbsp;&nbsp;&nbsp;
+15&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3&nbsp; 4&nbsp;&nbsp;&nbsp; 1
+1&nbsp;&nbsp;&nbsp;&nbsp; 60.&nbsp;&nbsp;&nbsp; 50.&nbsp;&nbsp;&nbsp;
+81.&nbsp;&nbsp;&nbsp;&nbsp; 2.0</code><br>
+
+<code>21&nbsp;&nbsp;&nbsp;&nbsp;
+16&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 10 80.&nbsp;
+10.&nbsp;&nbsp;&nbsp;&nbsp; 3.&nbsp; 3. 11&nbsp;&nbsp;&nbsp;&nbsp;
+75.&nbsp;&nbsp;&nbsp;&nbsp; 85. 8. 8.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </code><code>&gt; VH-rib 21, Type 16</code><br>
+
+<code>22&nbsp;&nbsp;&nbsp;&nbsp;
+16&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 11 75.&nbsp;
+85.&nbsp;&nbsp;&nbsp;&nbsp; 8.&nbsp; 8. 12&nbsp;&nbsp;&nbsp;&nbsp;
+75.&nbsp;&nbsp;&nbsp;&nbsp; 0.&nbsp; 3. 3.</code><br>
+
+<code>23&nbsp;&nbsp;&nbsp;&nbsp;
+16&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 6&nbsp; 18.&nbsp;
+10.&nbsp;&nbsp;&nbsp;&nbsp; 3.&nbsp; 3. 7&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+18.&nbsp;&nbsp; 100.&nbsp; 5. 5.</code><br>
+
+<code>24&nbsp;&nbsp;&nbsp;&nbsp;
+16&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 7&nbsp; 18.
+100.&nbsp;&nbsp;&nbsp;&nbsp; 5.&nbsp; 5.
+8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 18.&nbsp;&nbsp;&nbsp;&nbsp; 0.&nbsp; 3.
+3.&nbsp;&nbsp; </code><br>
+
+<br>
+
+<b><br>
+
+</b>

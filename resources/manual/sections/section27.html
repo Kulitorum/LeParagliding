@@ -1,0 +1,167 @@
+SECTION 27 SPECIAL WINGTIPS<br>
+
+<code><br>
+
+</code>It is used for defining wingtips with special shapes. Available values 0,1,2.<br>
+
+<br>
+
+Wingtip type "1":<br>
+
+<br>
+
+
+<div align="center"><img src="qrc:/manual/images/S27.jpg" width="700" height="702"><br>
+
+
+Figure 32. Special wingtip<br>
+
+</div>
+
+
+<br>
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+
+if integer = 0 do not add wingtip modifications(set by default)<br>
+
+
+
+
+
+
+if integer = 1 add some wingtip modifications<br>
+
+<br>
+
+Only if first integer is 1 then add:<br>
+
+<br>
+
+Line 2: <i><span style="color:#8080ff;">text&nbsp; real<br>
+
+<span style="color:#e6edf7;">text: </span></span></i><i>AngleLE</i> (do not change this text)<br>
+
+<i>real:</i> angle in degrees between the horizontal and the leading edge in the last cell<br>
+
+<br>
+
+
+Line 3: <i><span style="color:#8080ff;">text&nbsp; real<br>
+
+<span style="color:#e6edf7;">text: </span></span></i><i>AngleTE</i> (do not change this text)<br>
+
+<i>real:</i> angle in degrees between the horizontal and the trailing edge in the last cell<br>
+
+<code><br>
+
+</code>
+Example 1: <br>
+
+
+<div style="margin-left:40px;"><code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+<code><span style="color:#8080ff;">
+*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 27. SPECIAL WING TIP</span></code><br>
+
+<code><span style="color:#8080ff;">
+*******************************************************</span></code><br>
+
+<code><span style="color:#8080ff;">
+1</span></code><br>
+
+<code><span style="color:#8080ff;">
+AngleLE 45</span></code><br>
+
+<code><span style="color:#8080ff;">
+AngleTE -7.78</span></code><br>
+
+</div>
+
+
+<code><br>
+
+</code>"1" refers to define "type 1" wing tip modifications. It is planned to define several modifications. Type 1 is the simplest.<br>
+
+"AngleLE" is a
+name not computed. It serves to remember that next we have to write the
+new angle in degrees between the horizontal and the leading edge in the
+last cell. It is usual to force the angle of the last cell, and this
+section allows it to be done without modifying the geometry matrix. Set
+45º for example. "AngleTE" is a name not computed for the trailing edge. Set the angle as desired, -7.78º for example.<br>
+
+<br>
+
+Example 2: <br>
+
+
+<div style="margin-left:40px;"><code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+<code><span style="color:#8080ff;">
+*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 27. SPECIAL WING TIP</span></code><br>
+
+<code><span style="color:#8080ff;">
+*******************************************************</span></code><br>
+
+<code><span style="color:#8080ff;">
+0</span></code><br>
+
+</div>
+
+<code>
+<br>
+
+<br>
+
+</code><b>Wingtip type "2":</b><br>
+
+<br>
+
+
+
+
+	
+	
+	
+	In 3.27+ version, I have started working on the rounded wingtip with a
+parabola, but only draw in planform, not redesign the panels yet  :( 
+Read more:
+<a href="https://laboratoridenvol.com/leparagliding/dev/lep-dev.en.html">https://laboratoridenvol.com/leparagliding/dev/lep-dev.en.html</a>
+
+<div><br>
+
+Example, special
+wingtip type 2:</div>
+
+
+
+
+
+
+
+
+<div style="margin-left:40px;"><span style="color:#8784fb;"><code>*******************************************************<br>
+
+*
+      27. SPECIAL WING TIP<br>
+
+*******************************************************<br>
+
+2<br>
+
+Distance
+ 60.<br>
+
+Angle
+     0.</code></span></div>
+
+<br>
+
+<code><br>
+
+</code>

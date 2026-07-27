@@ -1,0 +1,285 @@
+<b>SECTION
+4: LIGHTENING IN THE RIBS (RIB HOLES)</b><br>
+
+<br>
+
+By Rows:
+<br>
+
+<br>
+
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">integer</span> </i>: Number of
+configurations of lightening
+<br>
+
+<i><span style="color:#8080ff;">integer</span> </i>: Initial rib for
+first lightening configuration<br>
+
+<i><span style="color:#8080ff;">integer</span> </i>: Final rib for
+first lightening
+configuration<br>
+
+<i><span style="color:#8080ff;">integer</span> </i>: Number of holes for
+the first
+lightening configuration <br>
+
+</div>
+
+<br>
+
+Definition of
+each hole in a horizontal line. There are three possible types of holes. Type 1 = elliptical holes (including circulars),
+type 2 = elliptical
+holes central band, type 3 =&nbsp;
+triangular holes with
+smooth corners.<br>
+
+<br>
+
+If the
+hole is type 1, type
+in a horizontal line:<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><i>integer</i> : 1 <br>
+
+</div>
+
+<div style="margin-left:40px;"><i>real</i> : Distance from LE
+to hole center in% chord
+<br>
+
+<i>real</i> : Distance from
+the center of hole to the chord line in% of chord<br>
+
+<i>real</i> : Horizontal axis
+of the ellipse as% of chord<br>
+
+<i>real</i> : Ellipse vertical
+axis as% of chord<br>
+
+<i>real</i> : Rotation angle
+of the ellipse
+<br>
+
+<i>real</i> : 0. (not used)<br>
+
+</div>
+
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">real</span></i><span style="color:#8080ff;"> : 0. (not used)</span><br>
+
+<i><span style="color:#8080ff;">real </span></i><span style="color:#8080ff;">: 0. (not used)</span><br>
+
+<br>
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S04_Hole1.jpg"><img src="qrc:/manual/images/S04_Hole1_p.jpg" width="400" height="265"></a><br>
+
+
+Figure 8. Hole type 1, ellipse<br>
+
+</div>
+
+
+<br>
+
+</div>
+
+If the hole is type 2, type in a horizontal line: <br>
+
+<br>
+
+
+<div style="margin-left:40px;"><i>integer</i> : 2 <br>
+
+</div>
+
+<div style="margin-left:40px;"><i>real</i> : Distance from LE
+to hole center in% chord
+<br>
+
+<i>real</i> : Distance from
+the center of hole to the chord line in% of chord<br>
+
+<i>real</i> : Horizontal axis
+of the ellipse as% of chord<br>
+
+<i>real</i> : Ellipse vertical
+axis as% of chord<br>
+
+<i>real</i> : Rotation angle
+of the ellipse
+<br>
+
+<i>real</i> : central strip width<br>
+
+</div>
+
+<div style="margin-left:40px;"><i>real</i> : 0. (not used)<br>
+
+<i>real </i>: 0. (not used)</div>
+
+<div style="margin-left:40px;"><br>
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S04_Hole2.jpg"><img src="qrc:/manual/images/S04_Hole2_p.jpg" width="400" height="253"></a><br>
+
+</div>
+
+<div align="center">
+Figure 9. Hole type 2, ellipse or circle with central strip<br>
+
+
+<br>
+
+
+<i>Not use holes type 2 beacuse yet no
+implemented !</i><br>
+
+</div>
+
+<i>
+<br>
+
+</i></div>
+
+If the hole is type 3, type in a horizontal line: <br>
+
+
+<br>
+
+
+
+<div style="margin-left:40px;"><i>integer</i> : 3 <br>
+
+</div>
+
+<div style="margin-left:40px;"><i>real</i> : Distance from LE
+to triangle in% chord
+<br>
+
+<i>real</i> : Distance from
+the center of the triangle corner to the chord line in% of chord<br>
+
+<i>real</i> : Traingle base as% of
+chord<br>
+
+<i>real</i> : Triangle heigth as% of
+chord<br>
+
+<i>real</i> : Rotation angle
+of the base<br>
+
+<i>real</i> : Radius of the smoothed
+corners<br>
+
+</div>
+
+<div style="margin-left:40px;"><i>real</i> : 0. (not used)<br>
+
+<i>real </i>: 0. (not used)</div>
+
+<div style="margin-left:40px;"><br>
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S04_Hole3.jpg"><img src="qrc:/manual/images/S04_Hole3_p.jpg" width="400" height="324"></a><br>
+
+
+Figure 10. Hole type 3 triangle<br>
+
+</div>
+
+
+<br>
+
+</div>
+
+<br>
+
+If the hole is type 4, type in a horizontal line: <br>
+
+
+
+<br>
+
+<div style="margin-left:40px;">
+integer : 4<br>
+
+
+real : x Distance from LE to main rectangle corner in % of chord<br>
+
+
+real : y Distance from chord line to main rectangle corner in % of chord<br>
+
+
+real : a rectangle width as % of chord<br>
+
+
+real : b rectangle heigth as % of chord<br>
+
+
+real : Rotation angle (degrees) relative to chord line<br>
+
+
+real : Radius (%) of the smoothed corners<br>
+
+
+real : 0. (not used)<br>
+
+
+real : 0. (not used)<br>
+
+
+<br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+The main vertex or reference vertex of the rectangle is the bottom left. </span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+If the width value (a) is positive, the rectangle is drawn to the right of the main vertex. </span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+If the value of (a) is negative, then the rectangle is drawn to the left. Similar to the case of triangular holes.<br>
+<br>
+</span></span>
+<div align="center"><span style="color:#80ff80;"><span style="color:#e6edf7;"><img src="qrc:/manual/images/S04_Hole4.jpg" width="600" height="743"></span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Image 10.1 Parameters for hole type 4 (rectangular)</span></span><br>
+
+</div>
+
+
+</div>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;"><br>
+
+</span></span>Continue:<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">integer </span></i><span style="color:#8080ff;">: Initial rib for second lightening
+configuration</span><br>
+
+<i><span style="color:#8080ff;">integer </span></i><span style="color:#8080ff;">: Final rib for second lightening
+configuration</span><br>
+
+<i><span style="color:#8080ff;">integer </span></i><span style="color:#8080ff;">: Number of holes for the second
+lightening configuration </span><br>
+
+<br>
+
+Definition of
+each hole in a horizontal line, as before.<br>
+
+<br>
+
+And so on... (repeat pattern
+for all types of lightening configurations)
+<br>
+
+</div>
+
+<br>
+
+<br>

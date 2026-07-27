@@ -1,0 +1,154 @@
+<b>SECTION
+2: AIRFOILS</b><br>
+
+<br>
+
+In an orderly
+manner for each rib, are written in a horizontal line:
+<br>
+
+<br>
+
+<div style="margin-left:40px;"><i>integer</i> : Rib number<br>
+
+<i>text</i> : Name the file
+containing the airfoil assigned to that rib
+<br>
+
+<i>real</i> : Percentage of
+chord start of the air inlet
+<br>
+
+<i>real</i> : Percentage of chord end
+of
+the air&nbsp; inlet
+<br>
+
+<i>boolean</i> : Value 1 or 0 to
+create
+closed cells, at the left of rib ("0" indicates closed-cell, "1" open)
+<br>
+
+<i>real
+</i>:
+Displacement in cm of the rib perpendicular to the chord,
+and in the plane of the
+rib itself.
+Serves to
+improve the position of the ribs without suspension lines. Value
+is usually 0<br>
+
+<i>real</i>:
+Relative
+weight of the chord,
+in relation to the load. Value
+is usually 1.<br>
+
+<i>real:</i> It has two meanings: <br>
+
+<br>
+
+
+<div style="margin-left:40px;">1) If values is "0" or "1", only used in single skin paragliders (useless in double skin). More control in rotation of triangles. Real value "1" (or "1.") means that the triangles are rotated automatically in the corresponding profile. "0" means that the triangles are not rotated, but they are set according to the angle "beta" specified in Section 1.<br>
+
+<br>
+
+2) If the numerical value greater than 1.0 is possible define and draw <a href="https://www.laboratoridenvol.com/leparagliding/lep2images/minicab-minirib.jpg">trailing edge "miniribs" ("minicabs")</a>
+in non "ss" paragliders: The value, simply define the minirib length (in %).<br>
+
+</div>
+
+
+<div align="center" style="margin-left:40px;"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S02_minicab-minirib.jpg"><img src="qrc:/manual/images/S02_minicab-minirib.p.jpg" width="446" height="631"></a><br>
+</div>
+
+<div align="center">
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+Figure 6. Miribs definition <span style="color:#ff8080;"><span style="color:#e6edf7;">in lep&nbsp; &lt;&nbsp; 2.50 (since lep-2.50 minirib "i" was defined at LEFT, between "i-1" an "i")</span></span><br>
+
+
+</div>
+
+
+
+
+</div>
+
+<br>
+
+<div>Note:
+init and end points of the air openings are not fully implemented yet in the program, and is in the profile itself obliged
+to include it means of the integer numbers that describe the end of the top surface and the beginning of the intrados (in each airfoil).<br>
+
+</div>
+
+
+<br>
+
+<div>MIDDLE
+UNLOADED RIBS: Added the possibility of using "middle unloaded ribs".
+Very easy to use: In section "2. AIRFOILS" at the last column use the
+parameter "100", means to place a complete unloaded rib in the middle
+of the panel, and the left corresponding rib. Similarly, as defined in
+the mini-ribs. But the parameter "100" activates a new specific
+programation. New plan numbered "1-6" with the new middle ribs numbered
+and marked. These ribs have been reformatted to achieve a perfect match
+with high precision, with the corresponding panels. In the center of
+the panels, are marked equidistant points in correspondence with the
+middle unloaded ribs. In addition, in the 2D-planform (plan "1-1"),
+also drawn in gray new ribs. Planned to draw in 3D (for reference) but
+not yet done. Important: To define holes in the ribs (elliptical or
+circles), add in section "4. AIRFOIL HOLES" a new hole type "11" that
+is defined exactly as the type "1" (hole type "1" and type "11" are
+exactly the same but the type "11" used exclusively by the middle
+unloaded ribs). In this case the initial rib number and end rib number
+with holes type "11" should be the same, and greater than the maximum
+number of ribs on one side, for example, use "50" . See the attached
+example "leparagliding.txt". All new programation in section 9.9 of the
+source code.<br>
+
+
+
+<br>
+
+
+
+-
+"Mini-ribs" are redefined, and now in section "2. AIRFOILS" at the last
+column, if you use the parameter "15", means to place a 15% mini-rib in
+the middle of the panel, and at the LEFT of the corresponding rib.
+Previously (lep &lt; 2.50), mini-rib it was placed on the RIGHT. But it is better set
+at the left, so you can specify a minirib the center of the wing
+(Mini-rib specified in the left first rib). And this is consistent with
+the new middle unloaded ribs.<br>
+
+
+
+<br>
+
+
+
+-
+Applied little optional displacement (to the center of the wing) in the
+points marking the position of the miniribs. Third parameter in the
+line of section "7. MARKS" of the datafile. Before, this displacement
+was set to default to zero. <br>
+
+</div>
+
+<span style="color:#ff8080;"><br>
+
+</span>
+<div align="center"><span style="color:#ff8080;"><img src="qrc:/manual/images/S02_delta_displacement.jpg" width="700" height="493"></span><br>
+
+<span style="color:#ff8080;">
+<span style="color:#e6edf7;">Figure 7. </span></span>Interpretacion of parameter in sixth column. Parameter "delta" = forced displacement in cm of the rib perpendicular to the chord,
+and in the plane of the
+rib itself<span style="color:#df9fdf;"><span style="color:#e6edf7;">.</span>
+</span><br>
+
+</div>
+
+
+
+<br>

@@ -1,0 +1,215 @@
+SECTION 23: TAB REINFORCEMENTS<br>
+
+
+
+
+
+
+<br>
+
+
+
+
+
+
+<div>This section allows the user to draw tab reinforcements. <span style="color:#ff8080;">Still not functional.</span> Leave the value to "0".<br>
+
+</div>
+
+
+
+
+<br>
+
+
+
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+if integer = 0 tab reinforcements are not considered<br>
+
+
+
+
+if integer = 1 add some others parametes to define and tab reinforcements<br>
+
+
+
+
+<br>
+
+
+
+
+Example 1:<br>
+
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 23. TAB REINFORCEMENTS</code><br>
+
+<code>
+*******************************************************</code><br>
+
+<code>
+0</code><br>
+
+</div>
+
+
+
+
+
+<br>
+
+
+
+
+Example 2:<br>
+
+
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+<code>
+*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 23. TAB REINFORCEMENTS</code><br>
+
+<code>
+*******************************************************</code><br>
+
+<code>
+1</code><br>
+
+<code>
+1</code><br>
+
+<code>
+1&nbsp;&nbsp; 1&nbsp;&nbsp; 22</code><br>
+
+<code>
+2&nbsp;&nbsp; 2&nbsp;&nbsp; 1&nbsp;&nbsp; 5&nbsp;&nbsp; 3</code><br>
+
+<code>
+schemes</code><br>
+
+<code>
+1&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+<code>
+2&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+<code>
+3&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+<code>
+4&nbsp;&nbsp; 1 &nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+<code>
+5&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+</div>
+
+<code>
+<br>
+
+</code>In
+this data, one group of reinforcements applicable to ribs 1 to 22 is
+defined. On the tabs A B C D E, the "schemes" 2,2,1,5,3 respectively are
+applied. The schemes are defined below the word "schemes":<br>
+
+- Scheme 1 (circular sector), parameter "0" means use
+units in % of chord, and 5 parameters to define the tab. In this case
+only the radius r.<br>
+
+- Scheme 2 (trapezoidal sector), parameter "0" means use units in
+% of chord, and 5 parameters to define the tab. In this case r1-,r1+,r2-,r2+,h.<br>
+
+- Scheme 3 (circular sector), parameter "0" means use units in
+% of chord, and 5 parameters to define the tab. In this case only r-,r+,h,l. The shape of the triangle is calculated automatically taking into account the inclination of the line in space. The length "l" is discounted at the final length of the line. <br>
+
+
+-
+Scheme 4 (rectangular sector), parameter "1" means
+use absolute units in cm, and 5 parameters to define the tab. In this
+case only r-,r+,h.<br>
+
+- Scheme 5 (circular-triangular sector), parameter "1" means
+use absolute units in cm, and 5 parameters to define the tab. In this
+case only r-,r+,h,l.<br>
+
+
+
+<code><br>
+
+</code>
+<div align="center"><img src="qrc:/manual/images/S23.jpg" width="700" height="877"><br>
+
+
+Figure 29. Section 23 tab reinforcements<br>
+
+</div>
+
+
+<br>
+
+
+
+Another example, with two groups, group 1 from ribs 1 to 10, group 2 from 11 to 22. Group 2 uses scheme "1" for all tabs:<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 23. TAB REINFORCEMENTS</code><br>
+
+
+<code>*******************************************************</code><br>
+
+
+<code>1</code><br>
+
+
+<code>2</code><br>
+
+
+<code>1&nbsp;&nbsp; 1&nbsp;&nbsp; 10</code><br>
+
+
+<code>2&nbsp;&nbsp; 2&nbsp;&nbsp; 1&nbsp;&nbsp; 5&nbsp;&nbsp; 3</code><br>
+
+
+<code>2&nbsp;&nbsp; 11&nbsp; 22</code><br>
+
+
+<code>1&nbsp;&nbsp; 1&nbsp;&nbsp; 1&nbsp;&nbsp; 1&nbsp;&nbsp; 1</code><br>
+
+
+<code>schemes</code><br>
+
+
+<code>1&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+
+<code>2&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+
+<code>3&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+
+<code>4&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+
+<code>5&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; p1&nbsp;&nbsp; p2&nbsp;&nbsp; p3&nbsp;&nbsp; p4&nbsp;&nbsp; p5</code><br>
+
+</div>
+
+<code>
+<br>
+
+</code><br>

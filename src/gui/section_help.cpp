@@ -2,7 +2,22 @@
 
 #include "section1_curves.h"
 
+#include <QFile>
+
 namespace {
+
+// Section explanations converted from the official manual
+// (https://www.laboratoridenvol.com/leparagliding/manual.en.html) by
+// tools/extract_manual.py into resources/manual/.
+QString manualHtmlForSection(int number)
+{
+    QFile file(QStringLiteral(":/manual/sections/section%1.html")
+                   .arg(number, 2, 10, QLatin1Char('0')));
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    return QString::fromUtf8(file.readAll());
+}
 
 // Field reference for Section 1, generated from the same column metadata the
 // graphical curve editor uses, so the two cannot drift apart.
@@ -482,5 +497,6 @@ SectionHelp helpForSection(int number, const QString &fallbackTitle)
             "Newer LEparagliding versions may add sections while retaining all earlier ones.");
         break;
     }
+    help.manual = manualHtmlForSection(number);
     return help;
 }

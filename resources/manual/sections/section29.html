@@ -1,0 +1,824 @@
+SECTION 29 3D SHAPING<br>
+
+<code><span style="color:#ff8080;"><br>
+
+</span></code>The
+model of 3-Shaping proposed by the Laboratori, consists in making one
+or two transverse cuts in the upper surface, near the leading edge, and
+another optional cut on the bottom surface. We will call this model as
+"type 1". The edges of the transverse cuts will be modified from the
+straight line into an arc of a circle. In this way, we can "add fabric"
+lengthwise and we can control the ovalization and the tension in this
+direction. Ovalization in transverse direction is achieved via the
+module of skin tension (SECTIONS 5 or 31). In summary, we can control the amount of tissue
+and tension in transverse and in longitudinal direction near the nose,
+where the curvatures are greatest.<br>
+
+<br>
+
+To set the parameters of the 3D-shaping in the model "type 1" is
+necessary to study the profile in detail, viewing and counting the
+individual points that form it, Laboratori style! :-) You need to view
+your profile in CAD (or in the .txt file), identify and count points. Remember that the points in a profile is counted
+starting in the trailing edge (point 1), continuing by the upper
+surface, nose, vents, lower surface, and ending again in the trailing
+edge. Exactly as described <a href="http://www.laboratoridenvol.com/leparagliding/manual.en.html#05">previously</a>.
+We could define another model "type 2" where the position of the cut
+points are defined in % of the length of the panel, but in this model
+1, is considered to specify exactly the points considered. <br>
+
+<br>
+
+For each cut, it is necessary to define a "zone of influence". In the
+zones of influence is measured the length of a section of the profile
+and is compared with the corresponding length in the ovalized profile.
+This question is fundamental to understand the 3D-shaping type 1. It is
+necessary to view the figure below:<br>
+
+<br>
+
+
+<div align="center"><u><img src="qrc:/manual/images/S29_3D-shaping1.jpg" width="670" height="947"></u><br>
+
+
+<i>Figure 36. Cuts and zones of
+influence. J1,j2,j3,j4,j5,j6,j7 indicate numeric values of the selected
+points in the profile, starting to count from the trailing edge. J4 and
+j5 are the vent points.</i><br>
+
+</div>
+
+
+<br>
+For the purposes of notation, we will call the different parts in which we divide the profile as:<br>
+
+zone 1 (between j1 and j2), extrados part 1<br>
+
+zone 2 (between j2 and j3), extrados part 2<br>
+
+zone 3 (between j3 and j4), extrados part 3 or nose<br>
+
+zone 4 (between j4 and j5), or vents <br>
+
+zone 5 (between j5 and j6), intrados part 1<br>
+
+zone 6 (between j6 and j7), intrados part 2<br>
+
+<br>
+
+In each zone 1,2,3,4,5,6 the program computes the length ot the arch of
+airfoil (d1) and the arch of the ovalized airfoil (d2). The differences
+of longitude (d2-d1) are calculated automatically in each
+zone,
+and then applied consistently to each cut with a value (f) obtained
+using the values (d2-d1) of the adjacent zones. Is provided a setting
+parameter around 1.0, which serves the designer to regulate the depth
+of the 3D-shaping in each cut (positive or negative), in relation to the automatic
+calculation. Thus, using the coefficient of 1.0, the depth of 3D is
+according to the theory exposed. Using a coefficient of 0.0 does not
+apply the 3D effect, and using values higher or lower than 1.0
+increases or
+decreases the effect. The control of the depth of 3D-shaping is
+continuous and individual for each cut. A more detailed description,
+and the formulas used in the calculation are described in this <a href="https://www.laboratoridenvol.com/info/shaping-3d/shaping-3d-programming.en.html">technical note</a>
+about 3D-shaping. For each rib, a full report of the values d1, d2,
+d2-d1, computed in each zone, and the final values f aplied in each cut
+are printed in tabular form in section 9 of the file <b>lep-out.txt</b>. 
+
+
+	
+	
+	
+	Also,
+for verification purposes, a new section 10 is written to the
+<b>lep-out.txt</b> file with the counting of the points of each profile, to
+verify that they are all the same for all profiles, and that they are
+compatible with the  defined cuts.
+<br>
+
+
+<br>
+
+It should be noted, that the parameters applied in this section, will
+be usually "invariant values" applied to the majority of the designs.
+We just have to think about all this, a single time for each type of
+profile. And the Laboratory will provide soon the recommended values in next designs. Of
+course, finding the good parameters is a real art. The program
+LEparagliding now provides the tools to make numerical and graphical
+experiments (lep-out.txt section 9 and leparagliding.dxf plan in box 1-8). <br>
+
+<br>
+
+Negative 3D-shaping values are available since version 3.11<br>
+
+<br>
+
+<span style="color:#ff8080;"><span style="color:#e6edf7;"><b>
+Explanation of the parameters in SECTION 29:</b><br>
+
+<br>
+
+</span></span>
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+
+
+
+if integer = 0 then no not use 3D-shaping, and finish writing the section.<br>
+
+
+
+
+
+
+
+
+if integer = 1 then use 3D-shaping, and continue writing:<br>
+
+<br>
+
+
+Line 2: <i><span style="color:#8080ff;">integer<br>
+
+<span style="color:#e6edf7;">integer = </span></span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">type of 3D-shaping theory used, now we use only model "type 1" using transverse cuts, set parameter to 1.<br>
+
+<br>
+
+</span></span><span style="color:#8080ff;"><span style="color:#e6edf7;">Line 3: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer</span></i><br>
+
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;"><span style="color:#e6edf7;">
+character</span> </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">= groups<br>
+
+<i>integer1</i> = number of groups used<br>
+
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;">
+Line 4: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2&nbsp; </span></i><i><span style="color:#8080ff;">integer3</span></i><br>
+
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;"><span style="color:#e6edf7;">
+character</span> </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">= group<br>
+
+<i>integer1</i> = number of the group<br>
+<i>
+integer2</i> = initial rib in group<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer3</i> = final rib in group</span></span></span></span><br>
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;">
+<br>
+
+Line 5: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2</span></i><br>
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;"><span style="color:#e6edf7;">
+character</span> </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">= upper , word meaning upper surface (extrados)<br>
+
+<i>integer1</i> = number of cuts in upper surface (possible values 1 or 2).<br>
+<i>
+integer2</i> = subtype of cuts, set to 1, only value accepted<br>
+
+<br>
+
+Line 6: </span></span></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2&nbsp; </span></i><i><span style="color:#8080ff;">real<br>
+
+</span></i><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>integer1</i> = initial point in the first zone of influence (j1)<br>
+<i>
+integer2</i> = point where the first cut is set (j2)<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>real</i> = "depth" of 3D-shaping in the cut, possible values </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">-1.0,-0.4,</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">0.0, 0.1,....,1.0,1.2,... (multiplier coefficient around +-1.0)<br>
+
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">Line 7: </span></span></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2&nbsp; </span></i><i><span style="color:#8080ff;">real&nbsp;&nbsp; (only if we use two extrados cuts)<br>
+
+</span></i><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>integer1</i> = initial point in the second zone of influence (j2)<br>
+<i>
+integer2</i> = point where the second cut is set (j3)<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>real</i> = "depth" of 3D-shaping in the cut, possible values </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">-1.0,-0.4,</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">0.0, 0.1,....,1.0,1.2,... (multiplier coefficient around +-1.0)<br>
+
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;">
+Line 8: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2</span></i><br>
+
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;">
+character </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">= lower , word meaning lower surface (intrados)<br>
+
+integer1 = number of cuts in lower surface (possible values 0 or 1).<br>
+
+integer2 = subtype of cuts, set to 1, only value accepted<br>
+
+<br>
+
+If the number of cuts in intrados is 0, stop writing, else<br>
+
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">Line 9: </span></span></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2&nbsp; </span></i><i><span style="color:#8080ff;">real&nbsp;&nbsp; (only if we use two extrados cuts)<br>
+
+</span></i><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>integer1</i> = </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">point where the intrados cut is set (j6)</span></span></span></span><br>
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer2</i> = </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">final point in the intrados zone of influence (j7)</span></span></span></span><br>
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>real</i> = "depth" of 3D-shaping in the cut, possible values -1.0,-0.4,0.0, 0.1,....,1.0,1.2,... (multiplier coefficient around +-1.0)<br>
+
+<br>
+
+(...Repeat lines 5,6,7,8,9 for next groups...)<br>
+
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">Line 10: </span></span></span></span><i><span style="color:#8080ff;">character<br>
+
+<span style="color:#e6edf7;">character =&nbsp; "</span></span></i><code>* print parameters:" </code>(comment line, it is mandatory to write something)<br>
+
+<br>
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;">
+Line 11: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2 </span></i><i><span style="color:#8080ff;">integer3&nbsp; </span></i><i><span style="color:#8080ff;">integer4</span></i><br>
+
+
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;"><span style="color:#e6edf7;">
+character</span> </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">= Inter3D, word to indicate representation of the intermediate airfoils in 3D lep-3d.dxf<br>
+<i>
+integer1</i> = 0 indicates do not draw, and 1 draw<br>
+<i>
+integer2</i> = index of first airfoil to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer3</i> = </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">index of last airfoil to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer4</i> = 0 it indicates to draw with symmetry, 1 only one side<br>
+
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;">
+Line 12: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2 </span></i><i><span style="color:#8080ff;">integer3&nbsp; </span></i><i><span style="color:#8080ff;">integer4</span></i><br>
+
+
+
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;"><span style="color:#e6edf7;">
+character</span> </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">= Ovali3D, word to indicate representation of the intermediate ovalized airfoils in 3D lep-3d.dxf<br>
+<i>
+integer1</i> = 0 indicates do not draw, and 1 draw<br>
+<i>
+integer2</i> = index of first airfoil to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer3</i> = </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">index of last airfoil to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer4</i> = 0 it indicates to draw with symmetry, 1 only one side<br>
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;">
+Line 13: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2 </span></i><i><span style="color:#8080ff;">integer3&nbsp; </span></i><i><span style="color:#8080ff;">integer4</span></i><br>
+
+
+
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;"><span style="color:#e6edf7;">
+character</span> </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">= tesse3D, word to indicate representation of panel tessellation in 3D lep-3d.dxf<br>
+<i>
+integer1</i> = 0 indicates do not draw, and 1 draw<br>
+<i>
+integer2</i> = index of first panel to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer3</i> = </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">index of last panel to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer4</i> = 0 it indicates to draw with symmetry, 1 only one side<br>
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;">
+Line 14: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2 </span></i><i><span style="color:#8080ff;">integer3&nbsp; </span></i><i><span style="color:#8080ff;">integer4</span></i><br>
+
+
+
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;"><span style="color:#e6edf7;">
+character</span> </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">=
+exteDXF, word to indicate representation of panels tessellation in 3D
+in a new external DXF file (possible use in CFD analysis)<br>
+<i>
+integer1</i> = 0 indicates do not draw, and 1 draw<br>
+<i>
+integer2</i> = index of first panel to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer3</i> = </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">index of last panel to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer4</i> = 0 it indicates to draw with symmetry, 1 only one side<br>
+<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;">
+Line 15: <i><span style="color:#8080ff;">character&nbsp; </span></i></span></span><i><span style="color:#8080ff;">integer1&nbsp; </span></i><i><span style="color:#8080ff;">integer2 </span></i><i><span style="color:#8080ff;">integer3&nbsp; </span></i><i><span style="color:#8080ff;">integer4</span></i><br>
+
+
+
+
+
+<span style="color:#8080ff;"><span style="color:#e6edf7;"><i><span style="color:#8080ff;"><span style="color:#e6edf7;">
+character</span> </span></i><span style="color:#8080ff;"><span style="color:#e6edf7;">=
+exteSTL, word to indicate representation of panels tessellation in 3D
+in a new external STL file (used with programs of 3D modelling as OpenSCAD or FreeCAD)<br>
+<i>
+integer1</i> = 0 indicates do not draw, and 1 draw<br>
+<i>
+integer2</i> = index of first panel to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer3</i> = </span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;">index of last panel to draw<br>
+
+</span></span></span></span><span style="color:#8080ff;"><span style="color:#e6edf7;"><span style="color:#8080ff;"><span style="color:#e6edf7;"><i>
+integer4</i> = 0 it indicates to draw with symmetry, 1 only one side</span></span></span></span><br>
+
+<code><br>
+
+</code><span style="color:#ff8080;">If section 29 is not "0" then lines
+12, 13, 14, 15 are mandatory to write. Since lep-3.19 the actions are fully functional. These parameters
+will generate independent dxf files with the ovalized surfaces, and even a .stl model to view with FreeCAD
+or OpenSCAD, or even analyze with CFD programs.</span><br>
+
+<br>
+
+<b>All this may seem complicated, but it is much easier to understand section structure watching a few examples:</b><br>
+
+<br>
+
+Example 1: Do not use 3D-shaping. Set one line with "0" parameter and stop writting. It
+is the simplest solution to avoid the complicated 3D-shaping module! :)<br>
+
+
+<br>
+
+
+<div style="margin-left:40px;"><code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+
+<code><span style="color:#8080ff;">*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 29. 3D SHAPING</span></code><br>
+
+
+<code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+
+<code><span style="color:#8080ff;">0</span></code><br>
+
+</div>
+
+
+<br>
+
+Example 2: Active 3D-shaping module
+but without any cut. The utility of defining this, is that the
+representation of plan 1-8 is activated automatically, with the
+drawing of the intermediate and ovalized airfoils in 2D. You can also
+activate the 3D representations in 3D, changing the settings "0" to "1"
+in the "Print parameters" subsection. In general, preferable to use
+example 2, that use the example 1 (the two are invariant sections).<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><code>************************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 29. 3D SHAPING</code><br>
+
+
+<code>*****</code><code>**************************************************</code><br>
+
+<code><span style="color:#8080ff;">1</span></code><br>
+
+
+<code><span style="color:#8080ff;">1</span></code><br>
+
+
+<code><span style="color:#8080ff;">groups&nbsp; 1</span></code><br>
+
+
+<code><span style="color:#8080ff;">group&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1</span></code><br>
+
+
+<code><span style="color:#8080ff;">upper&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; 1</span></code><br>
+
+
+<code><span style="color:#8080ff;">lower&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; 1</span></code><br>
+
+
+<code><span style="color:#8080ff;">* Print parameters</span></code><br>
+
+
+<code><span style="color:#8080ff;">Inter3D 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 0</span></code><br>
+
+
+<code><span style="color:#8080ff;">Ovali3D 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 0</span></code><br>
+
+
+<code><span style="color:#8080ff;">tesse3D 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 0</span></code><br>
+
+
+<code><span style="color:#8080ff;">exteDXF 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 0</span></code><br>
+
+
+<code><span style="color:#8080ff;">exteSTL 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 0</span></code><br>
+
+</div>
+
+
+
+<br>
+
+Example 3. Easy case, only one group and one cut in extrados.<br>
+
+First group from rib 1 to 14 using one cuts type 1 in upper surface and zero in lower surface. <br>
+
+Zone of influence of first cut started in point 30 and cut located in point 40, depth of the effect 0.8.<br>
+
+Zero cuts in lower surface, type 1.<br>
+
+Prints 3D intermediate (Inter3D) and ovalized (Ovali3D) airfoils at the left of ribs 1 to 14<br>
+
+<code><br>
+
+</code>
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 29. 3D SHAPING</code><br>
+
+
+<code>*******************************************************</code><br>
+
+
+<code>1</code><br>
+
+<code>
+1</code><br>
+
+
+<code>groups &nbsp; 1</code><br>
+
+<code>
+group&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp; 14</code><br>
+
+<code>
+upper&nbsp;&nbsp;&nbsp; 1 &nbsp;&nbsp;  1</code><br>
+
+<code>
+1&nbsp;&nbsp;  &nbsp;&nbsp;&nbsp; 30 &nbsp;  40 &nbsp; 0.8</code><br>
+
+<code>
+lower&nbsp;&nbsp;&nbsp; 0 &nbsp;&nbsp;  1</code><br>
+
+
+<code>* Print parameters</code><br>
+
+<code>Inter3D 1 &nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 14 &nbsp;&nbsp; 0</code><br>
+
+
+<code>Ovali3D 1 &nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 14 &nbsp;&nbsp; 0</code><br>
+
+
+<code>tesse3D 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; 0</code><br>
+
+
+<code>exteDXF 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; 0</code><br>
+
+
+<code>exteSTL 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; 0</code><br>
+
+</div>
+
+
+
+
+<br>
+
+Example 4: General case, using two groups.<br>
+
+<br>
+
+First group from rib 1 to 10 using two cuts in upper surface and one in lower surface. <br>
+
+Zone of influence of first cut started in point 25 and cut located in point 33, depth of the effect 0.8.<br>
+
+Zone of influence of the second cut in point 33 and cut located in point 44, depth of the effect -0.3.<br>
+
+Cut in lower surface in point 79 and zone of influence up to point 84, depth of effect 1.0.<br>
+
+<br>
+
+Second group from rib 11 to 14 using two cuts in upper surface and one in lower surface. <br>
+
+Zone of influence of first cut started in point 25 and cut located in point 33, depth of the effect 0.9.<br>
+
+
+Zone of influence of the second cut in point 33 and cut located in point 44, depth of the effect 0.9.<br>
+
+Cut in lower surface in point 79 and zone of influence up to point 83, depth of effect 1.0.<br>
+
+
+<br>
+
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 29. 3D SHAPING</code><br>
+
+
+<code>*******************************************************</code><br>
+
+
+<code>1</code><br>
+
+<code>
+1</code><br>
+
+<code>
+groups &nbsp; 2</code><br>
+
+<code>
+group&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp; 10</code><br>
+
+<code>
+upper&nbsp;&nbsp;&nbsp; 2&nbsp;&nbsp;&nbsp; 1</code><br>
+
+<code>
+1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 25 &nbsp; 33 &nbsp; 0.8</code><br>
+
+<code>
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 33 &nbsp; 44&nbsp; -0.3</code><br>
+
+<code>
+lower&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1</code><br>
+
+<code>
+1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 79&nbsp;&nbsp; 84&nbsp;&nbsp; 1.0</code><br>
+
+<code>
+group&nbsp;&nbsp;&nbsp; 2&nbsp;&nbsp; 11&nbsp;&nbsp; 14</code><br>
+
+<code>
+upper&nbsp;&nbsp;&nbsp; 2&nbsp;&nbsp;&nbsp; 1</code><br>
+
+<code>
+1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 25 &nbsp; 33 &nbsp; 0.9</code><br>
+
+<code>
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 33 &nbsp; 44 &nbsp; 0.9</code><br>
+
+<code>
+lower&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1</code><br>
+
+<code>
+1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 79&nbsp;&nbsp; 83&nbsp;&nbsp; 1.0</code><br>
+
+
+<code>* Print parameters</code><br>
+
+<code><span style="color:#8080ff;">Inter3D 1 &nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 14 &nbsp;&nbsp; 0</span></code><br>
+
+
+<code><span style="color:#8080ff;">Ovali3D 1 &nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 14 &nbsp;&nbsp; 0</span></code><br>
+
+
+<code><span style="color:#8080ff;">tesse3D 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; 0</span></code><br>
+
+
+<code><span style="color:#8080ff;">exteDXF 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; 0</span></code><br>
+
+
+<code><span style="color:#8080ff;">exteSTL 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; 0</span></code><br>
+
+</div>
+
+
+
+<code>
+<br>
+
+</code>
+<div><code>Example 5: Enabling the external DXF and STL files.</code></div>
+
+
+
+<code>
+<br>
+</code>
+<div style="margin-left:40px;">
+<code>************************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 29. 3D SHAPING</code><br>
+
+
+<code>*****</code><code>**************************************************</code><br>
+
+<code>1</code><br>
+
+
+<code>1</code><br>
+
+
+<code>groups&nbsp; 1</code><br>
+
+
+<code>group&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1</code><br>
+
+
+<code>upper&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; 1</code><br>
+
+
+<code>lower&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; 1</code><br>
+
+
+<code>* Print parameters</code><br>
+
+
+<code>Inter3D 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 0</code><br>
+
+
+<code>Ovali3D 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 0</code><br>
+
+
+<code>tesse3D 1
+&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 15 &nbsp;&nbsp; 1&nbsp;&nbsp; &gt;
+Enable 3D tessellation in lep-3d.dxf from panel 1 to 15 and do
+symmetrical</code><br>
+
+
+<code>exteDXF 1 &nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 15 &nbsp;&nbsp; 0</code><code> &nbsp; &gt; Enable 3D tessellation in independent file lep-3d-surfaces.dxf from panel 1 to 15 and do one side</code><br>
+
+
+<code>exteSTL 1 &nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 15 &nbsp;&nbsp; 1</code><code><span style="color:#8080ff;">&nbsp;&nbsp;
+&gt; Enable 3D tessellation in independent files lep-3d-surfaces.scad
+and lep-3d-surfaces.stl from panel 1 to 15 and do symmetrical</span></code><br>
+
+</div>
+
+
+
+<code>
+<br>
+
+</code>
+
+<table border="1" cellspacing="0" cellpadding="5">
+  
+    
+<tr>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In5.png"><img src="qrc:/manual/images/In5.png" width="450" height="246"></a><br>
+
+lep-3d.dxf with tessellation active.<br>
+
+line colors, defined according to section 25 <br>
+
+      </td>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In6.png"><img src="qrc:/manual/images/In6.png" width="450" height="246"></a><br>
+
+lep-3d-surfaces.dxf&nbsp; external dxf file showing only one cell<br>
+
+      </td>
+    </tr>
+    
+<tr>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In7.png"><img src="qrc:/manual/images/In7.png" width="450" height="247"></a><br>
+
+One panel in OpenSCAD<br>
+
+      </td>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In8.png"><img src="qrc:/manual/images/In8.png" width="450" height="247"></a><br>
+
+One panel in OpenSCAD (rendered)<br>
+
+      </td>
+    </tr>
+    
+<tr>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In9.png"><img src="qrc:/manual/images/In9.png" width="450" height="247"></a><br>
+
+Full wing model in OpenSCAD, file lep-3d-surfaces.scad automatically generated<br>
+
+      </td>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In10.png"><img src="qrc:/manual/images/In10.png" width="450" height="247"></a><br>
+<a href="https://www.laboratoridenvol.com/leparagliding/archives2/lep-3d-surfaces.scad">
+lep-3d-surfaces.scad</a><br>
+
+      </td>
+    </tr>
+    
+<tr>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In11.png"><img src="qrc:/manual/images/In11.png" width="450" height="247"></a><br>
+<a href="https://www.laboratoridenvol.com/leparagliding/archives2/lep-3d-surfaces.scad">
+lep-3d-surfaces.scad</a><br>
+
+      </td>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In12.png"><img src="qrc:/manual/images/In12.png" width="450" height="247"></a><br>
+<a href="https://www.laboratoridenvol.com/leparagliding/archives2/lep-3d-surfaces.scad">
+lep-3d-surfaces.scad</a><br>
+
+      </td>
+    </tr>
+    
+<tr>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In15.png"><img src="qrc:/manual/images/In15.png" width="450" height="247"></a><br>
+
+Automatically generated file <a href="https://www.laboratoridenvol.com/leparagliding/archives2/lep-3d-surfaces.stl">lep-3d-surfaces.stl</a><br>
+
+View and renders in OpenSCAD<br>
+
+STL file can probably be used in CFD analysis<br>
+
+      </td>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/external/In16.png"><img src="qrc:/manual/images/In16.png" width="450" height="253"></a><br>
+
+Automatically generated file <a href="https://www.laboratoridenvol.com/leparagliding/archives2/lep-3d-surfaces.stl">lep-3d-surfaces.stl</a><br>
+
+
+View and renders in FreeCAD<br>
+
+      </td>
+    </tr>
+  
+</table>
+
+<code><br>
+
+<b>Some limitations of 3D surfaces:</b><br>
+
+<br>
+
+- The scad model allows us to view the entire wing without problems (key [F5]), but does not allow rendering </code>(key [F6])<code>I'm trying to find out why.<br>
+
+- The 3D
+surfaces accurately represent the law of skin tensions, but currently
+do not take into account 3D shaping. Perhaps later, I try to represent
+this effect<br>
+
+- The number of
+points in the tessellation is equal to the number of points in the
+profile around its outline, and a fixed number of segments in the
+transverse direction. The parameter nsegments=8 has been defined
+internally. If you need a finer mesh, change this setting (compile the
+program or ask me).<br>
+
+<br>
+
+<b>General notes:</b><br>
+
+</code><code><br>
+
+</code><span style="color:#80ff80;"><span style="color:#e6edf7;">The
+location of the cut points depends mainly on the study of the shape of
+the profile. It is interesting to concentrate the cuts where the
+difference in lengths between segments located in the intermediate
+profile and the ovalized (balloned) profile are larger. As a first
+approximation, can be studied to place the cuts in the 5.5% and 13.5%
+of the profile chord, counting from the leading edge. It is also
+important to choose correctly the coefficient of depth. Theoretically
+1.0 is the best, but to smooth out the surfaces, you can choose a
+smaller coefficient.<br>
+
+<br>
+
+As Piet </span></span><span style="color:#80ff80;"><span style="color:#e6edf7;">suggests </span></span><span style="color:#80ff80;"><span style="color:#e6edf7;">from the Netherlands</span></span><span style="color:#80ff80;"><span style="color:#e6edf7;">, </span></span><span style="color:#80ff80;"><span style="color:#e6edf7;">the
+3D module can also be used as a simple alternative to separate colored
+panels in the noses area, or panels with more durable fabric. Remember
+that the 3D effect is adjustable in depth, and you can even use the
+parameter amplification 0.0 so that the cut between the parts of the
+panels is completely straight line. The subroutines developed in this
+section will be adapted to complete the separation in parts of colors.<br>
+
+<br>
+
+The programming of this 3D-shaping module has been made possible thanks to the support of Scott Roberts from USA (Fluid Wings <a href="https://www.fluidwings.com/">https://www.fluidwings.com/</a> ).</span></span><br>
+
+<br>

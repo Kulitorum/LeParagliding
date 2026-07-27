@@ -1,0 +1,156 @@
+SECTION 24: GENERAL 2D DXF OPTIONS<br>
+
+
+
+
+
+
+
+<br>
+
+
+
+
+
+
+
+<div>This section allows the user to define some colors in the 2D DXF plans.<br>
+
+</div>
+
+
+
+
+
+<br>
+
+
+
+
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+if integer = 0 DXF options set by default<br>
+
+
+
+
+
+if integer = 1 add some others parameters for DXF<br>
+
+<br>
+
+Only if first integer is 1 then add:<br>
+
+<br>
+
+Line 2: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>A_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "A" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 3: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>B_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "B" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 4: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>C_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "C" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 5: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>D_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "D" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 6: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;"><span style="color:#8080ff;">tex1:</span> </span></span></i>E_lines_color (do not change this text)<br>
+
+<i><span style="color:#8080ff;">integer:</span></i> color number index for "E" lines<br>
+
+<i><span style="color:#8080ff;">text2:</span></i> color name (optional text not used)<br>
+
+<br>
+
+
+Line 7: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>F_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "F" brake lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Example:<br>
+
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 24. GENERAL 2D DXF OPTIONS</code><br>
+
+
+<code>*******************************************************</code><br>
+
+
+<code>1</code><br>
+
+
+<code>A_lines_color&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; red</code><br>
+
+
+<code>B_lines_color&nbsp;&nbsp;&nbsp; 30&nbsp;&nbsp;&nbsp; orange</code><br>
+
+
+<code>C_lines_color&nbsp;&nbsp;&nbsp; 3&nbsp;&nbsp;&nbsp;&nbsp; green</code><br>
+
+
+<code>D_lines_color&nbsp;&nbsp;&nbsp; 4&nbsp;&nbsp;&nbsp;&nbsp; cyan</code><br>
+
+
+<code>E_lines_color&nbsp;&nbsp;&nbsp; 6&nbsp;&nbsp;&nbsp;&nbsp; magenta</code><br>
+
+
+<code>F_lines_color&nbsp;&nbsp;&nbsp; 5&nbsp;&nbsp;&nbsp;&nbsp; blue</code><br>
+
+</div>
+
+
+<br>
+
+
+<div>Note: Remember usual color index numbers for CAD systems:<br>
+
+1= red, 2=yellow, 3=green, 4=cyan, 5=blue, 6=magenta 7=white 8=dark grey 9= grey,... up to 255 depending on your color palette. It is preferable not to use colors with more than two digits.<br>
+
+<br>
+
+</div>

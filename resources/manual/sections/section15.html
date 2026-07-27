@@ -1,0 +1,202 @@
+<b>SECTION
+</b><b>15:
+EXTRADOS COLORS<br>
+
+<br>
+
+</b>
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">integer </span></i>:
+number of ribs with marks<br>
+
+<br>
+
+<i><span style="color:#8080ff;">integer,
+integer</span></i> : first rib number, number of marks<br>
+
+<br>
+
+<i><span style="color:#8080ff;">integer, real,
+0.</span></i> : first mark, distance % from TE, 0.<br>
+
+<br>
+
+<i><span style="color:#8080ff;">integer, real,
+0.</span></i> : second mark, distance % from TE, 0.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+...<br>
+
+<br>
+
+<i><span style="color:#8080ff;">integer,
+integer</span></i> : second rib number, number of marks<br>
+
+<br>
+
+<i><span style="color:#8080ff;">integer, real,
+0.</span></i> : first mark, distance % from TE, 0.<br>
+
+<br>
+
+<i><span style="color:#8080ff;">integer, real,
+0.</span></i> : second mark, distance % from TE, 0.<br>
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+...<br>
+
+and so on...<br>
+
+</div>
+
+<b><br>
+
+</b>
+<div align="center"><b><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S15_Extrados_colors.jpg"><img src="qrc:/manual/images/S15_Extrados_colors_p.jpg" width="400" height="271"></a></b><br>
+
+
+Figure
+25. Extrados colors<br>
+
+</div>
+
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#80ff80;"><span style="color:#e6edf7;">New method (since lep-3.24) proposed by Pawel Lipsky (Altair Paragliders).</span></span><br>
+
+
+<br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+SECTION 15 Extrados colors and SECTION 16 Intrados colors</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+It is now possible to define color cuts according the method "2":</span></span><br>
+
+
+<br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Write by lines:</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+&nbsp;&nbsp; integer</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Write the NEGATIVE integer -2, thus the program uses case 2</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+&nbsp;&nbsp; integer</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+integer is the number of panels with colored cuts</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Then, for each panel with color cuts, write two lines:</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+&nbsp;&nbsp; integer1 integer2</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Where integer1 is the panel number, and integer2 the number of cuts in this panel</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+&nbsp;&nbsp; integer real1 real2 real3 real4</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Where integer is the cut number, starting with 1</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Where real1 is the cut to the left of the panel in % from the trailing edge</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Where real2 is the cut to the right of the panel in % from the trailing edge</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Where real3 is the width in mm of the seam edge to join colors</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Where real4 is the number 0.0, unused fallback parameter</span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+continue the same structure through the next cut, and then continue with the next panel</span></span><br>
+
+
+<br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Example: </span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Panels 2,3,4 with cuts. 1 cut in panels 2 and 3 with 1 cut, panel 4 with 3 cuts.</span></span><br>
+
+</div>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+<br>
+
+</span></span>
+<div style="margin-left:40px;"><span style="color:#80ff80;">*****************************************************</span><br>
+
+<span style="color:#80ff80;">
+*&nbsp;&nbsp;&nbsp; 15. Extrados colors</span><br>
+
+<span style="color:#80ff80;">
+*****************************************************</span><br>
+
+<span style="color:#80ff80;">
+-2</span><br>
+
+<span style="color:#80ff80;">
+3</span><br>
+
+<span style="color:#80ff80;">
+2&nbsp;&nbsp;&nbsp; 1</span><br>
+
+<span style="color:#80ff80;">
+1&nbsp;&nbsp;&nbsp; 40.1&nbsp;&nbsp;&nbsp; 20.15&nbsp;&nbsp;&nbsp; 10.&nbsp; 0.</span><br>
+
+<span style="color:#80ff80;">
+3&nbsp;&nbsp;&nbsp; 1</span><br>
+
+<span style="color:#80ff80;">
+1&nbsp;&nbsp;&nbsp; 20.15&nbsp;&nbsp;&nbsp; 0.00&nbsp;&nbsp;&nbsp; 10.&nbsp; 0.</span><br>
+
+<span style="color:#80ff80;">
+4&nbsp;&nbsp;&nbsp; 3</span><br>
+
+<span style="color:#80ff80;">
+1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0.0&nbsp;&nbsp;&nbsp;&nbsp; 15.0&nbsp;&nbsp;&nbsp; 10.&nbsp; 0.</span><br>
+
+<span style="color:#80ff80;">
+2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 15.0&nbsp;&nbsp;&nbsp; 30.0&nbsp;&nbsp;&nbsp; 10.&nbsp; 0.</span><br>
+
+<span style="color:#80ff80;">
+3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 50.0&nbsp;&nbsp;&nbsp; 60.0&nbsp;&nbsp;&nbsp; 10.&nbsp; 0.</span><br>
+
+
+<br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Same definition to define the intrados cuts (section 16).</span></span><br>
+
+
+<br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+Note: When the wing has an odd number of panels (center panel of nonzero width), </span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+the cut to the left of the center panel (panel 1) is defined exactly on the wing's axis of symmetry, </span></span><br>
+
+<span style="color:#80ff80;"><span style="color:#e6edf7;">
+for make symmetrical designs possible.</span></span><br>
+
+</div>
+
+<br>
+
+<b>
+<br>
+
+</b>

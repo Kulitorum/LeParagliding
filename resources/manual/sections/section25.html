@@ -1,0 +1,195 @@
+SECTION 25: GENERAL 3D DXF OPTIONS<br>
+
+
+
+
+
+
+
+<br>
+
+
+
+
+
+
+
+<div>This section allows the user to define some colors in the 3D DXF plans. Allows to draw unifilar not ovalized&nbsp; versions of the surfaces.
+</div>
+
+
+
+
+
+<br>
+
+
+
+
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+if integer = 0 DXF options set by default<br>
+
+
+
+
+
+if integer = 1 add some others parameters for the 3D DXF<br>
+
+<br>
+
+Only if first integer is 1 then add:<br>
+
+<br>
+
+Line 2: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>A_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "A" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 3: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>B_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "B" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 4: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>C_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "C" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 5: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>D_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "D" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 6: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>E_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "E" lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+
+Line 7: <i><span style="color:#8080ff;">text1&nbsp; integer&nbsp; text2<br>
+
+<span style="color:#e6edf7;">tex1: </span></span></i>F_lines_color (do not change this text)<br>
+
+<i>integer:</i> color number index for "F" brake lines<br>
+
+<i>text2:</i> color name (optional text not used)<br>
+
+<br>
+
+Line 8: <i><span style="color:#8080ff;">text1 integer integer text2<br>
+
+</span></i><i>tex1: </i>Extrados (do not change this text)<br>
+
+<i>integer:</i> if set to "0" unifiilar extrados is not drawn, if set to "1" is drawn<br>
+
+<i>integer:</i> color index for the extrados<br>
+
+<i>text 2:</i> optional text with the color name<br>
+
+<br>
+
+Line 9: <i><span style="color:#8080ff;">text1 integer integer text2<br>
+
+</span></i><i>tex1: </i>Vents (do not change this text)<br>
+
+
+<i>integer:</i> if set to "0" unifiilar vents is not drawn, if set to "1" is drawn<br>
+
+
+<i>integer:</i> color index for the vents<br>
+
+<i>text 2:</i> optional text with the color name<br>
+
+<br>
+
+Line 10: <i><span style="color:#8080ff;">text1 integer integer text2<br>
+
+</span></i><i>tex1: </i>Intrados (do not change this text)<br>
+
+
+<i>integer:</i> if set to "0" unifiilar intrados is not drawn, if set to "1" is drawn<br>
+
+
+<i>integer:</i> color index for the intrados<br>
+
+<i>text 2:</i> optional text with the color name<br>
+
+<br>
+
+Example:<br>
+
+
+<div style="margin-left:40px;"><code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+
+<code><span style="color:#8080ff;">*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 25. GENERAL 3D DXF OPTIONS</span></code><br>
+
+
+<code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+
+<code><span style="color:#8080ff;">1</span></code><br>
+
+
+<code><span style="color:#8080ff;">A_lines_color&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; red</span></code><br>
+
+
+<code><span style="color:#8080ff;">B_lines_color&nbsp;&nbsp;&nbsp; 8&nbsp;&nbsp;&nbsp;&nbsp; grey</span></code><br>
+
+
+<code><span style="color:#8080ff;">C_lines_color&nbsp;&nbsp;&nbsp; 8&nbsp;&nbsp;&nbsp;&nbsp; grey</span></code><br>
+
+
+<code><span style="color:#8080ff;">D_lines_color&nbsp;&nbsp;&nbsp; 8&nbsp;&nbsp;&nbsp;&nbsp; grey</span></code><br>
+
+
+<code><span style="color:#8080ff;">E_lines_color&nbsp;&nbsp;&nbsp; 8&nbsp;&nbsp;&nbsp;&nbsp; grey</span></code><br>
+
+
+<code><span style="color:#8080ff;">F_lines_color&nbsp;&nbsp;&nbsp; 30&nbsp;&nbsp;&nbsp; orange</span></code><br>
+
+
+<code><span style="color:#8080ff;">Extrados&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 5&nbsp;&nbsp;&nbsp;&nbsp; blue</span></code><br>
+
+
+<code><span style="color:#8080ff;">Vents&nbsp;&nbsp;&nbsp; &nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp;&nbsp; red</span></code><br>
+
+
+<code><span style="color:#8080ff;">Intrados&nbsp;&nbsp;&nbsp; 1&nbsp;&nbsp;&nbsp; 3&nbsp;&nbsp;&nbsp;&nbsp; green</span></code><br>
+
+</div>
+
+
+<br>

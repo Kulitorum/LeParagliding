@@ -1,0 +1,371 @@
+SECTION
+1: GEOMETRY
+<br>
+
+<br>
+
+Lines 1-8:<br>
+
+<br>
+
+<div style="margin-left:40px;"><span style="color:#8080ff;">**************************************************************</span><br>
+
+<span style="color:#8080ff;">* LABORATORI D'ENVOL PARAGLIDING
+DESIGN&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+*</span><br>
+
+<span style="color:#8080ff;">* Input data file 3.28
+version&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+*</span><br>
+
+<span style="color:#8080ff;">**************************************************************</span><br>
+
+<span style="color:#8080ff;">* Version
+2026-05-01&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+*</span><br>
+
+<span style="color:#8080ff;">**************************************************************</span><br>
+
+<span style="color:#8080ff;">*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+1.
+GEOMETRY&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+*</span><br>
+
+<span style="color:#8080ff;">**************************************************************</span><br>
+
+</div>
+
+
+<div style="margin-left:40px;"><br>
+
+</div>
+
+Lines 9 to 24:<br>
+
+<br>
+
+
+<span style="color:#8080ff;">&nbsp;&nbsp;&nbsp; * Brand name</span><br>
+
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">text&nbsp;</span>
+</i>: &nbsp; Brand name
+(between "&nbsp; ")<br>
+
+<br>
+
+<span style="color:#8080ff;">* WIng name</span><br>
+
+<i><span style="color:#8080ff;">text&nbsp;</span>
+</i>:&nbsp;&nbsp; Wing name
+(between "&nbsp; ")<br>
+
+<br>
+
+<span style="color:#8080ff;">* Drawing scale</span><br>
+
+<i><span style="color:#8080ff;">real</span></i><span style="color:#8080ff;">&nbsp;</span> :&nbsp;&nbsp; Drawing
+scale (1.0 usual value)<br>
+
+<br>
+
+<span style="color:#8080ff;">* Wing scale</span><br>
+
+<i><span style="color:#8080ff;">real</span></i><span style="color:#8080ff;">&nbsp;</span> : &nbsp; Wing
+scale (1.0 usual value)<br>
+
+<br>
+
+<span style="color:#8080ff;">* Cells number</span><br>
+
+<i><span style="color:#8080ff;">integer</span></i>
+: Cells number<br>
+
+<br>
+
+<span style="color:#8080ff;">*Ribs number</span><br>
+
+<i><span style="color:#8080ff;">integer</span></i> : Ribs number<br>
+
+<br>
+
+<span style="color:#8080ff;">* Alpha wingtip, parameter, (alpha center) </span><br>
+
+<i><span style="color:#8080ff;">real1 integer real</span></i>2<br>
+
+<br>
+
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">real1</span></i>: Maximum torsion
+angle
+(washin) between central airfoil and tips<br>
+
+<i><span style="color:#8080ff;">integer</span></i>: an integer parameter set to
+0,1,2. 
+If
+the integer parameter is set to "0" the washin will be done manually.&nbsp; <u>(Figure 3).</u> <br>
+
+
+If the integer parameter is set to "1" then washin will be done proportinal to the chord, being maximun and positive at the tip, using only the first real.If the integer parameter is set to&nbsp; "2",
+then automatic washin angles are set from center airfoil to wingtip.
+The first real is the washin in wingtip, then set "2", and the last
+real is the washin in the central airfoil.<br>
+
+<i><span style="color:#8080ff;">real2</span></i>: and a real number for the angle of attack in the center used
+only in case "2".<br>
+
+</div>
+
+
+<br>
+
+<div style="margin-left:40px;">
+Example about how to use: Below line 21 in leparagliding.txt data file:<br>
+
+
+<br>
+
+
+<span style="color:#8080ff;">* Alpha wingtip, parameter, (alpha center) </span><br>
+
+<span style="color:#8080ff;">
+3.5&nbsp;&nbsp; 2&nbsp; -1.0</span><br>
+
+
+<br>
+
+
+- First number "3.5" is the angle of attack (degres) in wingtip airfoil<br>
+
+
+- Second number "2" is a control parameter
+that means case "2", ie, add new number indicating the angle of attack
+of the central airfoil<br>
+
+
+- Third number "-1.0" is the angle of attack (degres) of the central airfoil<br>
+
+
+<br>
+
+
+The distribution angles of attack is made
+proportional to the wing chord (similar to case "1"). See "lep-out.txt"
+to view the result.<br>
+
+</div>
+
+
+<br>
+
+<span style="color:#8080ff;">* Paraglider type and parameter</span><br>
+
+<i><span style="color:#8080ff;">
+text
+boolean</span><br>
+
+<br>
+
+</i>
+<div style="margin-left:40px;"><i><span style="color:#8080ff;">text</span></i>: Paraglider type "ds" double surface, "ss" single surface, or "pc" parachute.<br>
+
+Notes for selecting the type of paraglider (parameters "ds" "ss" "pc"):<br>
+
+
+"<b>ds</b>": means that the design and calculation parameters are adjusted to create paragliders and parachute of double surface airfoils (intrados and extrados)<br>
+
+
+"<b>ss</b>":&nbsp; means that the design and calculation parameters are adjusted to create single skin paragliders and parachutes, Surfaces corresponding to the intrados are not draw. But it is not enough to indicate this parameter to create single skin paraglider. It is necessary to define an special intrados sawtooth profile (or parabolic shaped), so that the vertices of the triangles are located exactly at the point where% is defined the anchor points. As a general rule, we use covers of the air intakes, as part of the sigle skin profile.<br>
+
+
+"<b>pc</b>": means that the design and calculation parameters are adjusted to create parachutes using double surface airfoils (intrados and extrados).<br>
+
+<br>
+
+ <i><span style="color:#8080ff;">boolean</span></i>: set to 0
+or 1. If
+1
+then leading edge triangles will be no rotated (only used in ss paragliders) <i><br>
+
+</i></div>
+
+<br>
+
+</div>
+
+
+Lines 25 and 26:<br>
+
+<br>
+
+<span style="color:#8080ff;">* Rib geometric parameters</span><br>
+
+<span style="color:#8080ff;">* Rib&nbsp;&nbsp;&nbsp;
+x-rib&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+y-LE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+y-TE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+xp&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+z&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+beta&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+RP&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Washin&nbsp;&nbsp;&nbsp;
+Rot_z&nbsp; Pos_z</span><br>
+
+<br>
+
+Lines 27 and following indicate the geometric properties of each rib (geometry matrix).<br>
+
+<br>
+
+&nbsp;&nbsp;&nbsp; For
+each of the ribs, and considering an orthonormal system of axes XYZ
+(Figure 4), oriented
+in the following way:
+<br>
+
+&nbsp;&nbsp;&nbsp;&nbsp;X
+axis along the wingspan
+<br>
+
+&nbsp;&nbsp;&nbsp;&nbsp;Y
+axis along the central chord<br>
+
+&nbsp;&nbsp;&nbsp;
+Z axis growing vertical from the wing to the pilot
+<br>
+
+<br>
+
+Write in a horizontal line the following 11 parameters (parameters 10 and 11 are not mandatory):
+<br>
+
+<br>
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>integer</i>
+: <span style="color:#e6edf7;">rib number
+</span></span><br>
+
+<span style="color:#8080ff;"><i>real</i>
+: <span style="color:#e6edf7;">rib X
+coordinate</span></span><br>
+
+<span style="color:#8080ff;"><i>real</i>
+: <span style="color:#e6edf7;">Y
+coordinate of the leading edge</span></span><br>
+
+<span style="color:#8080ff;"><i>real</i>
+: <span style="color:#e6edf7;">Y
+coordinate of the trailing edge</span></span><br>
+
+<span style="color:#8080ff;"><i>real</i>
+: <span style="color:#e6edf7;">X' coordinate
+of the rib in its final position in space
+</span></span><br>
+
+<span style="color:#8080ff;"><i>real</i>
+: <span style="color:#e6edf7;">Z coordinate
+of the rib in its final position in space
+</span></span><br>
+
+<span style="color:#8080ff;"><i>real</i>
+: <span style="color:#e6edf7;">the angle
+"beta" of the rib to the vertical (degres)</span></span><br>
+
+<span style="color:#8080ff;"><i>real</i>
+: <span style="color:#e6edf7;">RP percentage
+of chord to be held on the relative torsion of the airfoils</span></span><br>
+
+<span style="color:#8080ff;"><i>real</i>
+: <span style="color:#e6edf7;">washin in degrees defined
+manually (if parameter is set to "0")<br>
+
+</span></span><span style="color:#8080ff;"><i>real</i>
+:</span><span style="color:#8080ff;"><span style="color:#e6edf7;"> angle of rotation of the profiles with respect to a vertical axis Z (degrees). <br>
+
+</span></span><span style="color:#8080ff;"><i>real</i>
+:</span><span style="color:#8080ff;"><span style="color:#e6edf7;"> numeric value expressed as a percentage of the chord, where to place the vertical axis of rotation of the profiles<br>
+
+</span></span>
+</div>
+
+
+<br>
+
+This is one of the most important parts of the wing definition process.These
+parameters can not be defined without a previous drawing, preferably in
+a file of computer aided design CAD, in which the desired plant is
+drawn to an appropriate scale, vault shape (wing arc), and inclination
+of the ribs on three axes. This drawing is one of the most basic and important design
+(pre-process).<br>
+
+<br>
+
+It
+would be possible to generate this drawing by a geometric preprocessor
+to read basic data from the wing desired number of cells, separation,
+size, shape, edge and trailing by a few parameters defined to create
+elliptical shapes. This optional
+<a href="https://www.laboratoridenvol.com/leparagliding/pre.en.html">pre-processor</a> has been implemented, but not inside the main program, because we preferto
+keep this
+important part of design with a CAD program, to allow total freedom of
+the shape of the leading edge, trailing edge, and in the elevation, and
+inclination of
+the profiles. Any design is possible, normal wings, or bionic type,
+with peaks in leading edge or any other form. The pre-processor is very
+useful and generates the geometry matrix that can be copied directly
+into this section. We are thinking about how to improve the
+pre-processor to make it more intuitive, possibly with an html
+interface.<br>
+
+<br>
+
+To define profiles at the center of the wing geometry, use the trick of defining a central cell of zero thickness.<br>
+
+<br>
+
+The basic geometric concepts that must be understood to define the geometry matrix:<br>
+
+
+<br>
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S01_washin_p.jpg"><img src="qrc:/manual/images/S01_washin_p.jpg" width="400" height="373"></a><br>
+
+
+Figure 3. Washin<br>
+
+
+<br>
+
+
+<a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S01_Definition.jpg"><img src="qrc:/manual/images/S01_Definition_p.jpg" width="400" height="594"></a><br>
+
+
+Figure 4. Axis
+and main paraglider geometric design<br>
+
+</div>
+
+
+<br>
+
+<div><br>
+
+Maximun alloved number of ribs is 100 per side (200 ribs or 199 cells).<br>
+
+<br>
+
+
+<div align="center"><img src="qrc:/manual/images/S01_rotated_triangles.jpg" width="700" height="416"><br>
+
+
+Figure 5.&nbsp; <i>Only
+in "ss" paragliders, the parameter set to 0
+or 1. If
+"1"
+then leading edge triangles will be no rotated. <br>
+
+Control over specified
+ribs will be done using a real parameter 0.0 or 1.0 in last column of
+section 2, as explained below. </i></div>
+
+
+</div>
+
+<br>

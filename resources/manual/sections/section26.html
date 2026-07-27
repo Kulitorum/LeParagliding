@@ -1,0 +1,253 @@
+SECTION 26. GLUE VENTS<br>
+
+<code><br>
+
+</code>This
+section allows us to define different types of air inlets (vents),
+and&nbsp; automatically "glue" into the panel of extrados, intrados, or
+to separate them.
+The vents include sewing edges. The skin tension in the vent is linear
+and automatically corresponds to that defined at the points
+corresponding in extrados and intrados. <br>
+
+<br>
+
+The vent definition is very easy and intuitive. A
+row is defined for each rib. The first number is the rib number, the
+next is the vent type, and then zero, two, or three parameters,
+depending on the type.<br>
+
+<br>
+
+Available vent types (version lep-3.17) 0,1,-1,-2,-3,4,-4,5,-5,6,-6:<br>
+
+<br>
+
+0 means do not glue anywhere (open air inlet). <br>
+
+1 means glue the vent to the extrados (normally used in paragliders single skin type)<br>
+-1 means glue the vent to the intrados (usually means, closed cell)<br>
+
+-2 means diagonal vent 100% open ant left, glued to intrados<br>
+
+-3 means diagonal vent 100% open alt right, glued to intrados<br>
+
+-4 50 30 mean general diagonal vent 50% closed at left and 30% closed at right, glued to intrados<br>
+
+&nbsp;4 0 80 mean general diagonal vent 0% open at left and 80% open at right, glued to extrados<br>
+
+5 50 100 10 mean arched vent, 50% open at left, 100% open at right, and 10% arc depth, glued to intrados<br>
+
+-5 50 40 15 mean arched vent, 50% closed at left, 40% closed at right, and 15% arc depth, glued to intrados<br>
+
+6 80 80 means elliptical inlet, width of 80% in X direction and 80% in Y direction, glued to extrados<br>
+
+-6 50 85 means elliptical inlet, width of 50% in X direction and 85% in Y direction, glued to intrados<br>
+
+<br>
+
+Section 26 structure:<br>
+
+
+<br>
+
+Line 1: <i><span style="color:#8080ff;">integer</span></i><br>
+
+
+
+
+
+if integer = 0 then end the section and use old vents style (not recommended)<br>
+
+
+
+
+
+if integer = 1 add some others parameters for precise vents control<br>
+
+<br>
+
+Only if first integer is 1 then add N lines, one for each airfoil number i:<br>
+
+
+<br>
+
+Line i: <i><span style="color:#8080ff;">integer1 integer2 real1 real2 real3<br>
+
+<span style="color:#e6edf7;">integer1: </span></span></i>airfoil number (cell between airfoil i and airfoil i-1)<br>
+
+<i>integer2:</i> vent parameter (available parameters 0,1, -1,-2,-3,4,-4,5,-5,6,-6 as explained above)<br>
+<i>
+real1:</i> parameter 1 (0 to 100). Start point at left (vents 4,-4,5,-5), or horizontal axis in 6,-6<br>
+<i>
+real2: </i>parameter 2 (0 to 100). Start point at right (vents 4,-4,5,-5), or vertical axis in 6,-6<br>
+
+<i>
+real3:</i> parameter 3 (0 to 100). Arch depth in vents type 5 or -5<br>
+
+<code><br>
+
+</code>Examples 1 (use old style, not recommended):<code><br>
+
+<br>
+</code>
+<div style="margin-left:40px;"><code><span style="color:#8080ff;">
+*******************************************************</span></code><br>
+
+
+<code><span style="color:#8080ff;">*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 26. GLUE VENTS</span></code><br>
+
+
+<code><span style="color:#8080ff;">*******************************************************</span></code><br>
+
+
+<code><span style="color:#8080ff;">0</span></code><br>
+
+</div>
+
+<code>
+<br>
+
+</code>Examples 2 (full vent control):<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 26. GLUE VENTS</code><br>
+
+
+<code>*******************************************************</code><br>
+
+
+<code>1&nbsp;&nbsp; </code><br>
+
+<code>
+1&nbsp;&nbsp;&nbsp; 0</code><br>
+
+
+<code>2&nbsp;&nbsp;&nbsp; 0</code><br>
+
+<code>
+3&nbsp;&nbsp;&nbsp; 1</code><br>
+
+<code>
+4 &nbsp; -2</code><br>
+
+<code>
+5&nbsp;&nbsp; -3</code><br>
+
+<code>
+...</code><br>
+
+<code>
+20&nbsp; -2</code><br>
+
+<code>
+21&nbsp; -1</code><br>
+
+<code>
+22&nbsp; -1</code><br>
+
+<code>
+23&nbsp; -1</code><br>
+
+</div>
+
+<code>
+<br>
+
+</code>Examples 3 (advanced vents):<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><code>*******************************************************</code><br>
+
+
+<code>*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 26. GLUE VENTS</code><br>
+
+
+<code>*******************************************************</code><br>
+
+
+<code>1&nbsp;&nbsp; </code><br>
+
+<code>
+1&nbsp;&nbsp;&nbsp; 0</code><br>
+
+
+<code>2&nbsp;&nbsp;&nbsp; 0</code><br>
+
+<code>
+3&nbsp;&nbsp;&nbsp; 1</code><br>
+
+<code>
+4 &nbsp; -4 100. 0.&nbsp;&nbsp; ---&gt; general diagonal vent from 100% to 0%</code><br>
+
+<code>
+5&nbsp;&nbsp; -4 10. 50.&nbsp;&nbsp; ---&gt; general diagonal vent from 10% to 50%</code><br>
+
+<code>
+...</code><br>
+
+<code>
+19&nbsp; -5 0. 0. 15&nbsp; ---&gt; arc vent 15% depth</code><br>
+
+<code>
+20&nbsp; -6 80 80&nbsp;&nbsp;&nbsp;&nbsp; ---&gt; elliptical inlet</code><br>
+
+<code>
+21&nbsp; -1</code><br>
+
+<code>
+22&nbsp; -1</code><br>
+
+<code>
+23&nbsp; -1</code><br>
+
+</div>
+
+
+<br>
+
+
+<div align="center"><b><img src="qrc:/manual/images/S26.jpg" width="700" height="990"></b><br>
+
+
+Figure 30. Glue vents<br>
+
+</div>
+
+
+<br>
+
+
+<div align="center"><img src="qrc:/manual/images/S26_vents_types.jpg" width="650" height="339"><br>
+
+
+Figure 31: Vents types 0,1,-1,-2,-3<br>
+
+
+<br>
+
+
+<img src="qrc:/manual/images/S26_c.jpg" width="700" height="967"><br>
+
+
+Figure 31b: Vents types -4,4 (general diagonal) -5,5 (general arc) -6,6 (elliptical inlet), available in lep-3.17 and later.
+<br>
+
+Note that type 4 also includes cases 0,1,2,3, and type -4 cases 0, -1,
+-2, -3. Finally type 5 includes case 4, and -5 includes case -4. <br>
+
+</div>
+
+
+<br>
+
+<code><br>
+
+</code>

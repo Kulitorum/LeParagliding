@@ -1,0 +1,63 @@
+SECTION 36: CREATE FILES FOR XFLR5 ANALYSIS<br>
+
+<br>
+
+
+
+
+	
+	
+	
+	0
+--&gt; don't perform xflr5 analysis<br>
+
+1
+--&gt; set parameters for xflr5<br>
+
+<div><span style="color:#8080ff;"><code>*
+Panel parameters<br>
+
+10
+chord nr<br>
+
+5
+per cell<br>
+
+1
+cosine distribution along chord<br>
+
+1
+uniform along span<br>
+
+*
+Include billowed airfoils (more accuracy) [Still not working]<br>
+
+0</code></span></div>
+
+
+If
+you use this section, it will automatically be created in xflr5/
+directory with a .xwimp file and profiles in .dat format to use in an
+aerodynamic analysis with the XFLR5 program. The details of how to do
+it are explained here:
+<span style="color:#8080ff;"><u><a href="http://www.laboratoridenvol.com/info/lep2xflr5/lep2xflr5.html"><span style="color:#e6edf7;">http://www.laboratoridenvol.com/info/lep2xflr5/lep2xflr5.html</span></a></u></span>
+<br>
+
+
+Unfortunately
+with XFLR5 we cannot model paragliders with profile rotations in the
+Z angle, nor single skin paragliders. CFD programs must be used for
+this type of paraglider.<br>
+
+<br>
+
+Type
+a single parameter "0" to bypass this complicated section!<br>
+
+
+
+<b><br>
+
+<br>
+
+</b>

@@ -35,6 +35,20 @@ re-evaluates inline command strings, mangling quotes and `$variables`,
 and CRLF line endings break bash. Package installs: `wsl -u root -- apt-get
 install -y ...` (no password needed, unlike sudo).
 
+## Bundled LEparagliding manual
+
+`resources/manual/` (compiled in via `manual.qrc`) holds the official
+manual converted for the in-app help: per-section chapters shown in the
+section help dialogs (`SectionHelp::manual`) and `manual_full.html` for
+the Manual button's offline popup. It is **generated** — do not hand-edit;
+rerun `python tools/extract_manual.py` when the upstream manual changes
+(caches the download as the gitignored `tools/manual.en.html`; delete that
+to re-fetch). The converter whitelists Qt-rich-text-safe markup, remaps
+colors for the dark theme, and gives `<a name>` anchors zero-width-space
+content because Qt's rich-text parser drops empty anchors (breaking
+in-popup TOC navigation). When testing anchor navigation offscreen, note
+`scrollToAnchor` silently defers until the widget is visible.
+
 ## GitHub releases
 
 Version source of truth is `project(... VERSION x.y.z)` in CMakeLists.txt.

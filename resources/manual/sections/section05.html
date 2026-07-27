@@ -1,0 +1,256 @@
+<b>SECTION
+5: SKIN TENSION
+</b><br>
+
+<br>
+
+The tension of
+the top surface and lower surface panels is achieved by creating tapers
+in the panels. The program allows you to define "over-wides" in 6
+points along the edge of the panels. The transition between basis
+points of overwide is linear.
+<br>
+
+<br>
+
+In each of the
+six lines are defined to indicate consecutively:
+<br>
+
+<br>
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>real </i>:
+Distance in% of
+chord on the leading edge of extrados
+</span><br>
+
+<span style="color:#8080ff;"><i>real
+</i>: Extrados
+over-wide corresponding in % of chord
+</span><br>
+
+<span style="color:#8080ff;"><i>real
+</i>: Distance in% of
+chord on trailing edge
+</span><br>
+
+<span style="color:#8080ff;"><i>real
+</i>: Intrados
+over-wide corresponding in%
+of chord</span><br>
+
+</div>
+
+<br>
+
+
+
+<table border="1" cellspacing="0" cellpadding="5">
+  
+    
+<tr>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S05_skin_tension.jpg"><img src="qrc:/manual/images/S05_skin_tension_p.jpg" width="400" height="610"></a><br>
+
+
+      <br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+A better explanation &gt;<br>
+
+      </td>
+      
+<td><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S05_skintension_.jpg"><img src="qrc:/manual/images/S05_skintension_p.jpg" width="450" height="658"></a><br>
+
+      </td>
+    </tr>
+  
+</table>
+
+<div align="center">
+Figure 11: Skin
+tension<br>
+
+</div>
+
+
+<br>
+
+Then add two more lines with the
+following parameterr (new in leparagliding 2.0):<br>
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;">&nbsp;<i>real</i> :
+0.0114 (strain in
+mini-ribs). </span><br>
+
+</div>
+
+<br>
+
+The
+justification for this value is
+obtained from the theory of
+elasticity.
+Leave the
+default value in case
+of doubt.<br>
+
+<br>
+
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S05_Ripstop_elasticity.jpg"><img src="qrc:/manual/images/S05_Ripstop_elasticity_p.jpg" width="500" height="316"></a><br>
+
+
+Figure 12. Ripstop
+elasticity<br>
+
+</div>
+
+
+<br>
+
+
+<div style="margin-left:40px;"><span style="color:#8080ff;"><i>integer, real </i>:
+Number of points np,
+k coeficient 0.0 to 1.0</span><br>
+
+<br>
+
+</div>
+
+The justification for this line is complex. There are two possibles interpretations:<br>
+
+<br>
+
+<u>First interpretation)</u><br>
+
+<br>
+
+If first number in NOT set to "1000", the values are used to make adjustments
+to the shape of the leading
+edge for easy sewing, using an "antiprecision" method.
+However is and old feature and actually is not recomended. Study conducted at the
+request of a manufacturer of paragliders. The second number is used to adjust the intensity of the modification (1.0=maximal effect, 0.0= no effect).<br>
+
+<br>
+
+Justification
+of the
+line in the
+figure below:<br>
+
+<br>
+
+
+<div align="center"><a href="https://www.laboratoridenvol.com/leparagliding/lep2images/S05_Sewing_adjustement.jpg"><img src="qrc:/manual/images/S05_Sewing_adjustement_p.jpg" width="550" height="392"></a><br>
+
+
+Figure
+13. Sewing corrections<br>
+
+</div>
+
+
+<br>
+
+
+
+
+<div>And the
+explanation: <br>
+
+
+<br>
+
+
+When three
+panels are sewn at the same time, with different curvatures to side... problems
+may arise:<br>
+
+
+<br>
+
+
+The left panel
+(i="izquierda") has a concave curvature, while the right panel (d="derecha") has a
+convex curvature. <br>
+
+
+<br>
+
+
+The lengths of
+seam lines (line dashed) should be exactly the same. However, the outer edge of the
+fabric, which is 15 mm from the seam line, is shorter in the left case
+(inner radius) than the right (outer radius). The program calculates the
+difference in length of the leading edge in the area of "np" points od airfoil of greatest curvature from air inlet (np defined by user). <br>
+
+
+<br>
+
+
+With the
+calculated length difference (1d2d-1i2i), the program modifies the plan shape of the
+left panel, extending its inner side. Thus, when the seam is made, there are
+fewer problems ...<br>
+
+
+<br>
+
+
+The second
+control parameter, "k" between 0. and 1. is the coefficient to be applied to the
+difference (1d2d-1i2i). Then 0.0 = no effect. 1.0 = total effect. Then sewing
+corrections:<br>
+
+
+<br>
+
+
+integer, real :
+Number of points np, k coeficient 0.0 to 1.0<br>
+
+</div>
+
+
+<br>
+
+Another explanation for the same, but in French: <i>Étude des courbures panneaux-nervures</i> <a href="https://www.laboratoridenvol.com/projects/bhl-18/%C3%89tude%20courbures%20panneaux-nervures.pdf">(PDF)</a><br>
+
+Many builders prefer not to take into account this effect, then select the parameter as k=0.0<br>
+
+<br>
+
+<u>Second interpretation)</u> Recommended for all designs<br>
+
+<br>
+
+Set the parameters of the line to the values:<br>
+
+<span style="color:#ff8080;"><span style="color:#e6edf7;">1000&nbsp;&nbsp;&nbsp;&nbsp; 1.0</span><br>
+
+<br>
+<span style="color:#e6edf7;">
+First number "1000" (integer) is only a convention than signifies force
+the program to use maximal precision, reformating panels to achieve
+accuraccy better than 0.1 mm (lengths differences beetween rib and
+panels located at left and right). </span><br>
+<span style="color:#e6edf7;">
+Second number is a coefficient (real) between 0.0 and 1.0 that sets the
+intensity of the correction. If coefficient is set to "0.0" then is no
+correction. If the coefficient is set to "1.0" the accuracy is maximal,
+aprox &lt; 0.01 mm. </span><br>
+
+<br>
+<span style="color:#e6edf7;">
+The description of the geometrical problem and the solution, is decribed </span><b><span style="color:#e6edf7;"><a href="https://www.laboratoridenvol.com/info/reformat/reformat.en.html">here</a>.</span></b><br>
+
+<br>
+<span style="color:#e6edf7;">
+In file lep-out.txt is a report in section 6, indicating the final
+lenghts of the panel at left, rib, panel at right, and maximal
+difference and distorsions in mm.</span><br>
+
+</span><br>
