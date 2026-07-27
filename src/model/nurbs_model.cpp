@@ -11,10 +11,10 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BinXCAFDrivers.hxx>
+#include <BSplCLib.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GeomConvert.hxx>
-#include <GeomFill_NSections.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
@@ -61,6 +61,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
 #include <exception>
 #include <list>
 #include <map>
@@ -1234,6 +1236,23 @@ private:
             return {};
         }
 
+        // The conversion leaves an arbitrary uniform scale on the arc's
+        // weights (scaling every weight by one constant is the identity on
+        // a rational curve). Pin the end weights to exactly 1 so the arc
+        // sections agree with the unit-weight straight sections at the
+        // strip boundaries and the loft's chordwise weight function has no
+        // step where straight and ballooned spans meet.
+        const double endWeight = curve->Weight(1);
+        if (endWeight > 0.0) {
+            for (int poleIndex = 1;
+                 poleIndex <= curve->NbPoles();
+                 ++poleIndex) {
+                curve->SetWeight(
+                    poleIndex,
+                    curve->Weight(poleIndex) / endWeight);
+            }
+        }
+
         for (int poleIndex = 1;
              poleIndex <= curve->NbPoles();
              ++poleIndex) {
@@ -1246,6 +1265,221 @@ private:
                 start.Translated(offset));
         }
         return curve;
+    }
+
+    // Skins the span sections into a tensor-product surface that contains
+    // every section exactly: the sections are merged onto one shared
+    // degree and knot structure (degree elevation and knot insertion are
+    // exact), and their homogeneous poles are interpolated across the
+    // chord at the given parameters. GeomFill_NSections used to build
+    // this surface with a global least-squares fit in homogeneous space;
+    // where degree-1 straight spans meet rational ballooning arcs (at the
+    // trailing edge) its fitted weight function rang by about 1.5%,
+    // growing spanwise fins that scale with the distance from the model
+    // origin — worst at the wing tips and invisible to sampling at the
+    // stations themselves. Interpolated poles stay bounded by the pole
+    // data, so no such fins can appear.
+    static occ::handle<Geom_BSplineSurface> skinSections(
+        const std::vector<occ::handle<Geom_BSplineCurve>> &sections,
+        const NCollection_Sequence<double> &sectionParameters)
+    {
+        const int sectionCount = static_cast<int>(sections.size());
+        if (sectionCount < 2) {
+            return {};
+        }
+
+        int uDegree = 1;
+        bool rational = false;
+        for (const occ::handle<Geom_BSplineCurve> &section : sections) {
+            uDegree = std::max(uDegree, section->Degree());
+            rational = rational || section->IsRational();
+        }
+
+        // Unify to the common degree and the union of the normalized
+        // interior knots at each knot's maximum multiplicity.
+        constexpr double knotTolerance = 1.0e-9;
+        std::vector<occ::handle<Geom_BSplineCurve>> unified;
+        unified.reserve(sections.size());
+        std::vector<std::pair<double, int>> interiorKnots;
+        for (const occ::handle<Geom_BSplineCurve> &section : sections) {
+            occ::handle<Geom_BSplineCurve> copy =
+                occ::handle<Geom_BSplineCurve>::DownCast(section->Copy());
+            copy->IncreaseDegree(uDegree);
+            const double first = copy->FirstParameter();
+            const double range = copy->LastParameter() - first;
+            for (int knotIndex = 2;
+                 knotIndex < copy->NbKnots();
+                 ++knotIndex) {
+                const double knot =
+                    (copy->Knot(knotIndex) - first) / range;
+                const int multiplicity = copy->Multiplicity(knotIndex);
+                const auto match = std::find_if(
+                    interiorKnots.begin(),
+                    interiorKnots.end(),
+                    [&](const std::pair<double, int> &entry) {
+                        return std::abs(entry.first - knot)
+                               <= knotTolerance;
+                    });
+                if (match == interiorKnots.end()) {
+                    interiorKnots.emplace_back(knot, multiplicity);
+                } else {
+                    match->second =
+                        std::max(match->second, multiplicity);
+                }
+            }
+            unified.push_back(copy);
+        }
+        std::sort(interiorKnots.begin(), interiorKnots.end());
+        for (const occ::handle<Geom_BSplineCurve> &curve : unified) {
+            const double first = curve->FirstParameter();
+            const double range = curve->LastParameter() - first;
+            for (const auto &[knot, multiplicity] : interiorKnots) {
+                curve->InsertKnot(first + knot * range,
+                                  multiplicity,
+                                  knotTolerance * range);
+            }
+        }
+        const int uPoleCount = unified.front()->NbPoles();
+        for (const occ::handle<Geom_BSplineCurve> &curve : unified) {
+            if (curve->NbPoles() != uPoleCount) {
+                return {};
+            }
+        }
+
+        // Chordwise interpolation: clamped knots averaged from the
+        // parameters, satisfying Schoenberg-Whitney so the system below
+        // is solvable.
+        const int vDegree = std::min(3, sectionCount - 1);
+        NCollection_Array1<double> parameters(1, sectionCount);
+        for (int index = 1; index <= sectionCount; ++index) {
+            parameters.SetValue(index, sectionParameters.Value(index));
+        }
+        NCollection_Array1<double> flatKnots(1, sectionCount + vDegree + 1);
+        for (int index = 1; index <= vDegree + 1; ++index) {
+            flatKnots.SetValue(index, parameters.Value(1));
+            flatKnots.SetValue(sectionCount + index,
+                               parameters.Value(sectionCount));
+        }
+        for (int index = 1;
+             index <= sectionCount - vDegree - 1;
+             ++index) {
+            double sum = 0.0;
+            for (int offset = 1; offset <= vDegree; ++offset) {
+                sum += parameters.Value(index + offset);
+            }
+            flatKnots.SetValue(vDegree + 1 + index, sum / vDegree);
+        }
+
+        // One interpolation solve over all pole rows at once, on
+        // homogeneous (weighted) coordinates so rational sections are
+        // reproduced exactly.
+        const int pointDimension = rational ? 4 : 3;
+        const int rowDimension = uPoleCount * pointDimension;
+        NCollection_Array1<double> data(1, sectionCount * rowDimension);
+        for (int sectionIndex = 1;
+             sectionIndex <= sectionCount;
+             ++sectionIndex) {
+            const occ::handle<Geom_BSplineCurve> &curve =
+                unified[static_cast<std::size_t>(sectionIndex - 1)];
+            int slot = (sectionIndex - 1) * rowDimension + 1;
+            for (int poleIndex = 1;
+                 poleIndex <= uPoleCount;
+                 ++poleIndex) {
+                const gp_Pnt pole = curve->Pole(poleIndex);
+                const double weight =
+                    curve->IsRational() ? curve->Weight(poleIndex) : 1.0;
+                data.SetValue(slot++, pole.X() * weight);
+                data.SetValue(slot++, pole.Y() * weight);
+                data.SetValue(slot++, pole.Z() * weight);
+                if (rational) {
+                    data.SetValue(slot++, weight);
+                }
+            }
+        }
+        NCollection_Array1<int> contactOrder(1, sectionCount);
+        contactOrder.Init(0);
+        int inversionProblem = 0;
+        BSplCLib::Interpolate(vDegree,
+                              flatKnots,
+                              parameters,
+                              contactOrder,
+                              rowDimension,
+                              data.ChangeValue(1),
+                              inversionProblem);
+        if (inversionProblem != 0) {
+            return {};
+        }
+
+        NCollection_Array2<gp_Pnt> poles(1, uPoleCount, 1, sectionCount);
+        NCollection_Array2<double> weights(1, uPoleCount, 1, sectionCount);
+        for (int sectionIndex = 1;
+             sectionIndex <= sectionCount;
+             ++sectionIndex) {
+            int slot = (sectionIndex - 1) * rowDimension + 1;
+            for (int poleIndex = 1;
+                 poleIndex <= uPoleCount;
+                 ++poleIndex) {
+                const double x = data.Value(slot);
+                const double y = data.Value(slot + 1);
+                const double z = data.Value(slot + 2);
+                const double weight =
+                    rational ? data.Value(slot + 3) : 1.0;
+                slot += pointDimension;
+                if (weight <= Precision::Confusion()) {
+                    return {};
+                }
+                poles.SetValue(poleIndex,
+                               sectionIndex,
+                               gp_Pnt(x / weight, y / weight, z / weight));
+                weights.SetValue(poleIndex, sectionIndex, weight);
+            }
+        }
+
+        NCollection_Array1<double> uKnots(
+            1, static_cast<int>(interiorKnots.size()) + 2);
+        NCollection_Array1<int> uMults(
+            1, static_cast<int>(interiorKnots.size()) + 2);
+        uKnots.SetValue(1, 0.0);
+        uMults.SetValue(1, uDegree + 1);
+        for (int index = 0;
+             index < static_cast<int>(interiorKnots.size());
+             ++index) {
+            uKnots.SetValue(index + 2, interiorKnots[index].first);
+            uMults.SetValue(index + 2, interiorKnots[index].second);
+        }
+        uKnots.SetValue(uKnots.Upper(), 1.0);
+        uMults.SetValue(uMults.Upper(), uDegree + 1);
+
+        const int interiorVCount = sectionCount - vDegree - 1;
+        NCollection_Array1<double> vKnots(1, interiorVCount + 2);
+        NCollection_Array1<int> vMults(1, interiorVCount + 2);
+        vKnots.SetValue(1, parameters.Value(1));
+        vMults.SetValue(1, vDegree + 1);
+        for (int index = 1; index <= interiorVCount; ++index) {
+            vKnots.SetValue(index + 1,
+                            flatKnots.Value(vDegree + 1 + index));
+            vMults.SetValue(index + 1, 1);
+        }
+        vKnots.SetValue(vKnots.Upper(), parameters.Value(sectionCount));
+        vMults.SetValue(vMults.Upper(), vDegree + 1);
+
+        if (rational) {
+            return new Geom_BSplineSurface(poles,
+                                           weights,
+                                           uKnots,
+                                           vKnots,
+                                           uMults,
+                                           vMults,
+                                           uDegree,
+                                           vDegree);
+        }
+        return new Geom_BSplineSurface(poles,
+                                       uKnots,
+                                       vKnots,
+                                       uMults,
+                                       vMults,
+                                       uDegree,
+                                       vDegree);
     }
 
     void addRegion(const SourcePanel &source,
@@ -1275,7 +1509,8 @@ private:
         const int chordPointCount = lastPoint - firstPoint + 1;
 
         try {
-            NCollection_Sequence<occ::handle<Geom_Curve>> sections;
+            std::vector<occ::handle<Geom_BSplineCurve>> sections;
+            sections.reserve(static_cast<std::size_t>(chordPointCount));
             NCollection_Sequence<double> sectionParameters;
 
             for (int pointIndex = firstPoint;
@@ -1301,7 +1536,7 @@ private:
                         + std::to_string(panelIndex));
                     return;
                 }
-                sections.Append(curve);
+                sections.push_back(curve);
                 // Point correspondence is established by the legacy remap
                 // stage. Keeping this canonical parameter on every panel
                 // makes adjacent lofts share the same airfoil boundary curve,
@@ -1310,11 +1545,16 @@ private:
                     static_cast<double>(pointIndex - firstPoint));
             }
 
-            GeomFill_NSections loft(
-                sections,
-                sectionParameters);
             const occ::handle<Geom_BSplineSurface> surface =
-                loft.BSplineSurface();
+                skinSections(sections, sectionParameters);
+            if (!surface.IsNull()) {
+                debugDumpPanel(source,
+                               surface,
+                               panelIndex,
+                               firstPoint,
+                               lastPoint,
+                               regionName);
+            }
             if (surface.IsNull()) {
                 errors_.push_back(
                     "Could not loft the source "
@@ -1391,6 +1631,76 @@ private:
         }
     }
 
+    // Diagnostic: set LEP_DEBUG_PANEL to a comma-separated list of panel
+    // indices to dump each region's section curves (span length, shaping
+    // height, pole structure, weights) and the lofted surface's rib-side
+    // boundary pole row to stderr. This is how the v0.2.2 trailing-edge
+    // fin artifact was isolated.
+    void debugDumpPanel(const SourcePanel &source,
+                        const occ::handle<Geom_BSplineSurface> &surface,
+                        int panelIndex,
+                        int firstPoint,
+                        int lastPoint,
+                        const char *regionName) const
+    {
+        const char *debugPanels = std::getenv("LEP_DEBUG_PANEL");
+        if (debugPanels == nullptr) {
+            return;
+        }
+        const std::string padded = "," + std::string(debugPanels) + ",";
+        if (padded.find("," + std::to_string(panelIndex) + ",")
+            == std::string::npos) {
+            return;
+        }
+        std::ostringstream dump;
+        dump << "=== panel " << panelIndex << " region " << regionName
+             << " points " << firstPoint << ".." << lastPoint << "\n";
+        for (int pointIndex = firstPoint;
+             pointIndex <= lastPoint;
+             ++pointIndex) {
+            const gp_Pnt start =
+                sourceControlPoint(source, panelIndex, pointIndex, 47);
+            const gp_Pnt end =
+                sourceControlPoint(source, panelIndex - 1, pointIndex, 47);
+            const double spanLength = start.Distance(end);
+            const double height = sourceShapingHeight(source, pointIndex);
+            const occ::handle<Geom_BSplineCurve> section =
+                makeSourceSpanCurve(source, pointIndex);
+            dump << "j=" << pointIndex
+                 << " L=" << spanLength
+                 << " h=" << height;
+            if (!section.IsNull()) {
+                dump << " poles=" << section->NbPoles()
+                     << " deg=" << section->Degree()
+                     << " rational=" << (section->IsRational() ? 1 : 0)
+                     << " knots=" << section->NbKnots();
+                if (pointIndex - firstPoint < 8) {
+                    dump << " w=[";
+                    for (int poleIndex = 1;
+                         poleIndex <= section->NbPoles();
+                         ++poleIndex) {
+                        dump << (poleIndex > 1 ? " " : "")
+                             << section->Weight(poleIndex);
+                    }
+                    dump << "]";
+                }
+            }
+            dump << " start=(" << start.X() << ',' << start.Y() << ','
+                 << start.Z() << ")\n";
+        }
+        dump << "surface uPoles=" << surface->NbUPoles()
+             << " vPoles=" << surface->NbVPoles()
+             << " uDeg=" << surface->UDegree()
+             << " vDeg=" << surface->VDegree() << "\n";
+        for (int vPole = 1; vPole <= surface->NbVPoles(); ++vPole) {
+            const gp_Pnt pole = surface->Pole(1, vPole);
+            dump << "  bpole " << vPole << " (" << pole.X() << ','
+                 << pole.Y() << ',' << pole.Z() << ") w="
+                 << surface->Weight(1, vPole) << "\n";
+        }
+        std::cerr << dump.str();
+    }
+
     void validateSourceSurface(
         const SourcePanel &source,
         const occ::handle<Geom_BSplineSurface> &surface,
@@ -1461,6 +1771,66 @@ private:
                     << regionSourceDeviation << " mm";
             errors_.push_back(message.str());
             return;
+        }
+
+        // The loft is law-constrained only AT the chord stations; between
+        // them it is free, which is exactly where an ill-behaved fit can
+        // grow artifacts that station sampling cannot see. Bound the
+        // mid-station surface against the midpoint of the neighbouring law
+        // points: legitimate inter-station behaviour stays within one
+        // station spacing plus the local ballooning-height crease (the law
+        // may drop its shaping height discontinuously, e.g. at an air
+        // intake lip, and a smooth loft must absorb that step locally).
+        const auto effectiveHeight = [&](int pointIndex) {
+            const double height = sourceShapingHeight(source, pointIndex);
+            return height >= 0.01 * millimetresPerCentimetre ? height : 0.0;
+        };
+        for (int pointIndex = firstPoint;
+             pointIndex < lastPoint;
+             ++pointIndex) {
+            const int curveIndex = pointIndex - firstPoint;
+            const double vMid =
+                0.5
+                * (sectionParameters.Value(curveIndex + 1)
+                   + sectionParameters.Value(curveIndex + 2));
+            // A crease rings the interpolant over its neighbouring
+            // intervals too, so measure the largest height step in a
+            // one-interval neighbourhood.
+            double heightStep = 0.0;
+            for (int neighbour = std::max(firstPoint, pointIndex - 1);
+                 neighbour <= std::min(lastPoint - 1, pointIndex + 1);
+                 ++neighbour) {
+                heightStep =
+                    std::max(heightStep,
+                             std::abs(effectiveHeight(neighbour)
+                                      - effectiveHeight(neighbour + 1)));
+            }
+            for (int sample = 0; sample <= 4; ++sample) {
+                const double spanParameter = sample / 4.0;
+                const gp_Pnt nearLaw =
+                    sourceShapePoint(source, pointIndex, spanParameter);
+                const gp_Pnt farLaw =
+                    sourceShapePoint(source, pointIndex + 1, spanParameter);
+                const gp_Pnt midpoint(
+                    (nearLaw.XYZ() + farLaw.XYZ()) * 0.5);
+                const gp_Pnt actual =
+                    surface->Value(
+                        uFirst + (uLast - uFirst) * spanParameter,
+                        vMid);
+                const double allowance =
+                    nearLaw.Distance(farLaw) + heightStep + 1.0;
+                if (actual.Distance(midpoint) > allowance) {
+                    std::ostringstream message;
+                    message << "The " << regionName
+                            << " NURBS loft for panel " << panelIndex
+                            << " bulges "
+                            << actual.Distance(midpoint)
+                            << " mm between chord stations "
+                            << pointIndex << " and " << pointIndex + 1;
+                    errors_.push_back(message.str());
+                    return;
+                }
+            }
         }
 
         double legacyDeviation = 0.0;
