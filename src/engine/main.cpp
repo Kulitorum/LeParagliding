@@ -165,6 +165,16 @@ int runEngine(const std::filesystem::path &inputArgument,
             << step.maximumLegacyAgreementMillimetres << " mm\n"
             << (preview ? "Preview model: " : "STEP model: ")
             << pathToUtf8(output / modelFileName) << '\n';
+
+        // Companion mesh for the Studio's Playground simulation; losing it
+        // never fails the calculation.
+        std::string simError;
+        if (lep::writeSimMesh(output / "lep-sim.json", simError)) {
+            std::cout << "Playground mesh: "
+                      << pathToUtf8(output / "lep-sim.json") << '\n';
+        } else {
+            std::cerr << "Playground mesh warning: " << simError << '\n';
+        }
         return result;
     } catch (const std::exception &exception) {
         std::cerr << "Engine error: " << exception.what() << '\n';

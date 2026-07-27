@@ -59,16 +59,21 @@
 #include <gp_XY.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <exception>
+#include <limits>
 #include <list>
 #include <map>
 #include <numbers>
+#include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -237,6 +242,19 @@ struct SourcePanel
     const double *legacyTessellation = nullptr;
     int panelIndex = 0;
     int segmentCount = 0;
+};
+
+// One skin region of one panel, sampled coarsely on the exact ballooning
+// law for the Playground simulation mesh: a row per kept chordwise
+// station, spanColumnCount samples across the cell. Rows keep their
+// legacy station index so rib loops and neighbouring panels weld on
+// identical stations.
+constexpr int simSpanColumnCount = 5;
+struct SimRegionCapture
+{
+    int panelIndex = 0;
+    std::vector<int> stations;
+    std::vector<std::array<gp_Pnt, simSpanColumnCount>> rows;
 };
 
 struct PanelSurface
@@ -597,6 +615,7 @@ public:
         capturedRibs_.clear();
         capturedLines_.clear();
         capturedStrips_.clear();
+        simRegions_.clear();
         errors_.clear();
         warnings_.clear();
         captureLines_ = false;
@@ -673,6 +692,25 @@ public:
                       ventLast,
                       totalPointCount,
                       Region::Intrados);
+        }
+
+        // Coarse skin samples for the Playground simulation mesh. Unlike
+        // the STEP model, the vent wall is always captured: the toy
+        // stamps a uniform pressure difference per face, so open intakes
+        // would both leave flapping rims and give the closed-surface
+        // pressure field a spurious net thrust through the hole.
+        captureSimRegion(source, panelIndex, 1, upperPointCount, 16);
+        captureSimRegion(source,
+                         panelIndex,
+                         upperPointCount,
+                         ventLast,
+                         3);
+        if (!singleSkin && ventLast < totalPointCount) {
+            captureSimRegion(source,
+                             panelIndex,
+                             ventLast,
+                             totalPointCount,
+                             12);
         }
     }
 
@@ -1699,6 +1737,59 @@ private:
                  << surface->Weight(1, vPole) << "\n";
         }
         std::cerr << dump.str();
+    }
+
+    // Samples one skin region on the exact ballooning law at a decimated
+    // set of chordwise stations for the Playground simulation mesh. The
+    // station selection is deterministic from the region bounds, so
+    // neighbouring panels with equal point tables produce bit-identical
+    // rib columns and weld in the exporter.
+    void captureSimRegion(const SourcePanel &source,
+                          int panelIndex,
+                          int firstPoint,
+                          int lastPoint,
+                          int targetRows)
+    {
+        const int stationCount = lastPoint - firstPoint + 1;
+        if (stationCount < 2) {
+            return;
+        }
+        const int stride =
+            std::max(1, stationCount / std::max(2, targetRows));
+
+        SimRegionCapture capture;
+        capture.panelIndex = panelIndex;
+        try {
+            for (int station = firstPoint;
+                 station <= lastPoint;
+                 station += stride) {
+                // Always land exactly on the region boundary so adjacent
+                // regions share their junction station.
+                const int kept =
+                    station + stride > lastPoint ? lastPoint : station;
+                std::array<gp_Pnt, simSpanColumnCount> row;
+                for (int column = 0; column < simSpanColumnCount; ++column) {
+                    const double spanParameter =
+                        static_cast<double>(column)
+                        / (simSpanColumnCount - 1);
+                    row[column] =
+                        sourceShapePoint(source, kept, spanParameter);
+                    if (!isFinite(row[column])) {
+                        return;
+                    }
+                }
+                capture.stations.push_back(kept);
+                capture.rows.push_back(row);
+                if (kept == lastPoint) {
+                    break;
+                }
+            }
+        } catch (const Standard_Failure &) {
+            return;
+        }
+        if (capture.rows.size() >= 2) {
+            simRegions_.push_back(std::move(capture));
+        }
     }
 
     void validateSourceSurface(
@@ -3364,10 +3455,248 @@ private:
         }
     }
 
+public:
+    // Writes the Playground simulation mesh: the coarse skin samples of
+    // both wing halves welded into one node table, quad connectivity per
+    // region, rib outline loops for internal webs, and the labelled
+    // suspension lines. Everything is in millimetres, Z up, matching the
+    // STEP model.
+    bool writeSimMesh(const std::filesystem::path &path,
+                      std::string &error) const
+    {
+        if (simRegions_.empty()) {
+            error = "No simulation skin was captured";
+            return false;
+        }
+
+        std::vector<gp_Pnt> nodes;
+        std::unordered_map<QuantizedPoint, int, QuantizedPointHash> welded;
+        const auto nodeIndex = [&](const gp_Pnt &point, bool mirror) {
+            // The centre rib lands within float residue of the symmetry
+            // plane (~0.1 mm); snap it on so the mirrored half welds to
+            // the right half instead of floating 0.2 mm away from it.
+            const double snappedX =
+                std::abs(point.X()) < 0.5 ? 0.0 : point.X();
+            const gp_Pnt placed(mirror ? -snappedX : snappedX,
+                                point.Y(),
+                                point.Z());
+            const auto [entry, inserted] =
+                welded.try_emplace(quantize(placed),
+                                   static_cast<int>(nodes.size()));
+            if (inserted) {
+                nodes.push_back(placed);
+            }
+            return entry->second;
+        };
+
+        std::vector<std::array<int, 4>> quads;
+        // Rib outline loops keyed by (ribIndex, mirrored side), assembled
+        // from the regions' rib-side sample columns in station order.
+        std::map<std::pair<int, bool>, std::vector<std::pair<int, int>>>
+            ribColumns;
+
+        for (const SimRegionCapture &region : simRegions_) {
+            for (const bool mirror : {false, true}) {
+                // Panel 1 spans rib 0..rib 1, and rib 0 is rib 1 mirrored
+                // by construction, so on odd-cell wings the panel is its
+                // own mirror image; emitting the mirrored copy would lay
+                // duplicate faces over it.
+                if (mirror && region.panelIndex == 1) {
+                    continue;
+                }
+                std::vector<std::array<int, simSpanColumnCount>> grid;
+                grid.reserve(region.rows.size());
+                for (const auto &row : region.rows) {
+                    std::array<int, simSpanColumnCount> ids{};
+                    for (int column = 0;
+                         column < simSpanColumnCount;
+                         ++column) {
+                        ids[column] = nodeIndex(row[column], mirror);
+                    }
+                    grid.push_back(ids);
+                }
+                for (std::size_t rowIndex = 0;
+                     rowIndex + 1 < grid.size();
+                     ++rowIndex) {
+                    for (int column = 0;
+                         column + 1 < simSpanColumnCount;
+                         ++column) {
+                        quads.push_back({grid[rowIndex][column],
+                                         grid[rowIndex][column + 1],
+                                         grid[rowIndex + 1][column + 1],
+                                         grid[rowIndex + 1][column]});
+                    }
+                }
+                // Span column 0 lies on rib panelIndex, the last column on
+                // rib panelIndex-1; only the innermost panel contributes
+                // the latter (every other rib is some panel's column 0).
+                for (std::size_t rowIndex = 0;
+                     rowIndex < grid.size();
+                     ++rowIndex) {
+                    ribColumns[{region.panelIndex, mirror}].emplace_back(
+                        region.stations[rowIndex], grid[rowIndex][0]);
+                    if (region.panelIndex == 1) {
+                        ribColumns[{0, mirror}].emplace_back(
+                            region.stations[rowIndex],
+                            grid[rowIndex][simSpanColumnCount - 1]);
+                    }
+                }
+            }
+        }
+
+        std::vector<std::vector<int>> ribLoops;
+        std::set<std::vector<int>> uniqueLoops;
+        for (auto &[key, column] : ribColumns) {
+            std::stable_sort(column.begin(),
+                             column.end(),
+                             [](const auto &a, const auto &b) {
+                                 return a.first < b.first;
+                             });
+            std::vector<int> loop;
+            for (const auto &[station, node] : column) {
+                if (loop.empty() || loop.back() != node) {
+                    loop.push_back(node);
+                }
+            }
+            // The mirrored centre rib welds onto the unmirrored one; keep
+            // one copy of each distinct loop.
+            if (loop.size() >= 3 && uniqueLoops.insert(loop).second) {
+                ribLoops.push_back(std::move(loop));
+            }
+        }
+
+        const auto escaped = [](const std::string &text) {
+            std::string result;
+            for (const char character : text) {
+                if (character == '"' || character == '\\') {
+                    result.push_back('\\');
+                }
+                result.push_back(character);
+            }
+            return result;
+        };
+
+        std::ostringstream json;
+        json.setf(std::ios::fixed);
+        json.precision(3);
+        json << "{\n\"version\": 1,\n\"unit\": \"mm\",\n\"nodes\": [";
+        for (std::size_t index = 0; index < nodes.size(); ++index) {
+            json << (index == 0 ? "\n" : ",\n")
+                 << '[' << nodes[index].X() << ',' << nodes[index].Y()
+                 << ',' << nodes[index].Z() << ']';
+        }
+        json << "\n],\n\"quads\": [";
+        for (std::size_t index = 0; index < quads.size(); ++index) {
+            const auto &quad = quads[index];
+            json << (index == 0 ? "\n" : ",\n")
+                 << '[' << quad[0] << ',' << quad[1] << ',' << quad[2]
+                 << ',' << quad[3] << ']';
+        }
+        json << "\n],\n\"ribLoops\": [";
+        for (std::size_t index = 0; index < ribLoops.size(); ++index) {
+            json << (index == 0 ? "\n" : ",\n") << '[';
+            for (std::size_t node = 0;
+                 node < ribLoops[index].size();
+                 ++node) {
+                json << (node == 0 ? "" : ",") << ribLoops[index][node];
+            }
+            json << ']';
+        }
+        // Internal diagonal/mini-rib sheets as paired sample rows: the
+        // Playground ties each pair together so line load spreads across
+        // ribs the way the real V-ribs make it.
+        json << "\n],\n\"straps\": [";
+        bool firstStrap = true;
+        for (const CapturedStrip &strip : capturedStrips_) {
+            if (strip.curveA.size() < 2 || strip.curveB.size() < 2) {
+                continue;
+            }
+            constexpr int strapSamples = 6;
+            const auto sampleAt = [](const std::vector<gp_Pnt> &curve,
+                                     int index) {
+                const std::size_t position =
+                    static_cast<std::size_t>(
+                        std::llround(static_cast<double>(index)
+                                     * (curve.size() - 1)
+                                     / (strapSamples - 1)));
+                return curve[position];
+            };
+            // A strip lying symmetric on the centre plane is its own
+            // mirror image.
+            double minX = std::numeric_limits<double>::max();
+            double maxX = std::numeric_limits<double>::lowest();
+            for (const gp_Pnt &point : strip.curveA) {
+                minX = std::min(minX, point.X());
+                maxX = std::max(maxX, point.X());
+            }
+            const bool selfMirrored = std::abs(minX + maxX) < 0.5;
+            for (const bool mirror : {false, true}) {
+                if (mirror && selfMirrored) {
+                    continue;
+                }
+                const double sign = mirror ? -1.0 : 1.0;
+                json << (firstStrap ? "\n" : ",\n") << "{\"a\":[";
+                for (int index = 0; index < strapSamples; ++index) {
+                    const gp_Pnt point = sampleAt(strip.curveA, index);
+                    json << (index == 0 ? "" : ",") << '['
+                         << sign * point.X() << ',' << point.Y() << ','
+                         << point.Z() << ']';
+                }
+                json << "],\"b\":[";
+                for (int index = 0; index < strapSamples; ++index) {
+                    const gp_Pnt point = sampleAt(strip.curveB, index);
+                    json << (index == 0 ? "" : ",") << '['
+                         << sign * point.X() << ',' << point.Y() << ','
+                         << point.Z() << ']';
+                }
+                json << "]}";
+                firstStrap = false;
+            }
+        }
+
+        json << "\n],\n\"lines\": [";
+        bool firstLine = true;
+        for (const CapturedLine &line : capturedLines_) {
+            const bool onCentre =
+                std::abs(line.start.X()) < 0.05
+                && std::abs(line.end.X()) < 0.05;
+            for (const bool mirror : {false, true}) {
+                if (mirror && onCentre) {
+                    continue;
+                }
+                const double sign = mirror ? -1.0 : 1.0;
+                json << (firstLine ? "\n" : ",\n")
+                     << "{\"a\":[" << sign * line.start.X() << ','
+                     << line.start.Y() << ',' << line.start.Z()
+                     << "],\"b\":[" << sign * line.end.X() << ','
+                     << line.end.Y() << ',' << line.end.Z()
+                     << "],\"label\":\"" << escaped(line.label)
+                     << "\",\"plan\":" << line.planIndex
+                     << ",\"brake\":" << (line.brake ? 1 : 0) << '}';
+                firstLine = false;
+            }
+        }
+        json << "\n]\n}\n";
+
+        std::ofstream file(path, std::ios::binary);
+        if (!file) {
+            error = "Could not open " + path.string() + " for writing";
+            return false;
+        }
+        file << json.str();
+        if (!file) {
+            error = "Could not write " + path.string();
+            return false;
+        }
+        return true;
+    }
+
+private:
     std::vector<PanelSurface> panels_;
     std::map<int, CapturedRib> capturedRibs_;
     std::vector<CapturedLine> capturedLines_;
     std::vector<CapturedStrip> capturedStrips_;
+    std::vector<SimRegionCapture> simRegions_;
     mutable std::vector<std::string> errors_;
     mutable std::vector<std::string> warnings_;
     bool captureLines_ = false;
@@ -3395,6 +3724,11 @@ NurbsWriteResult writeNurbsStep(const std::filesystem::path &path,
                                 bool includeConstructionCurves)
 {
     return model().writeStep(path, includeConstructionCurves);
+}
+
+bool writeSimMesh(const std::filesystem::path &path, std::string &error)
+{
+    return model().writeSimMesh(path, error);
 }
 
 } // namespace lep

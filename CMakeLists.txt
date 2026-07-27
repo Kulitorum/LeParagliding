@@ -170,6 +170,27 @@ else()
     endif()
 endif()
 
+# Vendored SoftWingLab XPBD physics core (src/softwing, see its README.md
+# for provenance): dependency-free soft-body/membrane/pneumatics/suspension
+# simulation used by the Playground tab's toy live-wing model.
+add_library(softwing_core STATIC
+    src/softwing/canopy.cpp
+    src/softwing/contact.cpp
+    src/softwing/membrane.cpp
+    src/softwing/parallel.cpp
+    src/softwing/pneumatics.cpp
+    src/softwing/soft_body.cpp
+    src/softwing/suspension.cpp
+)
+target_include_directories(softwing_core PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/softwing/include"
+)
+if(MSVC)
+    target_compile_options(softwing_core PRIVATE /W0 /bigobj)
+else()
+    target_compile_options(softwing_core PRIVATE -w)
+endif()
+
 # Vendored XFLR5 v6.62 (third_party/xflr5, see PROVENANCE.md): the XFoil
 # solver library plus the complete xflr5v6 application compiled as a static
 # library. The GUI hosts XFLR5's MainFrame in a tab; XFLR5's own
@@ -328,6 +349,8 @@ qt_add_executable(LEparagliding WIN32
     src/gui/panel_undo.h
     src/gui/paraglider_view.cpp
     src/gui/paraglider_view.h
+    src/gui/playground_page.cpp
+    src/gui/playground_page.h
     src/gui/preset_catalog.cpp
     src/gui/preset_catalog.h
     src/gui/section1_curve_panel.cpp
@@ -348,7 +371,8 @@ qt_add_executable(LEparagliding WIN32
     ${XFLR5_RESOURCES}
 )
 set_target_properties(LEparagliding PROPERTIES AUTORCC ON AUTOMOC ON)
-target_link_libraries(LEparagliding PRIVATE Qt6::Widgets lep_occt xflr5core)
+target_link_libraries(LEparagliding PRIVATE
+    Qt6::Widgets Qt6::OpenGLWidgets lep_occt xflr5core softwing_core)
 add_dependencies(LEparagliding leparagliding-engine)
 
 # Wing presets from laboratoridenvol.com: shipped with the executable so the

@@ -5,6 +5,7 @@
 #include "grid_curve_panel.h"
 #include "holes_panel.h"
 #include "paraglider_view.h"
+#include "playground_page.h"
 #include "section1_curve_panel.h"
 #include "section_help.h"
 #include "section_specs.h"
@@ -791,6 +792,9 @@ void MainWindow::buildInterface()
     xflr5Layout->setSpacing(0);
     workspaceTabs_->addTab(xflr5Page_, QStringLiteral("Aerodynamics (XFLR5)"));
 
+    playgroundPage_ = new PlaygroundPage(workspaceTabs_);
+    workspaceTabs_->addTab(playgroundPage_, QStringLiteral("Playground"));
+
     // Floating busy card so the tab does not look dead while XFLR5 boots or
     // a wing transfer runs the engine. Positioned by repositionXflr5Busy(),
     // kept centered via the event filter on xflr5Page_.
@@ -814,7 +818,14 @@ void MainWindow::buildInterface()
     // XFLR5 boots ~170k lines of application state; defer it until the tab
     // is first opened so startup and the smoke tests stay fast. Entering the
     // tab also transfers the current wing if it changed since the last one.
-    connect(workspaceTabs_, &QTabWidget::currentChanged, this, [this](int index) {
+    // The OCCT viewport is a native child window and native windows can
+    // stack above the GL-composited pages of other tabs, so it is hidden
+    // explicitly whenever the Design tab is not current.
+    connect(workspaceTabs_,
+            &QTabWidget::currentChanged,
+            this,
+            [this, central](int index) {
+        viewport_->setVisible(workspaceTabs_->widget(index) == central);
         if (workspaceTabs_->widget(index) == xflr5Page_) {
             initializeXflr5Tab();
             maybeTransferWingToXflr5();
@@ -2540,6 +2551,12 @@ QString exitCodeText(int exitCode)
 
 } // namespace
 
+void MainWindow::showPlaygroundTab(const QString &simMeshPath)
+{
+    playgroundPage_->setSimMeshPath(simMeshPath);
+    workspaceTabs_->setCurrentWidget(playgroundPage_);
+}
+
 void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     appendProcessOutput();
@@ -2553,6 +2570,12 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
                 : QStringLiteral("lep-3d.step"));
     const bool engineSucceeded =
         exitStatus == QProcess::NormalExit && exitCode == 0;
+
+    const QString simMeshPath =
+        QDir(completedOutput).filePath(QStringLiteral("lep-sim.json"));
+    if (engineSucceeded && QFileInfo::exists(simMeshPath)) {
+        playgroundPage_->setSimMeshPath(simMeshPath);
+    }
 
     if (completedMode == CalculationMode::Preview) {
         const bool success =

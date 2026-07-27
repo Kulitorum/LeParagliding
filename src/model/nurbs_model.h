@@ -31,6 +31,12 @@ void resetNurbsModel();
 NurbsWriteResult writeNurbsStep(const std::filesystem::path &path,
                                 bool includeConstructionCurves = true);
 
+// Writes the coarse Playground simulation mesh (welded full-wing skin
+// quads sampled from the ballooning law, rib outline loops, labelled
+// suspension lines) as JSON. Millimetres, Z up. Returns false and sets
+// error if nothing was captured or the file cannot be written.
+bool writeSimMesh(const std::filesystem::path &path, std::string &error);
+
 } // namespace lep
 
 // Narrow C ABI used by the mechanically translated calculation core. The

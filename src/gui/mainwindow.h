@@ -32,6 +32,7 @@ class QTreeWidgetItem;
 class QTemporaryDir;
 class ParagliderView;
 class MainFrame; // XFLR5's main window (third_party/xflr5), hosted as a tab
+class PlaygroundPage;
 
 class MainWindow final : public QMainWindow
 {
@@ -43,6 +44,11 @@ public:
     // MainFrame on first use. Public for --xflr5 and the smoke test, which
     // passes transferWing = false to avoid spawning an engine run.
     void showXflr5Tab(bool transferWing = true);
+
+    // Switches to the Playground tab with the given lep-sim.json loaded.
+    // Public for the --playground flag, which exists so the live-wing view
+    // can be exercised without clicking through a calculation.
+    void showPlaygroundTab(const QString &simMeshPath);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -145,6 +151,7 @@ private:
     QTreeWidget *outputTree_ = nullptr;
     QTabWidget *diagnosticsTabs_ = nullptr;
     QTabWidget *workspaceTabs_ = nullptr;
+    PlaygroundPage *playgroundPage_ = nullptr;
     QWidget *xflr5Page_ = nullptr;
     MainFrame *xflr5Frame_ = nullptr;
     QByteArray xflr5TransferredHash_;

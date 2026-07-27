@@ -591,6 +591,12 @@ int main(int argc, char *argv[])
         QStringLiteral("xflr5"),
         QStringLiteral("Open on the Aerodynamics (XFLR5) tab."));
     parser.addOption(xflr5Tab);
+    QCommandLineOption playgroundTab(
+        QStringLiteral("playground"),
+        QStringLiteral("Open on the Playground tab with the given "
+                       "lep-sim.json loaded."),
+        QStringLiteral("sim-mesh"));
+    parser.addOption(playgroundTab);
     parser.addPositionalArgument(
         QStringLiteral("studio-files"),
         QStringLiteral("Design file used by --studio-self-test, or presets "
@@ -616,6 +622,9 @@ int main(int argc, char *argv[])
 
     if (parser.isSet(xflr5Tab)) {
         window.showXflr5Tab();
+    }
+    if (parser.isSet(playgroundTab)) {
+        window.showPlaygroundTab(parser.value(playgroundTab));
     }
     window.show();
     return application.exec();
