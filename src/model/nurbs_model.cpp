@@ -12,6 +12,7 @@
 #include <BRep_Tool.hxx>
 #include <BinXCAFDrivers.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GeomAPI_Interpolate.hxx>
 #include <GeomConvert.hxx>
 #include <GeomFill_NSections.hxx>
 #include <Geom_BSplineCurve.hxx>
@@ -20,6 +21,8 @@
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
 #include <NCollection_Array1.hxx>
+#include <NCollection_Array2.hxx>
+#include <NCollection_HArray1.hxx>
 #include <NCollection_Sequence.hxx>
 #include <OSD_Parallel.hxx>
 #include <PCDM_StoreStatus.hxx>
@@ -101,6 +104,7 @@ constexpr const char *ribsGroupName = "Ribs";
 constexpr const char *linesGroupName = "Lines";
 constexpr const char *brakeGroupName = "Brake lines";
 constexpr const char *diagonalsGroupName = "Diagonals";
+constexpr const char *miniribsGroupName = "Mini-ribs";
 constexpr const char *otherCurvesName = "Other curves";
 constexpr const char *rightSideName = "Right";
 constexpr const char *leftSideName = "Left";
@@ -206,8 +210,20 @@ struct CapturedLine
     int colorIndex = 0;
     int planIndex = 0;
     bool brake = false;
-    std::string group;
     std::string label;
+};
+
+// A diagonal-rib or mini-rib sheet, captured as its two boundary polylines.
+// Matching sample counts are in exact rung correspondence: sample j of
+// curveA pairs with sample j of curveB, and the writer spans an exact ruled
+// surface through every rung. Mini-rib boundaries have independent counts
+// and are paired proportionally instead.
+struct CapturedStrip
+{
+    bool minirib = false;
+    std::string label;
+    std::vector<gp_Pnt> curveA;
+    std::vector<gp_Pnt> curveB;
 };
 
 struct SourcePanel
@@ -578,6 +594,7 @@ public:
         panels_.clear();
         capturedRibs_.clear();
         capturedLines_.clear();
+        capturedStrips_.clear();
         errors_.clear();
         warnings_.clear();
         captureLines_ = false;
@@ -745,7 +762,6 @@ public:
         }
         line.planIndex = currentLineTag_.planIndex;
         line.brake = currentLineTag_.brake;
-        line.group = currentLineTag_.group;
         line.label = currentLineTag_.label;
         capturedLines_.push_back(std::move(line));
     }
@@ -786,21 +802,165 @@ public:
         currentLineTag_.label = std::move(title);
         currentLineTag_.planIndex = std::clamp(planIndex, 0, 6);
         currentLineTag_.brake = brake;
-        currentLineTag_.group.clear();
     }
 
-    void tagDiagonal(const char *kind, int kindLength, int index)
+    void captureDiagonalStrip(const char *kind,
+                              int kindLength,
+                              int index,
+                              const double *xA,
+                              const double *yA,
+                              const double *zA,
+                              const double *xB,
+                              const double *yB,
+                              const double *zB,
+                              int pointCount,
+                              int stride)
     {
-        currentLineTag_ = {};
-        currentLineTag_.group = diagonalsGroupName;
-        currentLineTag_.label =
-            (kind != nullptr && kindLength > 0
-                 ? trimmedLabel(kind, kindLength)
-                 : std::string("Diagonal"))
-            + " " + std::to_string(index);
+        if (xA == nullptr || yA == nullptr || zA == nullptr
+            || xB == nullptr || yB == nullptr || zB == nullptr
+            || pointCount < 2 || stride < 1) {
+            return;
+        }
+        CapturedStrip strip;
+        strip.label = (kind != nullptr && kindLength > 0
+                           ? trimmedLabel(kind, kindLength)
+                           : std::string("Diagonal"))
+                      + " " + std::to_string(index);
+        strip.curveA.reserve(pointCount);
+        strip.curveB.reserve(pointCount);
+        for (int sample = 0; sample < pointCount; ++sample) {
+            const int offset = sample * stride;
+            const gp_Pnt a =
+                modelPoint(xA[offset], yA[offset], zA[offset]);
+            const gp_Pnt b =
+                modelPoint(xB[offset], yB[offset], zB[offset]);
+            if (!isFinite(a) || !isFinite(b)) {
+                return;
+            }
+            strip.curveA.push_back(a);
+            strip.curveB.push_back(b);
+        }
+        capturedStrips_.push_back(std::move(strip));
     }
 
-    lep::NurbsWriteResult writeStep(const std::filesystem::path &path)
+    void captureMiniribs(const double *x,
+                         const double *y,
+                         const double *z,
+                         const int *np,
+                         const double *rib,
+                         int ribCount,
+                         bool singleSkin)
+    {
+        if (x == nullptr || y == nullptr || z == nullptr || np == nullptr
+            || rib == nullptr || singleSkin) {
+            return;
+        }
+        // The legacy arrays keep their f2c layouts: x/y/z and rib are
+        // Fortran (0:100,500) matrices, np is (0:100,9), all column-major
+        // with 101 rows. Station 0 already holds the mirrored first rib.
+        const auto midPoint = [&](int station, int j) {
+            const int offset = station + (j - 1) * 101;
+            return modelPoint(0.5 * (x[offset - 1] + x[offset]),
+                              0.5 * (y[offset - 1] + y[offset]),
+                              0.5 * (z[offset - 1] + z[offset]));
+        };
+        const auto ribValue = [&](int station, int column) {
+            return rib[station + (column - 1) * 101];
+        };
+        for (int i = 1; i <= std::min(ribCount, 100); ++i) {
+            const double percent = ribValue(i, 56);
+            if (percent <= 1.0) {
+                continue;
+            }
+            const int totalPoints = np[i];
+            const int upperPoints = np[i + 101];
+            if (totalPoints < 4 || totalPoints > 500 || upperPoints < 2
+                || upperPoints >= totalPoints) {
+                continue;
+            }
+            // Mid-cell section between ribs i-1 and i, where the legacy
+            // program sews the mini-rib but never draws it in 3D.
+            std::vector<gp_Pnt> section(totalPoints + 1);
+            bool finite = true;
+            for (int j = 1; j <= totalPoints; ++j) {
+                section[j] = midPoint(i, j);
+                finite = finite && isFinite(section[j]);
+            }
+            const gp_Pnt trailing = section[1];
+            const gp_Pnt leading = section[upperPoints];
+            if (!finite
+                || trailing.Distance(leading) <= Precision::Confusion()) {
+                continue;
+            }
+            const gp_Dir chordDirection(gp_Vec(trailing, leading));
+            const auto chordwise = [&](const gp_Pnt &point) {
+                return gp_Vec(trailing, point).Dot(chordDirection);
+            };
+            // The cut runs rib(i-1,5)*pct/100 centimetres ahead of the
+            // trailing edge, measured on the left rib chord exactly as the
+            // legacy pattern code does; 100% keeps the whole section (a
+            // complete unloaded middle rib).
+            double chord = ribValue(i - 1, 5);
+            if (chord <= 0.0) {
+                chord = ribValue(i, 5);
+            }
+            const double cut = chord * millimetresPerCentimetre
+                               * std::min(percent, 100.0) / 100.0;
+            const auto appendCut = [&](std::vector<gp_Pnt> &curve,
+                                       int fromIndex,
+                                       int toIndex) {
+                const double before = chordwise(section[fromIndex]);
+                const double after = chordwise(section[toIndex]);
+                if (after <= before + Precision::Confusion()) {
+                    return;
+                }
+                const double t =
+                    std::clamp((cut - before) / (after - before), 0.0, 1.0);
+                if (t <= Precision::Confusion()) {
+                    return;
+                }
+                const gp_Pnt &from = section[fromIndex];
+                const gp_Pnt &to = section[toIndex];
+                curve.emplace_back(from.X() + t * (to.X() - from.X()),
+                                   from.Y() + t * (to.Y() - from.Y()),
+                                   from.Z() + t * (to.Z() - from.Z()));
+            };
+
+            CapturedStrip strip;
+            strip.minirib = true;
+            strip.label = "Mini-rib " + std::to_string(i);
+            // Upper boundary: trailing edge forward along the extrados.
+            int j = 1;
+            strip.curveA.push_back(section[1]);
+            while (j + 1 <= upperPoints
+                   && chordwise(section[j + 1]) < cut) {
+                ++j;
+                strip.curveA.push_back(section[j]);
+            }
+            if (j + 1 <= upperPoints) {
+                appendCut(strip.curveA, j, j + 1);
+            }
+            // Lower boundary: trailing edge forward along the intrados,
+            // continuing across the vent contour when a 100% rib reaches
+            // the leading edge.
+            j = totalPoints;
+            strip.curveB.push_back(section[totalPoints]);
+            while (j - 1 > upperPoints
+                   && chordwise(section[j - 1]) < cut) {
+                --j;
+                strip.curveB.push_back(section[j]);
+            }
+            if (j - 1 > upperPoints) {
+                appendCut(strip.curveB, j, j - 1);
+            }
+            if (strip.curveA.size() >= 2 && strip.curveB.size() >= 2) {
+                capturedStrips_.push_back(std::move(strip));
+            }
+        }
+    }
+
+    lep::NurbsWriteResult writeStep(const std::filesystem::path &path,
+                                    bool includeConstructionCurves)
     {
         warnings_.clear();
         lep::NurbsWriteResult result;
@@ -825,13 +985,14 @@ public:
             }
 
             AssemblyGroup wing{wingGroupName, {}, {}};
-            addPanelParts(wing, result);
+            addPanelParts(wing, result, includeConstructionCurves);
             addRibParts(wing, result);
             if (!errors_.empty()) {
                 result.error = errors_.front();
                 return result;
             }
             addLineParts(wing, result);
+            addStripParts(wing, result);
 
             writeAssembly(wing, path, result);
         } catch (const Standard_Failure &failure) {
@@ -855,7 +1016,6 @@ public:
 private:
     struct LineTag
     {
-        std::string group;
         std::string label;
         int planIndex = 0;
         bool brake = false;
@@ -1456,7 +1616,8 @@ private:
     }
 
     void addPanelParts(AssemblyGroup &wing,
-                       lep::NurbsWriteResult &result) const
+                       lep::NurbsWriteResult &result,
+                       bool includeConstructionCurves) const
     {
         for (const PanelSurface &panel : panels_) {
             AssemblyGroup &regionGroup =
@@ -1479,6 +1640,9 @@ private:
                  true});
             result.surfaceCount += 2;
 
+            if (!includeConstructionCurves) {
+                continue;
+            }
             AssemblyGroup &curvesGroup =
                 wing.group(regionCurvesGroupName(panel.region));
             const auto addWireframePart =
@@ -2366,11 +2530,7 @@ private:
             AssemblyGroup *group = nullptr;
             PartColor color = otherCurveColor;
             std::string label = line.label;
-            if (!line.group.empty()) {
-                // Custom top-level groups such as the H/V rib diagonals.
-                group = &wing.group(line.group);
-                color = diagonalColor;
-            } else if (line.brake) {
+            if (line.brake) {
                 group = &lines.group(brakeGroupName);
                 color = brakeColor;
             } else if (line.planIndex >= 1 && line.planIndex <= 6) {
@@ -2419,6 +2579,281 @@ private:
                  false});
             ++result.lineCount;
             result.splineCount += static_cast<int>(part.segments.size());
+        }
+    }
+
+    // Interpolates one strip boundary through its samples at the given
+    // parameters. Identical parameters across sibling boundaries yield
+    // identical knot vectors, which makeStripFace relies on to pair poles.
+    static occ::handle<Geom_BSplineCurve> interpolateBoundary(
+        const std::vector<gp_Pnt> &points,
+        const std::vector<double> &parameters)
+    {
+        const int count = static_cast<int>(points.size());
+        occ::handle<NCollection_HArray1<gp_Pnt>> pointArray =
+            new NCollection_HArray1<gp_Pnt>(1, count);
+        occ::handle<NCollection_HArray1<double>> parameterArray =
+            new NCollection_HArray1<double>(1, count);
+        for (int index = 0; index < count; ++index) {
+            pointArray->SetValue(index + 1, points[index]);
+            parameterArray->SetValue(index + 1, parameters[index]);
+        }
+        GeomAPI_Interpolate interpolate(pointArray,
+                                        parameterArray,
+                                        false,
+                                        Precision::Confusion());
+        interpolate.Perform();
+        if (!interpolate.IsDone()) {
+            return {};
+        }
+        return interpolate.Curve();
+    }
+
+    static void dropCoincidentSamples(std::vector<gp_Pnt> &points)
+    {
+        std::vector<gp_Pnt> kept;
+        kept.reserve(points.size());
+        for (const gp_Pnt &point : points) {
+            if (kept.empty()
+                || point.Distance(kept.back()) > Precision::Confusion()) {
+                kept.push_back(point);
+            }
+        }
+        points = std::move(kept);
+    }
+
+    // Re-samples a boundary polyline to targetCount points spaced evenly
+    // along its interpolated curve, so differently sampled boundaries can
+    // be paired rung by rung.
+    static bool resampleBoundary(std::vector<gp_Pnt> &points,
+                                 int targetCount)
+    {
+        dropCoincidentSamples(points);
+        if (points.size() < 2 || targetCount < 2) {
+            return false;
+        }
+        std::vector<double> parameters(points.size(), 0.0);
+        for (std::size_t index = 1; index < points.size(); ++index) {
+            parameters[index] = parameters[index - 1]
+                                + points[index].Distance(points[index - 1]);
+        }
+        const occ::handle<Geom_BSplineCurve> curve =
+            interpolateBoundary(points, parameters);
+        if (curve.IsNull()) {
+            return false;
+        }
+        const double length = parameters.back();
+        std::vector<gp_Pnt> resampled(targetCount);
+        for (int index = 0; index < targetCount; ++index) {
+            resampled[index] =
+                curve->Value(length * index / (targetCount - 1));
+        }
+        points = std::move(resampled);
+        return true;
+    }
+
+    // An exact ruled loft between the strip's two boundary polylines: both
+    // interpolate their samples on one shared chord-length
+    // parameterization, so each legacy rung (sample j to sample j) and the
+    // skin-following curvature of both boundary edges lie exactly on the
+    // face.
+    static TopoDS_Face makeStripFace(const CapturedStrip &strip)
+    {
+        std::vector<gp_Pnt> a = strip.curveA;
+        std::vector<gp_Pnt> b = strip.curveB;
+        if (a.size() != b.size()) {
+            const int targetCount =
+                static_cast<int>(std::max(a.size(), b.size()));
+            if (!resampleBoundary(a, targetCount)
+                || !resampleBoundary(b, targetCount)) {
+                return {};
+            }
+        }
+        // Drop rungs that collapse on either boundary (piecewise legacy
+        // curves repeat their junction samples).
+        std::vector<gp_Pnt> firstBoundary{a.front()};
+        std::vector<gp_Pnt> secondBoundary{b.front()};
+        for (std::size_t index = 1; index < a.size(); ++index) {
+            if (a[index].Distance(firstBoundary.back())
+                    > Precision::Confusion()
+                && b[index].Distance(secondBoundary.back())
+                       > Precision::Confusion()) {
+                firstBoundary.push_back(a[index]);
+                secondBoundary.push_back(b[index]);
+            }
+        }
+        if (firstBoundary.size() < 2) {
+            return {};
+        }
+        std::vector<double> parameters(firstBoundary.size(), 0.0);
+        for (std::size_t index = 1; index < firstBoundary.size();
+             ++index) {
+            parameters[index] =
+                parameters[index - 1]
+                + 0.5
+                      * (firstBoundary[index].Distance(
+                             firstBoundary[index - 1])
+                         + secondBoundary[index].Distance(
+                             secondBoundary[index - 1]));
+        }
+        const occ::handle<Geom_BSplineCurve> firstCurve =
+            interpolateBoundary(firstBoundary, parameters);
+        const occ::handle<Geom_BSplineCurve> secondCurve =
+            interpolateBoundary(secondBoundary, parameters);
+        if (firstCurve.IsNull() || secondCurve.IsNull()
+            || firstCurve->NbPoles() != secondCurve->NbPoles()
+            || firstCurve->NbKnots() != secondCurve->NbKnots()) {
+            return {};
+        }
+        NCollection_Array2<gp_Pnt> poles(1, firstCurve->NbPoles(), 1, 2);
+        for (int index = 1; index <= firstCurve->NbPoles(); ++index) {
+            poles.SetValue(index, 1, firstCurve->Pole(index));
+            poles.SetValue(index, 2, secondCurve->Pole(index));
+        }
+        NCollection_Array1<double> uKnots(1, firstCurve->NbKnots());
+        firstCurve->Knots(uKnots);
+        NCollection_Array1<int> uMultiplicities(1, firstCurve->NbKnots());
+        firstCurve->Multiplicities(uMultiplicities);
+        NCollection_Array1<double> vKnots(1, 2);
+        vKnots.SetValue(1, 0.0);
+        vKnots.SetValue(2, 1.0);
+        NCollection_Array1<int> vMultiplicities(1, 2);
+        vMultiplicities.SetValue(1, 2);
+        vMultiplicities.SetValue(2, 2);
+        const occ::handle<Geom_BSplineSurface> surface =
+            new Geom_BSplineSurface(poles,
+                                    uKnots,
+                                    vKnots,
+                                    uMultiplicities,
+                                    vMultiplicities,
+                                    firstCurve->Degree(),
+                                    1);
+        BRepBuilderAPI_MakeFace makeFace(surface, Precision::Confusion());
+        if (!makeFace.IsDone()) {
+            return {};
+        }
+        return makeFace.Face();
+    }
+
+    // The H/V/VH diagonal strips and the trailing-edge mini-ribs become
+    // ruled faces; strips sharing a label (e.g. the three sheets of one
+    // VH-rib row) merge into a single named part.
+    void addStripParts(AssemblyGroup &wing,
+                       lep::NurbsWriteResult &result) const
+    {
+        if (capturedStrips_.empty()) {
+            return;
+        }
+        struct StripPart
+        {
+            AssemblyGroup *group = nullptr;
+            std::string label;
+            PartColor color;
+            std::vector<TopoDS_Shape> shapes;
+            bool hasFaces = false;
+        };
+        std::vector<StripPart> stripParts;
+        for (const CapturedStrip &strip : capturedStrips_) {
+            AssemblyGroup *group =
+                strip.minirib
+                    ? &wing.group(ribsGroupName).group(miniribsGroupName)
+                    : &wing.group(diagonalsGroupName);
+            StripPart *part = nullptr;
+            for (StripPart &candidate : stripParts) {
+                if (candidate.group == group
+                    && candidate.label == strip.label) {
+                    part = &candidate;
+                    break;
+                }
+            }
+            if (part == nullptr) {
+                stripParts.push_back(
+                    {group,
+                     strip.label,
+                     strip.minirib ? ribColor : diagonalColor,
+                     {},
+                     false});
+                part = &stripParts.back();
+            }
+            TopoDS_Shape shape;
+            try {
+                shape = makeStripFace(strip);
+            } catch (const Standard_Failure &) {
+                shape = {};
+            }
+            const bool face = !shape.IsNull();
+            if (!face) {
+                // Keep at least the boundary outline if OCCT could not
+                // rule a face between the two curves.
+                std::vector<TopoDS_Shape> outline;
+                for (const std::vector<gp_Pnt> *boundary :
+                     {&strip.curveA, &strip.curveB}) {
+                    for (std::size_t index = 1; index < boundary->size();
+                         ++index) {
+                        BRepBuilderAPI_MakeEdge makeEdge(
+                            makeLinearSpline((*boundary)[index - 1],
+                                             (*boundary)[index]));
+                        if (makeEdge.IsDone()) {
+                            outline.push_back(makeEdge.Edge());
+                        }
+                    }
+                }
+                if (outline.empty()) {
+                    continue;
+                }
+                warnings_.push_back(
+                    strip.label
+                    + " could not be ruled into a surface and stays a "
+                      "wireframe outline.");
+                shape = makeCompound(outline);
+            }
+            // A strip whose samples all sit on the symmetry plane, or one
+            // that spans the centre cell mapping onto itself, must not get
+            // a mirror copy.
+            const auto centered = [](const gp_Pnt &point) {
+                return std::abs(point.X())
+                       <= symmetryPlaneToleranceMillimetres;
+            };
+            const bool onCenter =
+                std::all_of(strip.curveA.begin(), strip.curveA.end(),
+                            centered)
+                && std::all_of(strip.curveB.begin(), strip.curveB.end(),
+                               centered);
+            const auto mirrorsOntoItself = [&]() {
+                if (strip.curveA.size() != strip.curveB.size()) {
+                    return false;
+                }
+                for (std::size_t index = 0; index < strip.curveA.size();
+                     ++index) {
+                    const gp_Pnt &a = strip.curveA[index];
+                    if (gp_Pnt(-a.X(), a.Y(), a.Z())
+                            .Distance(strip.curveB[index])
+                        > symmetryPlaneToleranceMillimetres) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            part->shapes.push_back(shape);
+            part->hasFaces = part->hasFaces || face;
+            result.surfaceCount += face ? 1 : 0;
+            if (!onCenter && !mirrorsOntoItself()) {
+                const TopoDS_Shape mirroredShape = mirrored(shape);
+                if (!mirroredShape.IsNull()) {
+                    part->shapes.push_back(mirroredShape);
+                    result.surfaceCount += face ? 1 : 0;
+                }
+            }
+        }
+        for (const StripPart &part : stripParts) {
+            if (part.shapes.empty()) {
+                continue;
+            }
+            part.group->parts.push_back({part.label,
+                                         makeCompound(part.shapes),
+                                         part.color,
+                                         part.color,
+                                         part.hasFaces});
         }
     }
 
@@ -2562,6 +2997,7 @@ private:
     std::vector<PanelSurface> panels_;
     std::map<int, CapturedRib> capturedRibs_;
     std::vector<CapturedLine> capturedLines_;
+    std::vector<CapturedStrip> capturedStrips_;
     mutable std::vector<std::string> errors_;
     mutable std::vector<std::string> warnings_;
     bool captureLines_ = false;
@@ -2585,9 +3021,10 @@ void resetNurbsModel()
     model().reset();
 }
 
-NurbsWriteResult writeNurbsStep(const std::filesystem::path &path)
+NurbsWriteResult writeNurbsStep(const std::filesystem::path &path,
+                                bool includeConstructionCurves)
 {
-    return model().writeStep(path);
+    return model().writeStep(path, includeConstructionCurves);
 }
 
 } // namespace lep
@@ -2661,11 +3098,31 @@ extern "C" void lep_nurbs_set_line_tag(const char *label,
         diameterMm);
 }
 
-extern "C" void lep_nurbs_tag_diagonal(const char *kind,
-                                        int kindLength,
-                                        int index)
+extern "C" void lep_nurbs_capture_diagonal_strip(const char *kind,
+                                                  int kindLength,
+                                                  int index,
+                                                  const double *xA,
+                                                  const double *yA,
+                                                  const double *zA,
+                                                  const double *xB,
+                                                  const double *yB,
+                                                  const double *zB,
+                                                  int pointCount,
+                                                  int stride)
 {
-    model().tagDiagonal(kind, kindLength, index);
+    model().captureDiagonalStrip(
+        kind, kindLength, index, xA, yA, zA, xB, yB, zB, pointCount, stride);
+}
+
+extern "C" void lep_nurbs_capture_miniribs(const double *x,
+                                            const double *y,
+                                            const double *z,
+                                            const int *np,
+                                            const double *rib,
+                                            int ribCount,
+                                            int singleSkin)
+{
+    model().captureMiniribs(x, y, z, np, rib, ribCount, singleSkin != 0);
 }
 
 extern "C" void lep_nurbs_capture_line(double x1,

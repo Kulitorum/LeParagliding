@@ -54,9 +54,24 @@ void lep_nurbs_set_line_tag(const char *label,
                             const char *typeName,
                             integer typeNameLength,
                             doublereal diameterMm);
-void lep_nurbs_tag_diagonal(const char *kind,
-                            integer kindLength,
-                            integer index);
+void lep_nurbs_capture_diagonal_strip(const char *kind,
+                                      integer kindLength,
+                                      integer index,
+                                      const doublereal *xA,
+                                      const doublereal *yA,
+                                      const doublereal *zA,
+                                      const doublereal *xB,
+                                      const doublereal *yB,
+                                      const doublereal *zB,
+                                      integer pointCount,
+                                      integer stride);
+void lep_nurbs_capture_miniribs(const doublereal *x,
+                                const doublereal *y,
+                                const doublereal *z,
+                                const integer *np,
+                                const doublereal *rib,
+                                integer ribCount,
+                                integer singleSkin);
 void lep_nurbs_capture_line(doublereal x1,
                             doublereal y1,
                             doublereal z1,
@@ -22273,6 +22288,14 @@ L12:
 	    i__ = (integer) hvr[k + 402];
 /*      Rib 1-2 (blue) */
 	    if (hvr[k + 804] == 1.) {
+/*      Capture the type-2 V-rib sheet into the OCCT model */
+		lep_nurbs_capture_diagonal_strip("V-rib", 5, k,
+			&rx1[i__ + (ii * 50 + 1) * 101 - 5151],
+			&ry1[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rz1[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rx2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&ry2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rz2[i__ + (ii * 50 + 1) * 101 - 5151], 21, 101);
 		for (j = 1; j <= 21; ++j) {
 		    line3d_(&rx1[i__ + (j + ii * 50) * 101 - 5151], &ry1[i__
 			    + (j + ii * 50) * 101 - 5151], &rz1[i__ + (j + ii
@@ -22290,6 +22313,13 @@ L12:
 	    }
 /*      Rib 2-3 (red) */
 	    if (hvr[k + 1005] == 1.) {
+		lep_nurbs_capture_diagonal_strip("V-rib", 5, k,
+			&rx3[i__ + (ii * 50 + 1) * 101 - 5151],
+			&ry3[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rz3[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rx2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&ry2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rz2[i__ + (ii * 50 + 1) * 101 - 5151], 21, 101);
 		for (j = 1; j <= 21; ++j) {
 		    line3d_(&rx3[i__ + (j + ii * 50) * 101 - 5151], &ry3[i__
 			    + (j + ii * 50) * 101 - 5151], &rz3[i__ + (j + ii
@@ -24289,6 +24319,14 @@ L12:
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      Left rib */
 	    if (hvr[k + 804] == 1.) {
+/*      Capture the type-3 V-rib left sheet into the OCCT model */
+		lep_nurbs_capture_diagonal_strip("V-rib", 5, k,
+			&rx2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&ry2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rz2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rx1[i__ + (ii * 50 + 1) * 101 - 5151],
+			&ry1[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rz1[i__ + (ii * 50 + 1) * 101 - 5151], 21, 101);
 		for (j = 1; j <= 21; ++j) {
 		    line3d_(&rx2[i__ + (j + ii * 50) * 101 - 5151], &ry2[i__
 			    + (j + ii * 50) * 101 - 5151], &rz2[i__ + (j + ii
@@ -24306,6 +24344,14 @@ L12:
 	    }
 /*      Right rib */
 	    if (hvr[k + 1005] == 1.) {
+/*      Capture the type-3 V-rib right sheet into the OCCT model */
+		lep_nurbs_capture_diagonal_strip("V-rib", 5, k,
+			&rx2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&ry2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rz2[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rx3[i__ + (ii * 50 + 1) * 101 - 5151],
+			&ry3[i__ + (ii * 50 + 1) * 101 - 5151],
+			&rz3[i__ + (ii * 50 + 1) * 101 - 5151], 21, 101);
 		for (j = 1; j <= 21; ++j) {
 		    line3d_(&rx2[i__ + (j + ii * 50) * 101 - 5151], &ry2[i__
 			    + (j + ii * 50) * 101 - 5151], &rz2[i__ + (j + ii
@@ -25878,6 +25924,15 @@ L12:
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /* in klz */
 			if ((doublereal) ii == rib[i__ + 1414]) {
+/*      Capture the type-5 V-rib left sheet into the OCCT model */
+			    lep_nurbs_capture_diagonal_strip("V-rib", 5, k,
+				    &rx2[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+				    &ry2[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+				    &rz2[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+				    &rx1[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+				    &ry1[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+				    &rz1[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+				    121, 101);
 			    for (j = 1; j <= 121; ++j) {
 				line3d_(&rx2[i__ + 1 + (j + ii * 50) * 101 -
 					5151], &ry2[i__ + 1 + (j + ii * 50) *
@@ -26632,6 +26687,15 @@ L12:
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /* in klz */
 			if ((doublereal) ii == rib[i__ + 1414]) {
+/*      Capture the type-5 V-rib right sheet into the OCCT model */
+			    lep_nurbs_capture_diagonal_strip("V-rib", 5, k,
+				    &rx2[i__ + (ii * 50 + 1) * 101 - 5151],
+				    &ry2[i__ + (ii * 50 + 1) * 101 - 5151],
+				    &rz2[i__ + (ii * 50 + 1) * 101 - 5151],
+				    &rx3[i__ + (ii * 50 + 1) * 101 - 5151],
+				    &ry3[i__ + (ii * 50 + 1) * 101 - 5151],
+				    &rz3[i__ + (ii * 50 + 1) * 101 - 5151],
+				    121, 101);
 			    for (j = 1; j <= 121; ++j) {
 				line3d_(&rx2[i__ + (j + ii * 50) * 101 - 5151]
 					, &ry2[i__ + (j + ii * 50) * 101 -
@@ -27501,6 +27565,33 @@ L12:
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      Drawing VH Type 4 in 3D */
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
+/*      Capture the three type-4 VH-rib sheets into the OCCT model */
+	    i__ = (integer) hvr[k + 402];
+	    if (hvr[k + 804] == 1.) {
+		lep_nurbs_capture_diagonal_strip("VH-rib", 6, k,
+			&sx2[i__ - 1 + (ii * 50 + 1) * 101 - 5151],
+			&sy2[i__ - 1 + (ii * 50 + 1) * 101 - 5151],
+			&sz2[i__ - 1 + (ii * 50 + 1) * 101 - 5151],
+			&sx1[i__ + (ii * 50 + 1) * 101 - 5151],
+			&sy1[i__ + (ii * 50 + 1) * 101 - 5151],
+			&sz1[i__ + (ii * 50 + 1) * 101 - 5151], 21, 101);
+	    }
+	    lep_nurbs_capture_diagonal_strip("VH-rib", 6, k,
+		    &sx1[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &sy1[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &sz1[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &sx3[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+		    &sy3[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+		    &sz3[i__ + 1 + (ii * 50 + 1) * 101 - 5151], 21, 101);
+	    if (hvr[k + 1005] == 1.) {
+		lep_nurbs_capture_diagonal_strip("VH-rib", 6, k,
+			&sx3[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+			&sy3[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+			&sz3[i__ + 1 + (ii * 50 + 1) * 101 - 5151],
+			&sx4[i__ + 2 + (ii * 50 + 1) * 101 - 5151],
+			&sy4[i__ + 2 + (ii * 50 + 1) * 101 - 5151],
+			&sz4[i__ + 2 + (ii * 50 + 1) * 101 - 5151], 21, 101);
+	    }
 	    for (j = 1; j <= 21; ++j) {
 /*      Rib i-1 to i+2 */
 		i__ = (integer) hvr[k + 402];
@@ -29851,6 +29942,14 @@ L12:
 		icolor = 30;
 	    }
 /*      Draw in 3D model */
+/*      Capture the type-6 V-rib sheet into the OCCT model */
+	    lep_nurbs_capture_diagonal_strip("V-rib", 5, k,
+		    &rx2[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &ry2[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &rz2[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &rx3[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &ry3[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &rz3[i__ + (ii * 50 + 1) * 101 - 5151], 21, 101);
 	    for (j = 1; j <= 21; ++j) {
 		line3d_(&rx2[i__ + (j + ii * 50) * 101 - 5151], &ry2[i__ + (j
 			+ ii * 50) * 101 - 5151], &rz2[i__ + (j + ii * 50) *
@@ -34768,8 +34867,6 @@ L12:
 /*      21.8 H-V-ribs 3D drawing */
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
     i__1 = nhvr;
-/*      Capture the diagonal ribs into the OCCT model */
-    lep_nurbs_set_line_capture(1);
     for (k = 1; k <= i__1; ++k) {
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      21.8.1 H-ribs */
@@ -34778,7 +34875,14 @@ L12:
 	    i__ = (integer) hvr[k + 402];
 /*      warning */
 	    ii = (integer) hvr[k + 603];
-	    lep_nurbs_tag_diagonal("H-rib", 5, k);
+/*      Capture the type-1 H-rib strap into the OCCT model */
+	    lep_nurbs_capture_diagonal_strip("H-rib", 5, k,
+		    &hx3[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &hy3[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &hz3[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &hx2[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &hy2[i__ + (ii * 50 + 1) * 101 - 5151],
+		    &hz2[i__ + (ii * 50 + 1) * 101 - 5151], 21, 101);
 	    for (j = 1; j <= 21; ++j) {
 		p1x = hx3[i__ + (j + ii * 50) * 101 - 5151];
 		p1y = hy3[i__ + (j + ii * 50) * 101 - 5151];
@@ -34925,7 +35029,9 @@ L12:
 	    }
 	}
     }
-    lep_nurbs_set_line_capture(0);
+/*      Capture the mini-ribs (section 2 column 8) into the OCCT model */
+    lep_nurbs_capture_miniribs(x, y, z__, np, rib, nribss,
+	    s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2) == 0 ? 1 : 0);
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      21.9 Draw the intermediate and ovalized airfoil in 3D */
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */

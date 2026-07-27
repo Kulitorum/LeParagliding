@@ -39,6 +39,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QMenu>
 #include <QMessageBox>
@@ -2409,6 +2410,12 @@ void MainWindow::startCalculation(
         // Previews hand the model over as binary XCAF (lep-3d.xbf), which
         // writes and loads far faster than STEP; explicit exports keep STEP.
         engineArguments.prepend(QStringLiteral("--preview"));
+    } else if (!exportConstructionCurves_) {
+        // Preference: exported STEP files without the surface-wireframe
+        // curve groups. The preview keeps them — the parts tree already
+        // toggles curves there.
+        engineArguments.prepend(
+            QStringLiteral("--no-construction-curves"));
     }
     process_->setArguments(engineArguments);
     process_->setWorkingDirectory(QFileInfo(document_.filePath()).absolutePath());
@@ -3200,6 +3207,30 @@ void MainWindow::showPreferences()
                 resolutionValue->setText(describeStep(index));
             });
 
+    auto *exportGroup = new QGroupBox(QStringLiteral("STEP export"), &dialog);
+    auto *exportLayout = new QVBoxLayout(exportGroup);
+    exportLayout->setContentsMargins(14, 18, 14, 12);
+    exportLayout->setSpacing(6);
+    auto *curvesCheck = new QCheckBox(
+        QStringLiteral("Include construction curves"), exportGroup);
+    curvesCheck->setChecked(exportConstructionCurves_);
+    exportLayout->addWidget(curvesCheck);
+    auto *curvesHint = new QLabel(
+        QStringLiteral(
+            "Writes the extrados/vent/intrados surface-wireframe curve "
+            "groups into exported STEP files. Suspension lines and part "
+            "outlines are always exported, and the 3D preview is not "
+            "affected."),
+        exportGroup);
+    curvesHint->setObjectName(QStringLiteral("hint"));
+    curvesHint->setWordWrap(true);
+    exportLayout->addWidget(curvesHint);
+    layout->addWidget(exportGroup);
+    connect(curvesCheck, &QCheckBox::toggled, &dialog, [this](bool checked) {
+        exportConstructionCurves_ = checked;
+        saveSettings();
+    });
+
     auto *colorsGroup = new QGroupBox(QStringLiteral("Part colors"), &dialog);
     auto *colorsLayout = new QGridLayout(colorsGroup);
     colorsLayout->setContentsMargins(14, 18, 14, 12);
@@ -3315,6 +3346,9 @@ void MainWindow::loadSettings()
         const QSignalBlocker blocker(xraySlider_);
         xraySlider_->setValue(qRound(xray * 100.0));
     }
+    exportConstructionCurves_ =
+        settings.value(QStringLiteral("export/constructionCurves"), true)
+            .toBool();
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
@@ -3338,6 +3372,9 @@ void MainWindow::saveSettings() const
     settings.setValue(
         QStringLiteral("viewport/xray"),
         viewport_->surfaceTransparency());
+    settings.setValue(
+        QStringLiteral("export/constructionCurves"),
+        exportConstructionCurves_);
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 

@@ -25,7 +25,11 @@ struct NurbsWriteResult
 };
 
 void resetNurbsModel();
-NurbsWriteResult writeNurbsStep(const std::filesystem::path &path);
+// includeConstructionCurves controls the interior surface-wireframe curve
+// groups ("Extrados curves", "Vent curves", "Intrados curves"); suspension
+// lines and part boundary edges are always written.
+NurbsWriteResult writeNurbsStep(const std::filesystem::path &path,
+                                bool includeConstructionCurves = true);
 
 } // namespace lep
 
@@ -78,12 +82,39 @@ void lep_nurbs_set_line_tag(const char *label,
                             int typeNameLength,
                             double diameterMm);
 
-// Routes the lines captured next into the top-level "Diagonals" assembly
-// group as one part labeled "<kind> <index>", e.g. "H-rib 7" for row 7 of
-// the H/V rib table.
-void lep_nurbs_tag_diagonal(const char *kind,
-                            int kindLength,
-                            int index);
+// Captures one H/V/VH diagonal-rib sheet as its two boundary polylines in
+// exact rung correspondence: sample j of curve A pairs with sample j of
+// curve B, matching the segments the legacy 3D drawing emits. The arrays
+// are strided views into the legacy point matrices (stride doubles between
+// consecutive samples). The model spans an exact ruled surface between the
+// interpolated boundaries and files it in the top-level "Diagonals" group
+// as "<kind> <index>", e.g. "V-rib 7" for row 7 of the H/V rib table.
+void lep_nurbs_capture_diagonal_strip(const char *kind,
+                                      int kindLength,
+                                      int index,
+                                      const double *xA,
+                                      const double *yA,
+                                      const double *zA,
+                                      const double *xB,
+                                      const double *yB,
+                                      const double *zB,
+                                      int pointCount,
+                                      int stride);
+
+// Derives the mini-ribs (section 2 column 8: percent of chord ahead of the
+// trailing edge, 1 < pct <= 100, where 100 is a complete unloaded middle
+// rib) that the legacy program only ever draws as 2D patterns. x/y/z are
+// the final wing coordinates (Fortran (0:100,500), station 0 = mirrored
+// rib 1), np the point-count table (0:100,9), rib the parameter table
+// (0:100,500), all in f2c column-major layout. Each mini-rib becomes a
+// ruled face on the mid-cell section, filed under "Ribs" / "Mini-ribs".
+void lep_nurbs_capture_miniribs(const double *x,
+                                const double *y,
+                                const double *z,
+                                const int *np,
+                                const double *rib,
+                                int ribCount,
+                                int singleSkin);
 
 void lep_nurbs_capture_line(double x1,
                             double y1,

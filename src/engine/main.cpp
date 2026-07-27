@@ -38,13 +38,15 @@ void printUsage()
 {
     std::cout
         << "LEparagliding C++ engine 3.28\n"
-        << "Usage: leparagliding-engine [--preview] [--resource-dir <directory>] "
-           "<design-file> <output-directory>\n"
+        << "Usage: leparagliding-engine [--preview] [--no-construction-curves]\n"
+           "       [--resource-dir <directory>] <design-file> <output-directory>\n"
         << "\n"
         << "Relative airfoil paths are resolved from the design file's directory,\n"
         << "or from --resource-dir when calculating a temporary design copy.\n"
         << "--preview writes the 3D model as binary XCAF (lep-3d.xbf) instead\n"
-        << "of STEP; the Studio preview loads it directly.\n";
+        << "of STEP; the Studio preview loads it directly.\n"
+        << "--no-construction-curves omits the interior surface-wireframe curve\n"
+        << "groups from the model; suspension lines are always written.\n";
 }
 
 std::string pathToUtf8(const std::filesystem::path &path)
@@ -56,7 +58,8 @@ std::string pathToUtf8(const std::filesystem::path &path)
 int runEngine(const std::filesystem::path &inputArgument,
               const std::filesystem::path &outputArgument,
               const std::filesystem::path &resourceArgument,
-              bool preview)
+              bool preview,
+              bool includeConstructionCurves)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
@@ -136,8 +139,8 @@ int runEngine(const std::filesystem::path &inputArgument,
         }
 
         const char *modelFileName = preview ? "lep-3d.xbf" : "lep-3d.step";
-        const lep::NurbsWriteResult step =
-            lep::writeNurbsStep(output / modelFileName);
+        const lep::NurbsWriteResult step = lep::writeNurbsStep(
+            output / modelFileName, includeConstructionCurves);
         for (const std::string &warning : step.warnings) {
             std::cerr << "NURBS model warning: " << warning << '\n';
         }
@@ -199,6 +202,7 @@ template <typename StringView>
 int runFromArguments(const std::vector<StringView> &arguments)
 {
     bool preview = false;
+    bool includeConstructionCurves = true;
     std::filesystem::path resourceDirectory;
     std::vector<std::filesystem::path> positional;
     for (std::size_t index = 0; index < arguments.size(); ++index) {
@@ -209,6 +213,8 @@ int runFromArguments(const std::vector<StringView> &arguments)
         }
         if (matchesFlag(argument, "--preview")) {
             preview = true;
+        } else if (matchesFlag(argument, "--no-construction-curves")) {
+            includeConstructionCurves = false;
         } else if (matchesFlag(argument, "--resource-dir")) {
             if (index + 1 >= arguments.size()) {
                 printUsage();
@@ -223,7 +229,11 @@ int runFromArguments(const std::vector<StringView> &arguments)
         printUsage();
         return 2;
     }
-    return runEngine(positional[0], positional[1], resourceDirectory, preview);
+    return runEngine(positional[0],
+                     positional[1],
+                     resourceDirectory,
+                     preview,
+                     includeConstructionCurves);
 }
 
 } // namespace

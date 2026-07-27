@@ -119,6 +119,7 @@ private:
     QSet<int> dirtySections_;
     bool documentDirty_ = false;
     bool loadingEditors_ = false;
+    bool exportConstructionCurves_ = true;
     CalculationMode calculationMode_ = CalculationMode::None;
     std::unique_ptr<QTemporaryDir> calculationDirectory_;
     QString calculationOutputDirectory_;
