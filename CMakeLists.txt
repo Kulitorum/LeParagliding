@@ -12,7 +12,7 @@ endif()
 
 project(
     LEparagliding
-    VERSION 0.2.3
+    VERSION 0.3.0
     DESCRIPTION "Qt C++ port of LEparagliding 3.28"
     LANGUAGES C CXX
 )
