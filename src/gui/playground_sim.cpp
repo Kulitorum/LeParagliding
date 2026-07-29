@@ -2,12 +2,14 @@
 
 #include <softwing/parallel.h>
 
+#include <QByteArray>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
 #include <QLatin1String>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <cmath>
@@ -24,12 +26,72 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegreesToRadians = kPi / 180.0;
 constexpr double kAirDensity = 1.225;   // kg/m^3
 constexpr double kMaximumDynamicPressureRatio = 4.0;
-// Per unit of wetted area. Covers the fabric, the seams and the lines,
-// which on a paraglider are a large slice of the total -- this is well
-// above a clean aerofoil's skin friction for that reason.
-constexpr double kFrictionCoefficient = 0.015;
+// Zero-lift drag referred to the projected planform: canopy profile drag
+// with its cell openings and seams, plus the line cascade. Together with
+// the induced term below this puts the polar's best glide around 7–8,
+// which is where this class of wing actually flies.
+constexpr double kParasiticDragCoefficient = 0.055;
+// The pilot and harness as a bluff body: drag area C_D·A in m², applied
+// at the pilot node against the pilot's OWN relative wind, not the
+// canopy's. The distinction is the pendulum damping: a pilot swinging
+// under the wing moves through the air, and the drag of that motion is a
+// real part of why the swing dies out.
+constexpr double kPilotDragArea = 0.35;
 // Oswald efficiency; a paraglider's elliptical-ish planform is decent.
 constexpr double kSpanEfficiency = 0.9;
+// A fabric wing cannot be flown at real negative lift — pushed from
+// above it front-tucks and deflates rather than pulling downward. The
+// thin-aerofoil polar does not know that, and its full-authority negative
+// lift at a transiently negative angle of attack was what turned an
+// aft-swing excursion into a powered dive. Floored just under zero, a
+// low-alpha excursion means "no lift, sink, let the wind from below
+// restore the angle" — which is a recovery, not a tumble.
+constexpr double kMinimumLiftCoefficient = -0.10;
+// How the imposed resultant's chordwise anchor travels with angle of
+// attack, in chord fractions per radian of deviation from trim. At trim
+// the anchor sits exactly on the designed hang line, so there is no
+// standing moment — a fixed aft offset was tried and turned out to be a
+// constant nose-down torque that wound the wing over in a second. Away
+// from trim the anchor moves aft of the hang line for higher angles and
+// forward for lower ones, which is a restoring moment in both directions:
+// static pitch stability with the trim angle the designer rigged.
+constexpr double kAnchorTravelPerRadian = 1.0;
+// The anchor's static reference tracks the wing's own slow-average angle
+// of attack rather than a fixed target: the line rigging plus the
+// pendulum are already statically stable in pitch, and an anchor that
+// pulled toward its own idea of trim just fought them — raising its gain
+// produced a limit cycle, not stability. Washed out this way, the anchor
+// carries no standing moment and acts purely as a damper on the
+// timescales the fabric and pendulum oscillate at.
+constexpr double kAnchorWashoutSeconds = 3.0;
+// Pitch-rate term on the same anchor: the resultant shifts aft while the
+// angle of attack is still rising, which is the pressure-native form of
+// the Cmq damping a real canopy has and this model otherwise lacks. It is
+// what keeps the pendulum's swing from pumping the wing into stall. Its
+// contribution is clamped: an unbounded rate term slammed the anchor to
+// its stops on launch transients and stalled the wing it was meant to
+// protect.
+constexpr double kAnchorRateSeconds = 0.15;
+constexpr double kAnchorRateLimit = 0.08;
+// Past the stall the section law's lift dies away, but a fabric wing at a
+// silly angle is not force-free — it is a parachute. Flat-plate normal
+// force: C_N = kFlatPlateNormal·sin(α), split into lift and drag by the
+// angle. This is what turns a stall into a braked, recoverable descent
+// instead of an accelerating free fall, and it is why a deep-stalled
+// canopy noses back down at all.
+constexpr double kFlatPlateNormal = 1.2;
+// Brake input as seen by the polar. The geometric side of a brake pull is
+// already real — the trailing edge comes down, the measured chord
+// rotates, the lift follows — but the drag of a deflected trailing edge
+// is not in the pressure field, and without it braking ADDED energy
+// (lift with no penalty) and pumped the surge mode instead of damping
+// it. Full pull is taken as the swing test's 35 cm.
+constexpr double kBrakeFullPullMetres = 0.35;
+constexpr double kBrakeDragCoefficient = 0.12;
+
+// Defined in the aerodynamics section further down; buildSimBody needs
+// them for pilot sizing and the glide launch.
+double wingLiftCoefficient(double angleRadians);
 
 // Rodrigues, for tilting the airflow off the rest chord by the angle of
 // attack. The axis must be unit length.
@@ -935,10 +997,14 @@ SimBody buildSimBody(const SimMesh &mesh,
             sim.faceAero[face] = aero;
         }
 
-        // Planform, taken as the upper surface's area — for a thin canopy
-        // that is the reference area to within a few percent, and it is the
-        // one the induced-drag term wants.
-        double upperArea = 0.0;
+        // PROJECTED planform: the upper skin's shadow on the ground plane,
+        // i.e. only the upward component of each face's area vector. The
+        // wetted area was tried first and is wrong twice over — it counts
+        // the arc's curled tips at full value, under-reading the aspect
+        // ratio by a third, and it over-reads the lift reference area the
+        // same way. Projected span over projected area is the pair the
+        // induced-drag law is written for.
+        double projectedArea = 0.0;
         for (std::size_t face = 0; face < triangles.size(); ++face) {
             if (!sim.faceAero[face].upperSurface) {
                 continue;
@@ -947,9 +1013,9 @@ SimBody buildSimBody(const SimMesh &mesh,
             const softwing::Vec3 &a = mesh.nodes[static_cast<std::size_t>(tri[0])];
             const softwing::Vec3 &b = mesh.nodes[static_cast<std::size_t>(tri[1])];
             const softwing::Vec3 &c = mesh.nodes[static_cast<std::size_t>(tri[2])];
-            upperArea += length(0.5 * cross(b - a, c - a));
+            projectedArea += std::max(0.0, 0.5 * cross(b - a, c - a).z);
         }
-        sim.planformArea = upperArea;
+        sim.planformArea = projectedArea;
         double spanLow = std::numeric_limits<double>::max();
         double spanHigh = std::numeric_limits<double>::lowest();
         for (const softwing::Vec3 &node : mesh.nodes) {
@@ -957,8 +1023,8 @@ SimBody buildSimBody(const SimMesh &mesh,
             spanHigh = std::max(spanHigh, node.x);
         }
         const double span = spanHigh - spanLow;
-        if (upperArea > 0.0 && span > 0.0) {
-            sim.aspectRatio = span * span / upperArea;
+        if (projectedArea > 0.0 && span > 0.0) {
+            sim.aspectRatio = span * span / projectedArea;
         }
 
         softwing::Vec3 meanChord;
@@ -973,6 +1039,26 @@ SimBody buildSimBody(const SimMesh &mesh,
         }
         if (length(meanSpan) > 0.0) {
             sim.restSpanAxis = normalized(meanSpan);
+        }
+
+        // The two ribs furthest out along the rest span axis. The live span
+        // axis is read between their leading edges each frame, which is
+        // what lets the wing-level angle of attack follow a rolled or
+        // yawed wing instead of its rest pose.
+        double tipLow = std::numeric_limits<double>::max();
+        double tipHigh = std::numeric_limits<double>::lowest();
+        for (std::size_t index = 0; index < sim.ribChords.size(); ++index) {
+            const double station = dot(
+                mesh.nodes[sim.ribChords[index].leadingNode],
+                sim.restSpanAxis);
+            if (station < tipLow) {
+                tipLow = station;
+                sim.spanTipRibs[0] = index;
+            }
+            if (station > tipHigh) {
+                tipHigh = station;
+                sim.spanTipRibs[1] = index;
+            }
         }
     }
 
@@ -1037,6 +1123,9 @@ SimBody buildSimBody(const SimMesh &mesh,
         }
     }
 
+    // Everything added so far is canopy; lines and pilot follow.
+    sim.canopyNodeCount = body->nodes().size();
+
     // Suspension lines: weld junctions, cable constraints per segment,
     // attach top ends to the nearest skin node, fix the pilot band.
     std::map<std::uint64_t, std::size_t> junctions;
@@ -1090,6 +1179,43 @@ SimBody buildSimBody(const SimMesh &mesh,
                 static_cast<std::size_t>(bestSkinNode),
                 bestDistance,
                 lineCompliance);
+            sim.lineAttachmentNodes.push_back(
+                static_cast<std::size_t>(bestSkinNode));
+        }
+    }
+    std::sort(sim.lineAttachmentNodes.begin(),
+              sim.lineAttachmentNodes.end());
+    sim.lineAttachmentNodes.erase(
+        std::unique(sim.lineAttachmentNodes.begin(),
+                    sim.lineAttachmentNodes.end()),
+        sim.lineAttachmentNodes.end());
+
+    // Where the designed lines hang the wing: the mean carabiner position
+    // projected onto the mean rest chord. The imposed aerodynamic
+    // resultant is anchored a small margin aft of this, which is what
+    // gives the canopy a stable pitch trim at the angle the designer
+    // rigged the lines for.
+    if (!carabiners.empty() && !sim.ribChords.empty()) {
+        softwing::Vec3 carabinerMean;
+        for (const std::size_t node : carabiners) {
+            carabinerMean += body->nodes()[node].position;
+        }
+        carabinerMean /= static_cast<double>(carabiners.size());
+        softwing::Vec3 leadingMean;
+        softwing::Vec3 trailingMean;
+        for (const RibChord &rib : sim.ribChords) {
+            leadingMean += mesh.nodes[rib.leadingNode];
+            trailingMean += mesh.nodes[rib.trailingNode];
+        }
+        leadingMean /= static_cast<double>(sim.ribChords.size());
+        trailingMean /= static_cast<double>(sim.ribChords.size());
+        const softwing::Vec3 chord = trailingMean - leadingMean;
+        if (lengthSquared(chord) > 0.0) {
+            const double hangFraction =
+                dot(carabinerMean - leadingMean, chord)
+                / lengthSquared(chord);
+            sim.resultantChordFraction =
+                std::clamp(hangFraction, 0.10, 0.60);
         }
     }
 
@@ -1117,6 +1243,14 @@ SimBody buildSimBody(const SimMesh &mesh,
                 node,
                 length(body->nodes()[node].position - pilotPlace),
                 lineCompliance);
+            // Registered as drawable segments so the pilot is visible:
+            // without them the risers end mid-air and the mass the whole
+            // pendulum hangs on cannot be seen.
+            sim.lineSegments.push_back(
+                {sim.pilotNode,
+                 node,
+                 false,
+                 sideConstraint(sim.pilotNode, node)});
         }
     } else {
         for (const std::size_t node : carabiners) {
@@ -1202,6 +1336,16 @@ SimBody buildSimBody(const SimMesh &mesh,
     sim.body = std::move(body);
     applyPressure(sim, controls);
 
+    // The angle the designed line geometry rigs the wing to fly at: the
+    // wing-level angle of attack of the rest pose under the build-time
+    // airflow. The pitch-trim anchor holds the wing here.
+    {
+        const WingAeroSample rest = sampleWingAero(sim, controls);
+        if (rest.valid) {
+            sim.alphaTrimRadians = rest.alphaRadians;
+        }
+    }
+
     // Trim the pilot to the wing rather than the other way round. The load
     // model is crude enough that its absolute lift is not a number to hang a
     // wing loading off, but the pendulum only behaves if weight and lift are
@@ -1218,24 +1362,88 @@ SimBody buildSimBody(const SimMesh &mesh,
                 bodyMass += 1.0 / nodes[index].inverseMass;
             }
         }
-        // Sized off the lift the wing actually makes at its rest pose, and
-        // then held well below it. Two reasons for the margin: that rest
-        // pose over-reads, because the canopy is at its designed shape with
-        // no fabric slack anywhere; and this is a toy load model whose
-        // integrated lift comes out well under a real wing's. Hang a
-        // realistic pilot on it and the canopy simply folds. Better a light
-        // pilot on a wing that flies than a correct one on a wing that
-        // collapses -- and the mass ratio, which is what the pendulum
-        // actually cares about, is unaffected.
-        const double lift = std::abs(aerodynamicForce(sim).z);
-        const double wanted =
-            0.55 * lift / gravityMetresPerSecondSquared - bodyMass;
-        sim.pilotMass = std::clamp(wanted, 12.0, 60.0);
+        // Sized so the system is in vertical balance at its rest attitude:
+        // in a steady glide the weight equals the full aerodynamic
+        // resultant, sqrt(L² + D²), of the polar the force pass imposes.
+        // Sizing from the polar rather than from the integrated pressure
+        // field is what lets the pilot be a realistic weight — the
+        // pressure field's own lift under-reads badly, and a pilot sized
+        // from it hung the wing at a fraction of its real wing loading.
+        // In flight the pendulum hangs vertical and the path descends at
+        // the glide angle, so the wing flies at its rest angle PLUS the
+        // glide angle. Iterate that pair to a fixed point, then size the
+        // pilot so the weight matches the polar's resultant there — that
+        // is what lets the launched system hang at its own trim instead
+        // of climbing away or folding under a starved dynamic pressure.
+        const WingAeroSample aero = sampleWingAero(sim, controls);
+        double wanted = 90.0;
+        if (aero.valid && sim.planformArea > 0.0) {
+            const double aspectRatio = std::max(1.0, sim.aspectRatio);
+            const double finiteWing =
+                1.0 / (1.0 + 2.0 / (aspectRatio * kSpanEfficiency));
+            double alphaFly = aero.alphaRadians;
+            double lift = 0.0;
+            double drag = 0.0;
+            for (int iteration = 0; iteration < 4; ++iteration) {
+                const double liftCoefficient =
+                    finiteWing * wingLiftCoefficient(alphaFly);
+                const double dragCoefficient =
+                    kParasiticDragCoefficient
+                    + liftCoefficient * liftCoefficient
+                          / (kPi * aspectRatio * kSpanEfficiency);
+                lift = aero.dynamicPressure * sim.planformArea
+                       * liftCoefficient;
+                drag = aero.dynamicPressure
+                       * (sim.planformArea * dragCoefficient
+                          + kPilotDragArea);
+                sim.glideAngleRadians = std::atan2(drag, lift);
+                alphaFly = aero.alphaRadians + sim.glideAngleRadians;
+            }
+            sim.alphaTrimRadians = alphaFly;
+            // A little under the exact balance. Flying a few percent
+            // light trims a degree or two below the fixed point, which
+            // is the margin that keeps the arc-tilted tip sections out
+            // of their own stall — sized exactly, the slow trim creep
+            // walked the tips into stall at about seven seconds and the
+            // span folded.
+            wanted = 0.90 * std::hypot(lift, drag)
+                         / gravityMetresPerSecondSquared
+                     - bodyMass;
+        }
+        sim.pilotMass = std::clamp(wanted, 30.0, 250.0);
         nodes[sim.pilotNode].inverseMass = 1.0 / sim.pilotMass;
     }
     for (const std::size_t node : brakeHandles) {
         if (!controls.freeFlight) {
             sim.body->fixNode(node);
+        }
+    }
+
+    // Launch ON the glide, not at a dead stop in a horizontal wind. From
+    // rest, the imposed drag has no counterpart until the system develops
+    // its sink, and in that transient the light canopy gets yanked aft
+    // around the heavy pilot, loses its angle of attack, and pendulums
+    // over — measured every time, with every force scheme. So every node
+    // starts with the steady descent velocity the polar predicts: the
+    // relative wind then meets the canopy climbing at the glide angle,
+    // which is exactly the in-flight trim the pilot was sized for. The
+    // attitude needs no adjustment — the rest pose already hangs the
+    // pendulum vertical, which is its in-flight attitude too.
+    if (controls.freeFlight && sim.pilotNode != noConstraint
+        && sim.glideAngleRadians > 0.0) {
+        const WingAeroSample rest = sampleWingAero(sim, controls);
+        if (rest.valid) {
+            const softwing::Vec3 freestream =
+                rest.airspeed * rest.windDirection;
+            const softwing::Vec3 descent =
+                freestream
+                - rotateAbout(freestream,
+                              rest.spanAxis,
+                              sim.glideAngleRadians);
+            for (softwing::Node &node : sim.body->nodes()) {
+                node.velocity = descent;
+            }
+            applyPressure(sim, controls);
         }
     }
 
@@ -1275,6 +1483,24 @@ double sectionLiftCoefficient(double angleRadians)
     return linear * std::exp(-fade * fade);
 }
 
+// The wing-level version for the imposed polar. Same shape, but the stall
+// sits at the angle a whole paraglider actually stalls at (~20° with
+// camber) rather than the section law's deliberately early roll-off — the
+// line rigging holds the wing near 9–12°, and a law already fading there
+// starved the polar of lift exactly where the wing flies.
+double wingLiftCoefficient(double angleRadians)
+{
+    constexpr double kCamberOffset = 4.0 * kDegreesToRadians;
+    constexpr double kStallAngle = 20.0 * kDegreesToRadians;
+    constexpr double kStallWidth = 10.0 * kDegreesToRadians;
+    const double effective = angleRadians + kCamberOffset;
+    const double linear =
+        2.0 * kPi * std::sin(effective) * std::cos(effective);
+    const double excess = std::max(0.0, std::abs(effective) - kStallAngle);
+    const double fade = excess / kStallWidth;
+    return linear * std::exp(-fade * fade);
+}
+
 // Pressure coefficient on the outside of the skin, as a function of chord
 // fraction. Crude but the right shape, which is all the load field needs:
 //
@@ -1285,6 +1511,10 @@ double sectionLiftCoefficient(double angleRadians)
 //
 // Cp is capped at 1 because nothing in a subsonic flow exceeds stagnation
 // pressure, and a Cp above 1 would push the lower skin inward.
+// Defined further down, next to the freestream helpers.
+softwing::Vec3 canopyVelocityOf(const SimBody &sim);
+double wingLiftCoefficient(double angleRadians);
+
 double externalPressureCoefficient(double chordFraction,
                                    bool upperSurface,
                                    double liftCoefficient)
@@ -1334,12 +1564,24 @@ void applyPressure(SimBody &sim, const SimControls &controls)
     // depends on how the wing is moving. Without it there is no
     // aerodynamic damping anywhere in the model — nothing resists a pitch
     // rate — and the system pendulums until it goes over the top.
+    // Positive angle of attack means air from BELOW the chord: the
+    // downstream direction is the rest chord rotated UP by the slider
+    // angle. The convention ran the other way for a long time and was
+    // statically self-consistent — but dynamically it inverted the
+    // fundamental feedback (a sinking wing lost lift instead of gaining
+    // it), which made every free-flight attempt diverge.
+    // In free flight the slider is ignored and the air is level: the wing
+    // finds its own trim, and tilting the oncoming air is a hillside, not
+    // an angle-of-attack control — at the pinned default of 6° it trimmed
+    // the flying wing into its stall.
     const double airspeed =
         std::sqrt(2.0 * std::max(0.0, dynamicPressure) / kAirDensity);
-    const double angle = controls.angleOfAttackDegrees * kDegreesToRadians;
+    const double angle =
+        (controls.freeFlight ? 0.0 : controls.angleOfAttackDegrees)
+        * kDegreesToRadians;
     const softwing::Vec3 freestream =
         airspeed
-        * rotateAbout(sim.restChordDirection, sim.restSpanAxis, -angle);
+        * rotateAbout(sim.restChordDirection, sim.restSpanAxis, angle);
 
     const auto &nodes = sim.body->nodes();
 
@@ -1358,18 +1600,7 @@ void applyPressure(SimBody &sim, const SimControls &controls)
     // freestream it was verified against.
     softwing::Vec3 systemVelocity;
     if (controls.freeFlight) {
-        double mass = 0.0;
-        for (const softwing::Node &node : nodes) {
-            if (node.inverseMass <= 0.0) {
-                continue;
-            }
-            const double nodeMass = 1.0 / node.inverseMass;
-            systemVelocity += nodeMass * node.velocity;
-            mass += nodeMass;
-        }
-        if (mass > 0.0) {
-            systemVelocity /= mass;
-        }
+        systemVelocity = canopyVelocityOf(sim);
     }
 
     sim.ribLiftCoefficient.assign(sim.ribChords.size(), 0.0);
@@ -1398,8 +1629,9 @@ void applyPressure(SimBody &sim, const SimControls &controls)
         }
         const softwing::Vec3 windDirection = windInPlane / windSpeed;
         const double alongWind = dot(chordInPlane, windDirection);
+        // Positive when the wind comes from below the section's chord.
         const double acrossWind =
-            dot(cross(windDirection, chordInPlane), axis);
+            dot(cross(chordInPlane, windDirection), axis);
         ribLift[index] = sectionLiftCoefficient(
             std::atan2(acrossWind, alongWind));
         // The pressure scales with the FULL relative wind, not the part of
@@ -1439,9 +1671,11 @@ softwing::Vec3 freestreamVelocity(const SimBody &sim,
 {
     const double airspeed = std::sqrt(
         2.0 * std::max(0.0, controls.pressurePascal) / kAirDensity);
-    const double angle = controls.angleOfAttackDegrees * kDegreesToRadians;
+    const double angle =
+        (controls.freeFlight ? 0.0 : controls.angleOfAttackDegrees)
+        * kDegreesToRadians;
     return airspeed
-           * rotateAbout(sim.restChordDirection, sim.restSpanAxis, -angle);
+           * rotateAbout(sim.restChordDirection, sim.restSpanAxis, angle);
 }
 
 softwing::Vec3 systemVelocityOf(const SimBody &sim)
@@ -1459,90 +1693,435 @@ softwing::Vec3 systemVelocityOf(const SimBody &sim)
     return mass > 0.0 ? velocity / mass : velocity;
 }
 
+// The canopy's own bulk velocity. This — not the system's — is what the
+// air meets: measured against the system mean (mostly the pilot), the
+// canopy's pendulum swing was invisible to the aerodynamics, which
+// removed the damping that keeps a real canopy from whipping over on its
+// lines.
+softwing::Vec3 canopyVelocityOf(const SimBody &sim)
+{
+    const auto &nodes = sim.body->nodes();
+    const std::size_t count =
+        sim.canopyNodeCount > 0 ? sim.canopyNodeCount : nodes.size();
+    softwing::Vec3 velocity;
+    double mass = 0.0;
+    for (std::size_t index = 0; index < count; ++index) {
+        const softwing::Node &node = nodes[index];
+        if (node.inverseMass <= 0.0) {
+            continue;
+        }
+        const double nodeMass = 1.0 / node.inverseMass;
+        velocity += nodeMass * node.velocity;
+        mass += nodeMass;
+    }
+    return mass > 0.0 ? velocity / mass : velocity;
+}
+
 }  // namespace
 
-void applyAerodynamicDrag(SimBody &sim, const SimControls &controls)
+WingAeroSample sampleWingAero(const SimBody &sim,
+                              const SimControls &controls)
+{
+    WingAeroSample sample;
+    if (!sim.body || sim.ribChords.empty() || sim.faceAero.empty()
+        || !(sim.planformArea > 0.0)) {
+        return sample;
+    }
+
+    const softwing::Vec3 relative =
+        freestreamVelocity(sim, controls)
+        - (controls.freeFlight ? canopyVelocityOf(sim)
+                               : softwing::Vec3{});
+    const double speed = length(relative);
+    if (speed <= 1.0e-6) {
+        return sample;
+    }
+    sample.airspeed = speed;
+    sample.windDirection = relative / speed;
+    sample.dynamicPressure =
+        std::min(0.5 * kAirDensity * speed * speed,
+                 kMaximumDynamicPressureRatio
+                     * std::max(0.0, controls.pressurePascal));
+
+    const auto &nodes = sim.body->nodes();
+
+    // Live span axis between the tip ribs' leading edges, oriented like the
+    // rest one so a settled wing and its rest pose agree on signs.
+    softwing::Vec3 spanAxis =
+        nodes[sim.ribChords[sim.spanTipRibs[1]].leadingNode].position
+        - nodes[sim.ribChords[sim.spanTipRibs[0]].leadingNode].position;
+    if (length(spanAxis) <= 1.0e-6) {
+        spanAxis = sim.restSpanAxis;
+    }
+    spanAxis = normalized(spanAxis);
+    if (dot(spanAxis, sim.restSpanAxis) < 0.0) {
+        spanAxis = -1.0 * spanAxis;
+    }
+    sample.spanAxis = spanAxis;
+
+    // Mean live chord, length-weighted so a tip rib flapping about cannot
+    // steer the whole wing's angle, flattened into the plane normal to the
+    // span so sweep and arc do not contaminate the pitch measurement.
+    softwing::Vec3 chordSum;
+    for (const RibChord &rib : sim.ribChords) {
+        chordSum += nodes[rib.trailingNode].position
+                    - nodes[rib.leadingNode].position;
+    }
+    const softwing::Vec3 chordInPlane =
+        chordSum - dot(chordSum, spanAxis) * spanAxis;
+    const softwing::Vec3 windInPlane =
+        relative - dot(relative, spanAxis) * spanAxis;
+    if (length(chordInPlane) <= 1.0e-6 || length(windInPlane) <= 1.0e-6) {
+        return sample;
+    }
+    const softwing::Vec3 chordDirection = normalized(chordInPlane);
+    const softwing::Vec3 windPlaneDirection = normalized(windInPlane);
+    const double alongWind = dot(chordDirection, windPlaneDirection);
+    // Positive when the wind comes from below the chord — the physical
+    // convention, and the one that makes sinking raise the angle of
+    // attack (negative feedback) rather than lower it.
+    const double acrossWind =
+        dot(cross(chordDirection, windPlaneDirection), spanAxis);
+    sample.alphaRadians = std::atan2(acrossWind, alongWind);
+
+    // The same section law the pressure field uses — camber offset, stall
+    // roll-off and all — knocked down by the finite-wing factor, so the
+    // wing-level lift slope is the three-dimensional one. The stall
+    // roll-off doubles as pitch stability: a wing pitched to a silly angle
+    // stops pulling instead of pulling harder.
+    const double aspectRatio = std::max(1.0, sim.aspectRatio);
+    const double finiteWing =
+        1.0 / (1.0 + 2.0 / (aspectRatio * kSpanEfficiency));
+    sample.liftCoefficient =
+        finiteWing * wingLiftCoefficient(sample.alphaRadians);
+    sample.dragCoefficient =
+        kParasiticDragCoefficient
+        + sample.liftCoefficient * sample.liftCoefficient
+              / (kPi * aspectRatio * kSpanEfficiency);
+
+    // Lift is normal to the relative wind, in the plane the wind and the
+    // wing's up direction share. With the span oriented +x and the wind
+    // running chordwise +y this is +z, and the sign of the lift comes from
+    // the coefficient, not from flipping this axis.
+    const softwing::Vec3 lift = cross(spanAxis, sample.windDirection);
+    if (length(lift) <= 1.0e-6) {
+        return sample;
+    }
+    sample.liftDirection = normalized(lift);
+    sample.valid = true;
+    return sample;
+}
+
+void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
 {
     if (!sim.body) {
         return;
     }
     sim.body->clearExternalForces();
-    sim.lastDragForce = {};
-    if (sim.faceAero.empty()) {
+    sim.lastAeroForce = {};
+    sim.lastLift = 0.0;
+    sim.lastDrag = 0.0;
+    sim.lastGlideRatio = 0.0;
+    sim.lastAlphaDegrees = 0.0;
+    sim.lastAirspeed = 0.0;
+
+    WingAeroSample sample = sampleWingAero(sim, controls);
+    if (!sample.valid) {
         return;
     }
 
-    const softwing::Vec3 relative =
-        freestreamVelocity(sim, controls)
-        - (controls.freeFlight ? systemVelocityOf(sim) : softwing::Vec3{});
-    const double speed = length(relative);
-    if (speed <= 1.0e-6) {
-        return;
+    // Low-pass the angle of attack before it reaches the polar. The raw
+    // angle is read off the live fabric, and fabric has pitch modes; a
+    // force with ±2 kN of authority that follows those modes instantly is
+    // a feedback loop, and it was measured tearing the canopy apart inside
+    // half a second. The filtered angle responds on the wake's timescale
+    // instead of the fabric's.
+    if (!std::isfinite(sim.alphaFilteredRadians)) {
+        sim.alphaFilteredRadians = sample.alphaRadians;
+        sim.alphaSlowRadians = sample.alphaRadians;
+        sim.alphaRateRadiansPerSecond = 0.0;
+    } else {
+        const double blend = std::min(
+            1.0, simulationTimeStep / alphaFilterSeconds);
+        const double previous = sim.alphaFilteredRadians;
+        sim.alphaFilteredRadians +=
+            (sample.alphaRadians - previous) * blend;
+        sim.alphaRateRadiansPerSecond =
+            (sim.alphaFilteredRadians - previous) / simulationTimeStep;
+        sim.alphaSlowRadians +=
+            (sim.alphaFilteredRadians - sim.alphaSlowRadians)
+            * std::min(1.0, simulationTimeStep / kAnchorWashoutSeconds);
     }
-    const softwing::Vec3 windDirection = relative / speed;
-    const double dynamicPressure =
-        std::min(0.5 * kAirDensity * speed * speed,
-                 kMaximumDynamicPressureRatio
-                     * std::max(0.0, controls.pressurePascal));
+    const double aspectRatio = std::max(1.0, sim.aspectRatio);
+    const double finiteWing =
+        1.0 / (1.0 + 2.0 / (aspectRatio * kSpanEfficiency));
+    sample.alphaRadians = sim.alphaFilteredRadians;
+    const double attachedLift = std::max(
+        kMinimumLiftCoefficient,
+        finiteWing * wingLiftCoefficient(sample.alphaRadians));
 
-    // Two terms per unit of wetted area. Friction is what the fabric and the
-    // lines cost just by being there; the induced term is the price of
-    // making lift at all, and it is the one that rewards a long thin wing.
-    // Wetted area is about twice the planform, which is where the halving
-    // in the induced factor comes from.
-    const double induced =
-        1.0 / (2.0 * kPi * std::max(1.0, sim.aspectRatio)
-               * kSpanEfficiency);
+    // Blend toward flat-plate normal force past the stall: the attached
+    // polar between ±20°, the parachute beyond ±40°, mixed in between.
+    const double sinAlpha = std::sin(sample.alphaRadians);
+    const double cosAlpha = std::cos(sample.alphaRadians);
+    const double postStall = std::clamp(
+        (std::abs(sample.alphaRadians) - 20.0 * kDegreesToRadians)
+            / (20.0 * kDegreesToRadians),
+        0.0,
+        1.0);
+    const double plateNormal = kFlatPlateNormal * sinAlpha;
+    sample.liftCoefficient =
+        (1.0 - postStall) * attachedLift
+        + postStall * plateNormal * cosAlpha;
+    const double brakeFraction = std::clamp(
+        (controls.brakeLeft + controls.brakeRight)
+            / (2.0 * kBrakeFullPullMetres),
+        0.0,
+        1.0);
+    sample.dragCoefficient =
+        kParasiticDragCoefficient
+        + kBrakeDragCoefficient * brakeFraction
+        + sample.liftCoefficient * sample.liftCoefficient
+              / (kPi * aspectRatio * kSpanEfficiency)
+        + postStall * plateNormal * sinAlpha;
 
-    // The pressure field's own along-wind resultant is thrust, and a large
-    // one: an inviscid Cp integrated over a curved leading edge recovers
-    // the full leading-edge suction that a real wing loses to viscosity.
-    // Raising the suction until the lift is realistic only makes it worse,
-    // because both scale together. So the along-wind direction is taken off
-    // the pressure field entirely — cancelled here and replaced by a drag
-    // model. The pressure field keeps its job of shaping the fabric, which
-    // is what it is good at; it was never going to set a glide ratio.
+    const double q = sample.dynamicPressure;
+    const double area = sim.planformArea;
+    const softwing::Vec3 wingForce =
+        q * area
+        * (sample.liftCoefficient * sample.liftDirection
+           + sample.dragCoefficient * sample.windDirection);
+
+    // What the polar wants minus what the pressure field already made: the
+    // pressure resultant is cancelled in full — its lift is unrealistically
+    // small and its along-wind component is spurious thrust, and the two
+    // cannot be fixed independently — and the polar's force imposed in its
+    // place. Spread by area so the local fabric loads, which are the
+    // pressure field's actual job, are disturbed as little as possible.
+    const softwing::Vec3 correction = wingForce - aerodynamicForce(sim);
+
     const auto &nodes = sim.body->nodes();
     const auto &triangles = sim.body->triangles();
-    const double pressureAlongWind =
-        dot(aerodynamicForce(sim), windDirection);
 
-    double totalArea = 0.0;
-    std::vector<double> faceArea(sim.skinTriangleCount, 0.0);
+    // Where the total resultant must act: the hang-line-derived fraction
+    // of the live mean chord. The line geometry was drawn for a wing whose
+    // resultant sits there; making that true here is what lets the
+    // designed lines set the trim angle.
+    softwing::Vec3 leadingMean;
+    softwing::Vec3 trailingMean;
+    for (const RibChord &rib : sim.ribChords) {
+        leadingMean += nodes[rib.leadingNode].position;
+        trailingMean += nodes[rib.trailingNode].position;
+    }
+    leadingMean /= static_cast<double>(sim.ribChords.size());
+    trailingMean /= static_cast<double>(sim.ribChords.size());
+    // On the hang line at the in-flight trim, travelling aft/forward
+    // with angle-of-attack deviations from it and with the
+    // angle-of-attack rate. The static term matters as much as the
+    // damping: with a pure damper the wing had nothing restoring it
+    // against SLOW drifts, and it mushed itself into stall over ten
+    // quiet seconds. The target is the build-time fixed point — the
+    // angle the line rigging itself settles at — so the anchor and the
+    // lines pull the same way; targeting the rest-pose angle instead
+    // put the two in a standing fight.
+    const double anchorFraction = std::clamp(
+        sim.resultantChordFraction
+            + kAnchorTravelPerRadian
+                  * (sim.alphaFilteredRadians - sim.alphaTrimRadians)
+            + std::clamp(
+                  kAnchorRateSeconds * sim.alphaRateRadiansPerSecond,
+                  -kAnchorRateLimit,
+                  kAnchorRateLimit),
+        0.10,
+        0.70);
+    const softwing::Vec3 anchor =
+        leadingMean
+        + anchorFraction * (trailingMean - leadingMean);
+    const softwing::Vec3 liveChord = trailingMean - leadingMean;
+    if (lengthSquared(liveChord) <= 1.0e-9) {
+        return;
+    }
+    const softwing::Vec3 chordDirection = normalized(liveChord);
+
+    // The pressure field's pitch moment about the anchor. Its span-axis
+    // component gets cancelled below; roll and yaw are left alone on
+    // purpose — they are how asymmetric brake input steers, and they
+    // belong to the pressure distribution.
+    softwing::Vec3 pressureMoment;
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const softwing::Triangle &tri = triangles[face];
         const softwing::Vec3 &a = nodes[tri.a].position;
         const softwing::Vec3 &b = nodes[tri.b].position;
         const softwing::Vec3 &c = nodes[tri.c].position;
-        faceArea[face] = length(0.5 * cross(b - a, c - a));
-        totalArea += faceArea[face];
-    }
-    if (!(totalArea > 0.0)) {
-        return;
+        const softwing::Vec3 pressureForce =
+            triangles[face].pressureDifference * 0.5
+            * cross(b - a, c - a);
+        pressureMoment +=
+            cross((a + b + c) / 3.0 - anchor, pressureForce);
     }
 
-    softwing::Vec3 total;
+    // The correction enters the canopy the only way fabric carries load
+    // gracefully: as pressure. Every other application was measured
+    // failing structurally — point loads at the line attachments dented
+    // the intrados into the cells, an area-spread body force leaned the
+    // canopy over, a fabric-distributed couple crushed the nose. Here a
+    // per-face pressure increment δp_i = n̂_i·v + μ·s_i is added to the
+    // stamped field, with (v, μ) solved from a 4x4 linear system so that
+    // the increment's resultant equals the correction exactly and the
+    // total pitch moment about the anchor is zero. s_i is the chordwise
+    // station, so μ is a linear chordwise pressure gradient — the
+    // pressure-native form of a pitch couple. Roll and yaw moments are
+    // deliberately left to the base pressure field: they are how brakes
+    // steer.
+    static const bool noCouple =
+        qEnvironmentVariableIsSet("LEP_AERO_NO_COUPLE");
+    static const bool noCorrection =
+        qEnvironmentVariableIsSet("LEP_AERO_NO_CORRECTION");
+
+    std::vector<softwing::Vec3> areaVector(sim.skinTriangleCount);
+    std::vector<softwing::Vec3> faceCentre(sim.skinTriangleCount);
+    std::vector<double> station(sim.skinTriangleCount, 0.0);
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const softwing::Triangle &tri = triangles[face];
-        const double area = faceArea[face];
-        const std::size_t rib = sim.faceAero[face].rib;
-        const double lift = rib < sim.ribLiftCoefficient.size()
-                                ? sim.ribLiftCoefficient[rib]
-                                : 0.0;
-        const double coefficient =
-            kFrictionCoefficient + induced * lift * lift;
-        // Spread the cancellation by area, so it does not distort the
-        // spanwise load the way lumping it anywhere would.
-        const double magnitude = dynamicPressure * coefficient * area
-                                 - pressureAlongWind * area / totalArea;
-        const softwing::Vec3 force = magnitude * windDirection;
-        total += force;
-        const softwing::Vec3 share = force / 3.0;
-        sim.body->addForce(tri.a, share);
-        sim.body->addForce(tri.b, share);
-        sim.body->addForce(tri.c, share);
+        const softwing::Vec3 &a = nodes[tri.a].position;
+        const softwing::Vec3 &b = nodes[tri.b].position;
+        const softwing::Vec3 &c = nodes[tri.c].position;
+        areaVector[face] = 0.5 * cross(b - a, c - a);
+        faceCentre[face] = (a + b + c) / 3.0;
+        station[face] = dot(faceCentre[face] - anchor, chordDirection);
     }
-    sim.lastDragForce = total;
+
+    // Assemble the 4x4 system: columns are (v.x, v.y, v.z, μ), rows are
+    // the three force components and the span-axis moment.
+    double system[4][5] = {};
+    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+        const softwing::Vec3 &areaN = areaVector[face];
+        const double areaLength = length(areaN);
+        if (areaLength <= 0.0) {
+            continue;
+        }
+        const softwing::Vec3 normal = areaN / areaLength;
+        const softwing::Vec3 momentArm =
+            cross(faceCentre[face] - anchor, areaN);
+        const double basis[4] = {normal.x, normal.y, normal.z,
+                                 station[face]};
+        for (int column = 0; column < 4; ++column) {
+            system[0][column] += basis[column] * areaN.x;
+            system[1][column] += basis[column] * areaN.y;
+            system[2][column] += basis[column] * areaN.z;
+            system[3][column] +=
+                basis[column] * dot(momentArm, sample.spanAxis);
+        }
+    }
+    system[0][4] = noCorrection ? 0.0 : correction.x;
+    system[1][4] = noCorrection ? 0.0 : correction.y;
+    system[2][4] = noCorrection ? 0.0 : correction.z;
+    system[3][4] =
+        noCouple ? 0.0 : -dot(pressureMoment, sample.spanAxis);
+
+    // Gaussian elimination with partial pivoting; a singular system (a
+    // degenerate skin) just skips the retrim.
+    bool solved = true;
+    for (int pivot = 0; pivot < 4 && solved; ++pivot) {
+        int best = pivot;
+        for (int row = pivot + 1; row < 4; ++row) {
+            if (std::abs(system[row][pivot])
+                > std::abs(system[best][pivot])) {
+                best = row;
+            }
+        }
+        if (std::abs(system[best][pivot]) < 1.0e-9) {
+            solved = false;
+            break;
+        }
+        if (best != pivot) {
+            for (int column = 0; column < 5; ++column) {
+                std::swap(system[pivot][column], system[best][column]);
+            }
+        }
+        for (int row = pivot + 1; row < 4; ++row) {
+            const double factor =
+                system[row][pivot] / system[pivot][pivot];
+            for (int column = pivot; column < 5; ++column) {
+                system[row][column] -= factor * system[pivot][column];
+            }
+        }
+    }
+    if (solved) {
+        double solution[4] = {};
+        for (int row = 3; row >= 0; --row) {
+            double value = system[row][4];
+            for (int column = row + 1; column < 4; ++column) {
+                value -= system[row][column] * solution[column];
+            }
+            solution[row] = value / system[row][row];
+        }
+        const softwing::Vec3 gradient{solution[0], solution[1],
+                                      solution[2]};
+        const double couple = solution[3];
+        for (std::size_t face = 0; face < sim.skinTriangleCount;
+             ++face) {
+            const double areaLength = length(areaVector[face]);
+            if (areaLength <= 0.0) {
+                continue;
+            }
+            const softwing::Vec3 normal = areaVector[face] / areaLength;
+            const double increment =
+                dot(normal, gradient) + couple * station[face];
+            // The base field never pulls a face inward (Cp is capped at
+            // stagnation); the retrim may, a little, but a face sucked
+            // hard into the cell is how the intrados got dented before,
+            // so the combined field is floored just below zero and
+            // capped like the base field.
+            const double base = triangles[face].pressureDifference;
+            const double combined = std::clamp(
+                base + increment,
+                -0.5 * q,
+                kMaximumDynamicPressureRatio
+                    * std::max(q, std::max(0.0,
+                                           controls.pressurePascal)));
+            sim.body->setFacePressureDifference(face, combined);
+        }
+
+        // What actually got applied, after clamping: the residuals say
+        // whether the solve's promise survived contact with the floor
+        // and the cap.
+        softwing::Vec3 achieved;
+        softwing::Vec3 achievedMoment;
+        for (std::size_t face = 0; face < sim.skinTriangleCount;
+             ++face) {
+            const softwing::Vec3 force =
+                triangles[face].pressureDifference * areaVector[face];
+            achieved += force;
+            achievedMoment += cross(faceCentre[face] - anchor, force);
+        }
+        sim.lastForceResidual = achieved - wingForce;
+        sim.lastPitchResidual = dot(achievedMoment, sample.spanAxis);
+    }
+
+    // The pilot as a bluff body, dragged where the mass hangs, against
+    // the pilot's own relative wind. Beyond trimming the pendulum lean,
+    // this is the pendulum's damper: a swinging pilot moves through the
+    // air and pays for it.
+    softwing::Vec3 pilotDrag;
+    if (sim.pilotNode != noConstraint) {
+        const softwing::Vec3 pilotWind =
+            freestreamVelocity(sim, controls)
+            - nodes[sim.pilotNode].velocity;
+        const double pilotSpeed = std::min(length(pilotWind), 40.0);
+        pilotDrag = 0.5 * kAirDensity * kPilotDragArea * pilotSpeed
+                    * pilotWind;
+        sim.body->addForce(sim.pilotNode, pilotDrag);
+    }
+
+    sim.lastAeroForce = wingForce + pilotDrag;
+    sim.lastLift = q * area * sample.liftCoefficient;
+    sim.lastDrag =
+        q * area * sample.dragCoefficient + length(pilotDrag);
+    sim.lastGlideRatio =
+        sim.lastDrag > 1.0e-6 ? sim.lastLift / sim.lastDrag : 0.0;
+    sim.lastAlphaDegrees = sample.alphaRadians / kDegreesToRadians;
+    sim.lastAirspeed = sample.airspeed;
 }
 
 AeroSummary aerodynamicSummary(const SimBody &sim,
@@ -1552,17 +2131,25 @@ AeroSummary aerodynamicSummary(const SimBody &sim,
     if (!sim.body) {
         return summary;
     }
-    summary.force = aerodynamicForce(sim) + sim.lastDragForce;
-    const softwing::Vec3 relative =
-        freestreamVelocity(sim, controls)
-        - (controls.freeFlight ? systemVelocityOf(sim) : softwing::Vec3{});
+    if (controls.freeFlight) {
+        // The imposed polar is the whole aerodynamic force in free flight;
+        // the pressure resultant is cancelled against it by construction.
+        summary.force = sim.lastAeroForce;
+        summary.lift = sim.lastLift;
+        summary.drag = sim.lastDrag;
+        summary.glideRatio = sim.lastGlideRatio;
+        return summary;
+    }
+    // Pinned, the pressure field is all there is. It carries no drag
+    // model, so resolve it against the airflow for what it is worth.
+    summary.force = aerodynamicForce(sim);
+    const softwing::Vec3 relative = freestreamVelocity(sim, controls);
     if (length(relative) <= 1.0e-6) {
         return summary;
     }
     const softwing::Vec3 windDirection = normalized(relative);
     summary.drag = dot(summary.force, windDirection);
-    summary.lift =
-        length(summary.force - summary.drag * windDirection);
+    summary.lift = length(summary.force - summary.drag * windDirection);
     summary.glideRatio =
         summary.drag > 1.0e-6 ? summary.lift / summary.drag : 0.0;
     return summary;
@@ -1639,28 +2226,34 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
             std::max(0.05, brake.restLength - pull);
     }
     applyPressure(sim, controls);
-    // Drag is part of the free-flight experiment, not of the pinned tab.
-    // Pinned, the canopy hangs on fixed carabiners and an along-wind force
-    // just leans it against its lines; it also lands on a lift model that
-    // is not yet calibrated to carry it (see docs/xpbd-performance.md).
+    // The polar force pass is free flight's: pinned, the canopy hangs on
+    // fixed carabiners and a system-level force just leans it against its
+    // lines.
     if (controls.freeFlight) {
-        applyAerodynamicDrag(sim, controls);
+        applyAerodynamicForces(sim, controls);
     }
 
     softwing::StepSettings settings;
     settings.timeStep = simulationTimeStep;
     settings.substeps = controls.substeps;
     settings.constraintIterations = controls.constraintIterations;
-    // Free flight puts real gravity on an unpinned system, so the damping
-    // has to come down too or it would eat the pendulum it exists to show.
-    // Pinned, there is nothing to fall and the old heavy damping keeps the
-    // fabric quiet.
     settings.gravity =
         controls.freeFlight
             ? softwing::Vec3{0.0, 0.0, -gravityMetresPerSecondSquared}
             : softwing::Vec3{0.0, 0.0, 0.0};
+    // Free flight damps velocity RELATIVE to the system's bulk motion.
+    // Damping absolute velocity at glide speed is a fake drag several
+    // times the whole real drag budget — it, not the aerodynamics, would
+    // set the trim speed. Referred to the bulk velocity, the damping
+    // quiets fabric ringing and resists tumbling while leaving the glide
+    // itself untouched; the reference is a whole-frame constant, so within
+    // the step it stays a pure change of frame. Pinned, nothing glides and
+    // the old heavy absolute damping keeps the fabric quiet.
     settings.velocityDampingPerSecond =
         controls.freeFlight ? systemDampingPerSecond : 3.0;
+    if (controls.freeFlight) {
+        settings.dampingReferenceVelocity = systemVelocityOf(sim);
+    }
     settings.workerThreads = controls.workerThreads;
     settings.performanceProfile = controls.performanceProfile;
     sim.body->step(settings);

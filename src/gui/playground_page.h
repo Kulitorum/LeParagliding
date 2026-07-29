@@ -78,6 +78,9 @@ private:
     QCheckBox *showLineTension_ = nullptr;
     QSlider *lineScale_ = nullptr;
     QComboBox *quality_ = nullptr;
+    QCheckBox *freeFlight_ = nullptr;
+    QLabel *flightLabel_ = nullptr;
+    QTimer *flightTimer_ = nullptr;
     QLabel *stressLegend_ = nullptr;
     QTimer *legendTimer_ = nullptr;
     QByteArray pendingData_;

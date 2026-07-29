@@ -40,6 +40,11 @@ count; `workerThreads == 0` still selects the untouched serial sweep):
   with three of its five divisions removed.
 - `constraintColouringReport` / `constraintColouringView` — observation only,
   for the benchmark and for the GPU backend in `tools/`.
+- `StepSettings::dampingReferenceVelocity` — what the velocity damping
+  decays toward. Defaults to zero, which reduces bit-for-bit to the
+  historical absolute damping; the Playground's free flight sets it to the
+  system's bulk velocity so fabric ringing is damped without the damping
+  acting as a fake drag on the glide.
 
 Re-syncing from SoftWingLab now means merging rather than copying. Anything
 LEparagliding-specific still belongs in `src/gui` / `src/engine` instead.

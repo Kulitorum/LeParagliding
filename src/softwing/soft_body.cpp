@@ -634,6 +634,9 @@ void SoftBody::step(const StepSettings& settings) {
         !std::isfinite(settings.gravity.x) ||
         !std::isfinite(settings.gravity.y) ||
         !std::isfinite(settings.gravity.z) ||
+        !std::isfinite(settings.dampingReferenceVelocity.x) ||
+        !std::isfinite(settings.dampingReferenceVelocity.y) ||
+        !std::isfinite(settings.dampingReferenceVelocity.z) ||
         (!contactPairs_.empty() &&
          (settings.contactCcd.conservativeIterations < 0 ||
           settings.contactCcd.intervalSubdivisions < 0 ||
@@ -671,6 +674,9 @@ void SoftBody::stepCoupled(const StepSettings& settings,
         !std::isfinite(settings.gravity.x) ||
         !std::isfinite(settings.gravity.y) ||
         !std::isfinite(settings.gravity.z) ||
+        !std::isfinite(settings.dampingReferenceVelocity.x) ||
+        !std::isfinite(settings.dampingReferenceVelocity.y) ||
+        !std::isfinite(settings.dampingReferenceVelocity.z) ||
         (!contactPairs_.empty() &&
          (settings.contactCcd.conservativeIterations < 0 ||
           settings.contactCcd.intervalSubdivisions < 0 ||
@@ -1066,6 +1072,11 @@ void SoftBody::predictPositions(double dt,
                                 const StepSettings& settings,
                                 double damping,
                                 WorkerPool* pool) {
+    // Damping decays velocity toward the reference, not toward zero. With
+    // the default zero reference this is bit-for-bit the historical
+    // `(velocity + a·dt) * damping`: `x - Vec3{}` and `Vec3{} + x` do not
+    // perturb any finite double.
+    const Vec3 reference = settings.dampingReferenceVelocity;
     const auto predict = [&](std::size_t begin, std::size_t end) {
         for (std::size_t index = begin; index < end; ++index) {
             Node& node = nodes_[index];
@@ -1076,7 +1087,9 @@ void SoftBody::predictPositions(double dt,
             }
             const Vec3 acceleration =
                 settings.gravity + node.force * node.inverseMass;
-            node.velocity = (node.velocity + acceleration * dt) * damping;
+            node.velocity =
+                reference +
+                (node.velocity + acceleration * dt - reference) * damping;
             node.position += node.velocity * dt;
         }
     };

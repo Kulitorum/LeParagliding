@@ -55,6 +55,9 @@ struct Options
     double pressurePascal = 80.0;
     double angleOfAttackDegrees = 6.0;
     bool swing = false;
+    bool polar = false;
+    double brakeMetres = 0.0;
+    int glideFrames = 0;
     bool freeFlight = false;
     bool csv = false;
     bool gpu = false;
@@ -94,6 +97,18 @@ struct Options
             options.angleOfAttackDegrees = degrees;
         } else if (argument == "--swing") {
             options.swing = true;
+            options.freeFlight = true;
+        } else if (argument == "--polar") {
+            options.polar = true;
+        } else if (argument == "--brake") {
+            int centimetres = 0;
+            if (!value(centimetres)) return false;
+            options.brakeMetres = centimetres / 100.0;
+        } else if (argument == "--glide") {
+            options.glideFrames = 1800;
+            if (index + 1 < argc && argv[index + 1][0] != '-') {
+                options.glideFrames = std::atoi(argv[++index]);
+            }
             options.freeFlight = true;
         } else if (argument == "--free-flight") {
             options.freeFlight = true;
@@ -253,6 +268,176 @@ int main(int argc, char **argv)
     const std::size_t nodeCount = sim.body->nodes().size();
     const std::size_t constraintCount = sim.body->constraints().size();
     const std::size_t triangleCount = sim.body->triangles().size();
+
+    // The rigid polar: the canopy held at its design shape (no stepping at
+    // all), the airflow swept over angle of attack, and the imposed
+    // wing-level polar read back at each angle. This is the calibration
+    // view — everything here is analytic in the rest geometry, so a wrong
+    // aspect ratio, a wrong reference area or a wrong sign shows up in
+    // seconds without a solver in the loop.
+    if (options.polar) {
+        std::printf("mesh            %s\n", options.meshPath.c_str());
+        std::printf("wing            %.2f m^2 projected planform, "
+                    "aspect ratio %.2f, span %.2f m\n",
+                    sim.planformArea,
+                    sim.aspectRatio,
+                    spanExtent(sim));
+        std::printf("airspeed        %.1f m/s (q = %.0f Pa)\n\n",
+                    std::sqrt(2.0 * options.pressurePascal / 1.225),
+                    options.pressurePascal);
+        std::printf("  slider   wing alpha      CL      CD     L/D"
+                    "     lift N   drag N   pressure N (z / along-wind)\n");
+        for (int degrees = -4; degrees <= 14; ++degrees) {
+            pg::SimControls sweep = controls;
+            sweep.angleOfAttackDegrees = degrees;
+            sweep.freeFlight = false;
+            pg::applyPressure(sim, sweep);
+            const pg::WingAeroSample sample =
+                pg::sampleWingAero(sim, sweep);
+            if (!sample.valid) {
+                std::printf("  %+5d    (no sample)\n", degrees);
+                continue;
+            }
+            const double lift = sample.dynamicPressure * sim.planformArea
+                                * sample.liftCoefficient;
+            const double drag =
+                sample.dynamicPressure
+                * (sim.planformArea * sample.dragCoefficient
+                   + 0.35);
+            const softwing::Vec3 pressure = pg::aerodynamicForce(sim);
+            std::printf("  %+5d    %+7.2f deg  %6.3f  %6.4f  %6.2f"
+                        "   %8.1f  %7.1f   %8.1f / %+8.1f\n",
+                        degrees,
+                        sample.alphaRadians * 180.0 / 3.14159265358979,
+                        sample.liftCoefficient,
+                        sample.dragCoefficient,
+                        sample.dragCoefficient > 0.0
+                            ? sample.liftCoefficient
+                                  / sample.dragCoefficient
+                            : 0.0,
+                        lift,
+                        drag,
+                        pressure.z,
+                        dot(pressure, sample.windDirection));
+        }
+        return 0;
+    }
+
+    // The free-flight convergence run: does the whole coupled system —
+    // canopy, lines, pilot, polar force pass, relative-wind feedback —
+    // settle into a steady glide and keep its shape while doing it?
+    if (options.glideFrames > 0) {
+        if (sim.pilotNode == pg::noConstraint) {
+            std::fprintf(stderr, "This mesh has no suspension lines.\n");
+            return 1;
+        }
+        std::printf("pilot mass      %.1f kg\n", sim.pilotMass);
+        std::printf("system          %.2f m^2 planform, AR %.2f\n\n",
+                    sim.planformArea,
+                    sim.aspectRatio);
+        std::printf("   time    airspeed   alpha     L/D    fwd m/s"
+                    "   sink m/s   span m   volume    pilot below\n");
+        const auto systemVelocity = [&sim] {
+            softwing::Vec3 velocity;
+            double mass = 0.0;
+            for (const softwing::Node &node : sim.body->nodes()) {
+                if (node.inverseMass <= 0.0) {
+                    continue;
+                }
+                const double nodeMass = 1.0 / node.inverseMass;
+                velocity += nodeMass * node.velocity;
+                mass += nodeMass;
+            }
+            return mass > 0.0 ? velocity / mass : velocity;
+        };
+        for (int frame = 0; frame < options.glideFrames; ++frame) {
+            // Brakes come on after two seconds of hands-up flight, so the
+            // trim settles first and the brake response is legible.
+            controls.brakeLeft = controls.brakeRight =
+                frame >= 120 ? options.brakeMetres : 0.0;
+            pg::stepSimulation(sim, controls);
+            // Finer cadence over the first second, where launch transients
+            // live.
+            if (frame < 120 ? frame % 6 != 5 : frame % 60 != 59) {
+                continue;
+            }
+            const softwing::Vec3 velocity = systemVelocity();
+            const softwing::Vec3 pilot =
+                sim.body->nodes()[sim.pilotNode].position;
+            softwing::Vec3 canopy;
+            std::size_t counted = 0;
+            for (std::size_t node = 0; node < sim.body->nodes().size();
+                 ++node) {
+                canopy += sim.body->nodes()[node].position;
+                ++counted;
+            }
+            canopy /= static_cast<double>(counted);
+            const double forward = dot(velocity, sim.restChordDirection);
+            std::printf("  %5.1fs   %7.2f   %+6.2f  %6.2f    %+6.2f"
+                        "    %+6.2f    %6.2f    %+5.1f%%     %6.2f m"
+                        "   [L %5.0f N, Pz %5.0f N]\n",
+                        (frame + 1) / 60.0,
+                        sim.lastAirspeed,
+                        sim.lastAlphaDegrees,
+                        sim.lastGlideRatio,
+                        forward,
+                        velocity.z,
+                        spanExtent(sim),
+                        designVolume > 0.0
+                            ? 100.0 * (enclosedVolume(sim) - designVolume)
+                                  / designVolume
+                            : 0.0,
+                        canopy.z - pilot.z,
+                        sim.lastLift,
+                        pg::aerodynamicForce(sim).z);
+            // Is the wing's measured chord rotating rigidly, or is the
+            // trailing edge just deforming under it? Compare the pitch of
+            // the LE->TE chord with the pitch of centroid->LE, which no
+            // TE flutter can touch.
+            softwing::Vec3 leadingMean;
+            softwing::Vec3 trailingMean;
+            for (const pg::RibChord &rib : sim.ribChords) {
+                leadingMean +=
+                    sim.body->nodes()[rib.leadingNode].position;
+                trailingMean +=
+                    sim.body->nodes()[rib.trailingNode].position;
+            }
+            leadingMean /= static_cast<double>(sim.ribChords.size());
+            trailingMean /= static_cast<double>(sim.ribChords.size());
+            const auto pitchOf = [](const softwing::Vec3 &vec) {
+                return std::atan2(vec.z, vec.y) * 180.0
+                       / 3.14159265358979;
+            };
+            double nosePressure = 0.0;
+            double tailPressure = 0.0;
+            std::size_t noseCount = 0;
+            std::size_t tailCount = 0;
+            for (std::size_t face = 0; face < sim.skinTriangleCount;
+                 ++face) {
+                const double fraction = sim.faceAero[face].chordFraction;
+                const double delta =
+                    sim.body->triangles()[face].pressureDifference;
+                if (fraction < 0.2) {
+                    nosePressure += delta;
+                    ++noseCount;
+                } else if (fraction > 0.8) {
+                    tailPressure += delta;
+                    ++tailCount;
+                }
+            }
+            std::printf("           residual F (%.0f %.0f %.0f) N,"
+                        "  pitch M %.0f N.m, chord pitch %+.1f deg,"
+                        "  LE dp %.0f Pa, TE dp %.0f Pa\n",
+                        sim.lastForceResidual.x,
+                        sim.lastForceResidual.y,
+                        sim.lastForceResidual.z,
+                        sim.lastPitchResidual,
+                        pitchOf(trailingMean - leadingMean),
+                        noseCount > 0 ? nosePressure / noseCount : 0.0,
+                        tailCount > 0 ? tailPressure / tailCount : 0.0);
+        }
+        return 0;
+    }
 
     // Does the pilot actually swing? Settle the system, then haul both
     // brakes and watch where the pilot goes relative to the canopy. A

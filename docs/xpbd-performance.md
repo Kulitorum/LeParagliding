@@ -464,55 +464,94 @@ and would need 461 km/h — the figure in circulation is almost certainly
 0.1 **kPa** or ~1 mbar. The Pressure slider's 0–100 Pa range, default 80,
 corresponds to 0–47 km/h with a default of 41 km/h, which is ordinary trim.
 
-## Free flight (experimental, off by default)
+## Free flight
 
 `SimControls::freeFlight` unpins everything: gravity on, a pilot mass slung
 under the risers, brakes that shorten a real line instead of dragging a
 synthetic handle, and the whole system translated back to the origin after
 each step (`recentreSystem` — position and previous position move together,
-so it is a change of origin and not a brake on the system).
+so it is a change of origin and not a brake on the system). The Playground
+exposes it as the **Free flight** checkbox on the Solver row, with a live
+readout (airspeed, sink, glide ratio, angle of attack, pilot mass).
 
-**It does not fly yet.** `softwing-bench --swing` settles it, then hauls both
-brakes: the pilot hangs correctly for about 0.8 s at 6.9 m below the canopy,
-then the system pitches over and tumbles. That is a trim and pitching-moment
-problem, not a plumbing one, and it needs a drag model before it can be
-solved (see below). Hence the flag, and hence the default being the pinned
-behaviour the tab has always had.
+**It flies.** gnuC2 holds a steady glide — α 8–11°, glide ratio ≈ 7
+hands-up / ≈ 5.5 with light brake, sink ~1.2 m/s, span and enclosed volume
+within a few percent of the pinned wing, pilot steady 6.9 m under the
+canopy — verified with `softwing-bench --glide` (and `--brake N`,
+`--polar`). A little symmetric brake steadies it indefinitely; hands-up, a
+weakly damped surge mode grows over tens of seconds and can finally fold
+the wing, which is roughly what an unpiloted paraglider does.
 
-Three things were learned the expensive way and are worth not rediscovering:
+### The bug that doomed everything before it
 
-- **Relative wind must use the system's bulk velocity, not each section's
-  own.** Feeding local node velocity back into the load looks more refined
-  and is catastrophic: pressure accelerates the fabric, fabric moving
-  downwind sees less relative wind, less wind means less pressure, and the
-  canopy talks itself flat. gnuC2 went from 10.4 m of span to 5.2 m.
-- **Dynamic pressure scales with the *full* relative wind, not its
-  in-plane component.** The in-plane part sets the angle the section flies
-  at and nothing else; the cell behind it is fed by a ram intake that does
-  not care which way the air came from. Using the in-plane speed charges an
-  arced wing's tips a fraction of the pressure they should carry.
-- **Brake lines need a handle per side.** Running both off one central point
-  makes their cables pull the two tips toward each other as the wing
-  spreads — three metres of span on gnuC2.
+The angle-of-attack convention was inverted relative to physics: wind from
+below the chord measured as *negative* α, and the slider compensated by
+tilting the freestream the opposite way. Statically self-consistent — the
+pinned tab never noticed — but dynamically it flipped the fundamental
+feedback: a sinking wing LOST lift and a climbing wing GAINED it. Positive
+feedback in both directions; no damping, moment anchoring, filtering or
+launch trimming could stabilise it, and in hindsight nothing else was ever
+going to work until this was fixed. The convention is now physical
+(sinking → wind from below → more α → more lift → sink arrested).
 
-### What free flight needs next, in order
+### Architecture
 
-1. **Drag.** There is none: integrating pressure over a lifting body
-   recovers leading-edge suction and no viscous loss, so the model currently
-   produces *thrust*. Without drag nothing sets a trim speed, and a glide
-   ratio computed from these forces would be meaningless.
-2. **Pitch trim that does not diverge**, which follows from 1 plus a centre
-   of pressure that moves with angle of attack the way a real section's
-   does.
-3. Only then do **pilot mass as a preference** and a **glide-ratio readout**
-   become real numbers rather than decoration — and only then is deriving q
-   from the wing's own airspeed, rather than taking it from a slider, a
-   change that converges instead of running away.
+The pressure field keeps the only job it is good at — shaping the fabric —
+and a classical finite-wing polar sets the system-level force:
+
+- C_L(α) with camber offset and stall roll-off (wing-level stall at ~20°,
+  the section law's earlier roll-off stays for the local field), floored
+  just under zero (a fabric wing pushed from above tucks, it does not fly
+  inverted), blending to flat-plate normal force past stall so a stalled
+  wing is a parachute, not a free-faller.
+- C_D = parasitic + brake flap drag + induced (projected aspect ratio) +
+  post-stall plate drag; bluff-body pilot drag acts at the pilot node
+  against the pilot's own relative wind.
+- The difference between the polar's force and the pressure field's
+  resultant is imposed as a per-face **pressure retrim** δp_i = n̂_i·v +
+  μ·s_i, with (v, μ) solved 4×4 each frame so the increment lands the
+  exact force and zeroes the pitch moment about a hang-line anchor. Every
+  other application was measured failing: point loads at line attachments
+  dent the intrados, area-spread body forces lean the canopy over, fabric
+  "couples" crush the nose. Fabric carries pressure; feed it pressure.
+- The anchor sits on the designed hang line, travels with α deviation from
+  the build-time trim fixed point (static pitch stability) and with α rate
+  (Cmq damping), both on a low-passed α (the wake's timescale, not the
+  fabric's).
+- Relative wind is measured against the **canopy's** own mean velocity —
+  against the whole system's (pilot-dominated) mean, the canopy's pendulum
+  swing was invisible to the air and undamped. Per-node feedback remains
+  catastrophic (see below); the canopy-mean is the workable middle.
+- `StepSettings::dampingReferenceVelocity`: free-flight damping decays node
+  velocity toward the system's bulk velocity, not toward zero. Absolute
+  damping at glide speed is a fake drag several times the real drag budget
+  — it, not the aerodynamics, would set the trim speed.
+- The pilot is sized so weight matches the polar resultant at the in-flight
+  trim (rest angle plus glide angle, iterated to a fixed point), a few
+  percent light for tip-stall margin, and the system launches with the
+  steady descent velocity already applied — from a dead stop in a
+  horizontal wind, the canopy gets yanked aft around the heavy pilot and
+  goes over before the sink can develop.
+
+Three earlier lessons that still stand:
+
+- **Never feed per-node velocity back into the load.** The canopy talks
+  itself flat (gnuC2: 10.4 m of span down to 5.2 m).
+- **Dynamic pressure scales with the full relative wind, not its in-plane
+  component** — or the arced tips are undercharged.
+- **Brake lines need a handle per side**, or their cables pull the tips
+  together.
 
 ### Controls
 
 `Pressure` is now q in pascals; `Lift` is replaced by `Angle`, the angle of
-attack in degrees (0–15, default 6). The GPU prototype takes its face
+attack in degrees (0–15, default 6). In free flight the Angle slider is
+ignored — the wing finds its own trim, and tilting the oncoming air is a
+hillside, not an angle-of-attack control; at the pinned default of 6° it
+trimmed the flying wing into its stall. Note the sign-convention fix
+changed the pinned numbers slightly too (the wind now genuinely comes from
+below at positive angles): gnuC2 settles at 10.78 m span, +4.3% volume,
+778 N up at the 6° default. The GPU prototype takes its face
 pressures as a host upload rather than mirroring this model in a kernel — a
 per-face constant is 63 KB a frame — so on that path the field is only as
 fresh as the last readback. That does not affect what its timings measure.

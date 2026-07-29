@@ -35,11 +35,20 @@ inline constexpr double anchorBandMetres = 0.3;
 inline constexpr double gravityMetresPerSecondSquared = 9.80665;
 // How far the pilot's mass hangs below the carabiners.
 inline constexpr double pilotDropMetres = 0.45;
-// Stands in for every drag we do not model. It has to damp fabric ringing
-// without damping the pendulum: the swing period is several seconds, so
-// anything much above this eats the very motion the pilot mass exists to
-// produce.
-inline constexpr double systemDampingPerSecond = 0.5;
+// Free-flight fabric/attitude damping, applied RELATIVE to the system's
+// bulk velocity (see StepSettings::dampingReferenceVelocity), so it quiets
+// fabric ringing and canopy pitch flapping without braking the glide
+// itself. It can therefore be much stronger than an absolute damping could
+// ever have been: at this value the canopy's pitch mode — which fed the
+// polar force pass its angle of attack and got a whipping force back —
+// stays put, while the pendulum (period of several seconds) is merely
+// well-damped rather than dead.
+inline constexpr double systemDampingPerSecond = 1.5;
+// Time constant of the low-pass on the wing-level angle of attack that
+// feeds the polar. Real unsteady aerodynamics lags geometry too (the wake
+// needs time to adjust); here the lag is also what keeps the imposed force
+// from following every fabric wobble with full authority.
+inline constexpr double alphaFilterSeconds = 0.25;
 inline constexpr double lineAttachRadiusMetres = 0.12;
 // Cells across the section in each rib strut. One more per resolution step,
 // so ribs get denser along with the skin. Kept small deliberately: every
@@ -51,6 +60,7 @@ inline constexpr int defaultRibLayers = 4;
 // hole, against holes covering 22% of the rib.
 inline constexpr int defaultRibStationSplit = 3;
 inline constexpr double simulationTimeStep = 1.0 / 60.0;
+inline constexpr double defaultAngleOfAttackDegrees = 6.0;
 
 // How the frame's constraint-solving budget is spent. XPBD convergence is
 // governed by substeps x iterations, but the two are not worth the same: a
@@ -203,22 +213,76 @@ struct SimBody
     // the view keeps them (see recentreSystem).
     std::size_t pilotNode = noConstraint;
     double pilotMass = 0.0;
+    // Nodes below this index belong to the canopy (skin, rib interiors);
+    // line junctions, handles and the pilot come after. The aerodynamic
+    // relative wind is measured against the canopy's own mean velocity,
+    // not the whole system's: the system's is dominated by the pilot, and
+    // against it the canopy's pendulum swing is invisible to the air —
+    // which removed exactly the aerodynamic damping that keeps a real
+    // canopy from whipping over on its lines. A mean over thousands of
+    // nodes keeps single-node flutter out of the loop, which is what made
+    // the earlier per-node feedback catastrophic.
+    std::size_t canopyNodeCount = 0;
     // Parallel to the skin triangles. Empty when the mesh carries no rib
     // loops to hang a chord off, which falls the pressure field back to a
     // uniform one.
     std::vector<FaceAero> faceAero;
     std::vector<RibChord> ribChords;
-    // Rest-pose planform, for the induced-drag term: a long thin wing pays
-    // far less of it than a short fat one, and that is most of why one
-    // glides better than the other.
+    // Skin nodes the suspension lines tie into, deduplicated. The polar
+    // correction and the pitch-trim couple are applied here: this is the
+    // load path the canopy is built to carry point loads on, and pressing
+    // system-level forces onto the fabric instead was measured denting the
+    // nose and folding the tips. Empty when the mesh has no lines.
+    std::vector<std::size_t> lineAttachmentNodes;
+    // The two ribs whose leading edges sit furthest out along the rest span
+    // axis. The live span axis is read between them, so the wing-level angle
+    // of attack follows the wing's real attitude rather than its rest one.
+    std::array<std::size_t, 2> spanTipRibs{0, 0};
+    // Rest-pose PROJECTED planform (the shadow the wing casts on the ground
+    // plane) and the aspect ratio built from it. Projected, not wetted: the
+    // induced-drag law and the lift reference area both want the planform,
+    // and using the upper skin's wetted area under-read the aspect ratio by
+    // a third and over-read the reference area by the arc's cosine losses.
     double planformArea = 0.0;
     double aspectRatio = 5.0;
-    // Per-rib section lift coefficient from the most recent load stamp.
-    // The drag pass reads it back: induced drag goes as CL squared, so it
-    // has to know what each section was actually working at.
+    // Per-rib section lift coefficient from the most recent load stamp;
+    // shapes the chordwise pressure distribution.
     std::vector<double> ribLiftCoefficient;
-    // Filled in by each step's drag pass, for reporting.
-    softwing::Vec3 lastDragForce;
+    // Chord fraction of the designed hang line: the chord station the
+    // carabiners sit under at rest. The imposed aerodynamic resultant
+    // acts here at trim and travels aft/forward of it as the angle of
+    // attack rises/falls (see kAnchorTravelPerRadian), which is what
+    // makes pitch statically stable at the designed trim angle.
+    double resultantChordFraction = 0.28;
+    // The wing-level angle of attack at rest with the build-time controls:
+    // the angle the designed line geometry trims the wing to.
+    double alphaTrimRadians = 0.1;
+    // The steady glide-path angle the polar predicts for this wing at its
+    // in-flight trim, from the build-time fixed point. Used to launch the
+    // system on the glide instead of at a dead stop.
+    double glideAngleRadians = 0.0;
+    // Slow-averaged angle of attack: the washout reference the pitch
+    // anchor damps against. NaN until seeded.
+    double alphaSlowRadians =
+        std::numeric_limits<double>::quiet_NaN();
+    // Low-passed wing-level angle of attack, the polar's actual input.
+    // NaN until the first free-flight force pass seeds it.
+    double alphaFilteredRadians =
+        std::numeric_limits<double>::quiet_NaN();
+    // Its rate of change, for the anchor's pitch-rate (Cmq) term.
+    double alphaRateRadiansPerSecond = 0.0;
+    // Retrim bookkeeping: how far the applied pressure field's resultant
+    // and pitch moment landed from what the solve asked for (clamping can
+    // eat into both). Diagnostics only.
+    softwing::Vec3 lastForceResidual;
+    double lastPitchResidual = 0.0;
+    // Filled in by each free-flight force pass, for reporting and the HUD.
+    softwing::Vec3 lastAeroForce;
+    double lastLift = 0.0;
+    double lastDrag = 0.0;
+    double lastGlideRatio = 0.0;
+    double lastAlphaDegrees = 0.0;
+    double lastAirspeed = 0.0;
     // Rest-pose mean chord and span directions, used to place the airflow.
     softwing::Vec3 restChordDirection{0.0, 1.0, 0.0};
     softwing::Vec3 restSpanAxis{1.0, 0.0, 0.0};
@@ -240,8 +304,9 @@ struct SimControls
     double pressurePascal = 80.0;
     // Angle of the airflow to the wing's rest chord, in degrees. Replaces
     // the old fake follower "lift" force: the load now comes out of the
-    // pressure field, and this is what tilts that field.
-    double angleOfAttackDegrees = 6.0;
+    // pressure field, and this is what tilts that field. In free flight it
+    // acts as a trimmer: it shifts the angle the wing's pitch trim seeks.
+    double angleOfAttackDegrees = defaultAngleOfAttackDegrees;
     // Let the whole system fly: gravity on, nothing pinned, the pilot's
     // mass free to swing under the canopy, and the pair translated back to
     // the origin after each step. EXPERIMENTAL and off by default — the
@@ -293,16 +358,43 @@ void applyPressure(SimBody &sim, const SimControls &controls);
 // kit has to make roughly 1 kN.
 [[nodiscard]] softwing::Vec3 aerodynamicForce(const SimBody &sim);
 
-// Adds the tangential drag the pressure field cannot produce. Integrating
-// pressure over a lifting body recovers leading-edge suction and no viscous
-// loss — d'Alembert's paradox — so without this the model makes *thrust*,
-// nothing sets a trim speed, and a glide ratio computed from it comes out
-// negative. Clears the body's external forces and replaces them, so it owns
-// that channel; call it once per frame, immediately before stepping.
-void applyAerodynamicDrag(SimBody &sim, const SimControls &controls);
+// The wing-level polar sample the free-flight force pass imposes: the
+// wing's live angle of attack, the finite-wing lift and drag coefficients
+// at it, and the frame the force acts in. Valid only when the mesh carried
+// rib chords and the relative wind is not degenerate.
+struct WingAeroSample
+{
+    bool valid = false;
+    double dynamicPressure = 0.0;    // from the live relative wind, capped
+    double airspeed = 0.0;
+    double alphaRadians = 0.0;
+    double liftCoefficient = 0.0;
+    double dragCoefficient = 0.0;    // profile + lines + induced
+    softwing::Vec3 windDirection;    // unit, pointing downstream
+    softwing::Vec3 liftDirection;    // unit, normal to the wind
+    softwing::Vec3 spanAxis;         // unit, live, oriented like the rest one
+};
+[[nodiscard]] WingAeroSample sampleWingAero(const SimBody &sim,
+                                            const SimControls &controls);
+
+// The free-flight force pass. Integrating an inviscid pressure field over a
+// lifting body recovers full leading-edge suction and no viscous loss —
+// d'Alembert's paradox — so its resultant is lift-poor and thrust-rich, and
+// no suction tuning fixes it (lift and spurious thrust scale together). So
+// the pressure field is not asked for the system force at all: its net
+// resultant is cancelled and a classical finite-wing polar (C_L(α) with
+// stall roll-off, C_D0 + C_L²/(π·AR·e)) is imposed in its place, spread
+// over the skin by area, plus bluff-body pilot drag on the pilot node. The
+// pressure field keeps the job it is good at — shaping the fabric — and
+// the polar sets the trim and the glide. Clears the body's external forces
+// and replaces them, so it owns that channel; call it once per frame,
+// immediately before stepping.
+void applyAerodynamicForces(SimBody &sim, const SimControls &controls);
 
 // Lift and drag resolved along the airflow, and the glide ratio they imply.
-// Only meaningful once applyAerodynamicDrag has run for this pose.
+// In free flight these are the imposed polar's numbers (recorded by
+// applyAerodynamicForces); pinned, they are the raw pressure resultant,
+// which carries no drag model and no glide ratio worth reading.
 struct AeroSummary
 {
     softwing::Vec3 force;   // pressure + drag, newtons

@@ -98,17 +98,99 @@ public:
 
     QString buildFromMesh(const SimMesh &mesh)
     {
-        sim_ = buildSimBody(mesh, buildOptions_, controls_);
+        // Retained so free flight can be toggled without another engine
+        // run: the pilot only exists on a body built for free flight, so
+        // the toggle is a rebuild.
+        mesh_ = mesh;
+        rebuildBody();
+        return {};
+    }
+
+    void rebuildBody()
+    {
+        sim_ = buildSimBody(mesh_, buildOptions_, controls_);
 
         const softwing::Vec3 low = sim_.boundsLow;
         const softwing::Vec3 high = sim_.boundsHigh;
-        target_ = QVector3D(static_cast<float>((low.x + high.x) / 2),
-                            static_cast<float>((low.y + high.y) / 2),
-                            static_cast<float>((low.z + high.z) / 2));
-        distance_ = static_cast<float>(2.0 * length(high - low));
+        softwing::Vec3 focus = 0.5 * (low + high);
+        double extent = length(high - low);
+        if (controls_.freeFlight
+            && sim_.pilotNode != noConstraint) {
+            // The flying system is re-centred on its mass centre every
+            // step, which sits close to the pilot. Frame the whole
+            // pendulum — canopy above, pilot below — in that frame.
+            softwing::Vec3 centreOfMass;
+            double mass = 0.0;
+            const auto &nodes = sim_.body->nodes();
+            for (const softwing::Node &node : nodes) {
+                if (node.inverseMass <= 0.0) {
+                    continue;
+                }
+                const double nodeMass = 1.0 / node.inverseMass;
+                centreOfMass += nodeMass * node.position;
+                mass += nodeMass;
+            }
+            if (mass > 0.0) {
+                centreOfMass /= mass;
+            }
+            const softwing::Vec3 pilot =
+                nodes[sim_.pilotNode].position;
+            focus = 0.5 * (0.5 * (low + high) + pilot) - centreOfMass;
+            extent = std::max(extent,
+                              1.4 * length(0.5 * (low + high) - pilot));
+        }
+        target_ = QVector3D(static_cast<float>(focus.x),
+                            static_cast<float>(focus.y),
+                            static_cast<float>(focus.z));
+        distance_ = static_cast<float>(2.0 * extent);
 
         setRunning(true);
-        return {};
+    }
+
+    // Free flight rebuilds the body: pinned and flying wings differ in
+    // structure (pilot mass, fixed anchors), not just in settings.
+    void setFreeFlight(bool enabled)
+    {
+        if (controls_.freeFlight == enabled) {
+            return;
+        }
+        controls_.freeFlight = enabled;
+        if (!mesh_.nodes.empty()) {
+            rebuildBody();
+        }
+        update();
+    }
+
+    bool freeFlight() const { return controls_.freeFlight; }
+
+    // One line for the flight label: what the wing is doing, in units a
+    // pilot would use.
+    QString flightReadout() const
+    {
+        if (!controls_.freeFlight || !sim_.body
+            || sim_.lastAirspeed <= 0.0) {
+            return {};
+        }
+        softwing::Vec3 velocity;
+        double mass = 0.0;
+        for (const softwing::Node &node : sim_.body->nodes()) {
+            if (node.inverseMass <= 0.0) {
+                continue;
+            }
+            const double nodeMass = 1.0 / node.inverseMass;
+            velocity += nodeMass * node.velocity;
+            mass += nodeMass;
+        }
+        if (mass > 0.0) {
+            velocity /= mass;
+        }
+        return QStringLiteral(
+                   "%1 km/h · sink %2 m/s · glide %3 · α %4° · pilot %5 kg")
+            .arg(sim_.lastAirspeed * 3.6, 0, 'f', 0)
+            .arg(-velocity.z, 0, 'f', 1)
+            .arg(sim_.lastGlideRatio, 0, 'f', 1)
+            .arg(sim_.lastAlphaDegrees, 0, 'f', 1)
+            .arg(sim_.pilotMass, 0, 'f', 0);
     }
 
     void setPressurePascal(double pressure)
@@ -587,6 +669,7 @@ private:
     }
 
     SimBody sim_;
+    SimMesh mesh_;
     SimControls controls_;
     SimBuildOptions buildOptions_;
     std::array<bool, simSurfaceCount> surfaceVisible_{
@@ -715,9 +798,19 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     // row runs to the legend and the wing row's four stretching sliders will
     // grow until whatever follows them is pushed off the window — so a
     // widget added to either disappears rather than wraps.
+    freeFlight_ = makeCheck(QStringLiteral("Free flight"), false);
+    freeFlight_->setToolTip(QStringLiteral(
+        "Unpin the wing: gravity on, a pilot slung under the risers, the "
+        "whole system flying and re-centred each frame. Steer with the "
+        "brakes; a little symmetric brake steadies it."));
+    flightLabel_ = new QLabel(this);
+
     auto *solver = new QHBoxLayout;
     solver->addWidget(new QLabel(QStringLiteral("Solver"), this));
     solver->addWidget(quality_);
+    solver->addSpacing(16);
+    solver->addWidget(freeFlight_);
+    solver->addWidget(flightLabel_, 1);
     solver->addStretch();
 
     auto *controls = new QHBoxLayout;
@@ -758,6 +851,25 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     connect(quality_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (view_ != nullptr) {
             view_->setSolverQuality(index);
+        }
+    });
+
+    // The flight readout only means anything while the wing is flying.
+    flightTimer_ = new QTimer(this);
+    flightTimer_->setInterval(250);
+    connect(flightTimer_, &QTimer::timeout, this, [this] {
+        flightLabel_->setText(view_ != nullptr ? view_->flightReadout()
+                                               : QString());
+    });
+    connect(freeFlight_, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (view_ != nullptr) {
+            view_->setFreeFlight(enabled);
+        }
+        if (enabled) {
+            flightTimer_->start();
+        } else {
+            flightTimer_->stop();
+            flightLabel_->clear();
         }
     });
 
@@ -878,6 +990,7 @@ void PlaygroundPage::ensureView()
     view_->setStressColoring(showStress_->isChecked());
     view_->setLineFullScale(static_cast<double>(lineScale_->value()));
     view_->setLineTensionColoring(showLineTension_->isChecked());
+    view_->setFreeFlight(freeFlight_->isChecked());
     view_->show();
     creatingView_ = false;
 }

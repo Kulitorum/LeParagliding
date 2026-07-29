@@ -160,6 +160,17 @@ struct StepSettings {
     int constraintIterations = 12;
     Vec3 gravity{0.0, 0.0, -9.80665};
     double velocityDampingPerSecond = 0.25;
+    // What the damping decays node velocity toward. Zero — the default, and
+    // the only value any acceptance gate was baselined against — damps
+    // absolute velocity, which is right for a body meant to come to rest.
+    // A body in free flight is not meant to come to rest: damping its
+    // absolute velocity acts as a fake drag several times larger than the
+    // real aerodynamic drag budget, and no glide can survive it. A host
+    // flying a body sets this to the system's bulk (centre-of-mass)
+    // velocity, so fabric ringing and tumbling are damped while the flight
+    // itself is not. With the default zero the arithmetic reduces exactly
+    // to the historical expression.
+    Vec3 dampingReferenceVelocity{};
     CcdSettings contactCcd;
     // 0 keeps the single-threaded solver and its exact element ordering, which
     // is what every acceptance gate is baselined against.
