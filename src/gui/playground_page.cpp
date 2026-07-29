@@ -66,9 +66,18 @@ constexpr double maximumStressFullScaleStrain = 0.05;   // slider top, 5%
 // multiplier instead, which is a force. Newtons per line.
 constexpr double defaultLineFullScaleNewtons = 100.0;
 constexpr double maximumLineFullScaleNewtons = 500.0;
-// Rings between the rib outline and its centre in the detailed rib model.
-// One more ring per resolution step, so ribs get denser along with the skin.
-constexpr int defaultRibRings = 3;
+// Grey for faces that are drawn while stress colouring is on but carry no
+// meaningful stress of their own — the simple rib web.
+const QVector3D uncolouredTint(0.58F, 0.60F, 0.63F);
+// Cells across the section in each rib strut. One more per resolution step,
+// so ribs get denser along with the skin. Kept small deliberately: every
+// interior node is one more thing that can buckle out of the rib's plane.
+constexpr int defaultRibLayers = 4;
+// Extra chord stations per outline segment. Cells must come out smaller
+// than an airfoil hole or dropping them by their middle misses the holes
+// entirely — at one station per outline node only 1% of cells fell in a
+// hole, against holes covering 22% of the rib.
+constexpr int defaultRibStationSplit = 3;
 constexpr double simulationTimeStep = 1.0 / 60.0;
 constexpr int simulationSubsteps = 4;
 constexpr double substepSeconds = simulationTimeStep / simulationSubsteps;
@@ -718,13 +727,15 @@ public:
                 continue;
             }
 
-            // Detailed web: rings shrinking from the loop toward the
-            // centroid. The outermost ring *is* the loop, so the rib stays
-            // exactly attached to the skin; the interior rings give it real
-            // in-plane structure, take the holes, and get denser with the
-            // resolution setting. Rings are cheap to build and need no
-            // triangulator, at the cost of skewed cells near the trailing
-            // edge — acceptable for a sandbox, and far better than a hub.
+            // Detailed web: a ladder from the upper surface to the lower
+            // one. A rib's job is to hold the two skins apart at their
+            // designed spacing, so every strut runs straight across the
+            // section — the same short load path the hub happened to give,
+            // but at every station instead of one. Rings were tried and are
+            // wrong here: routing upper-to-lower the long way round leaves
+            // the rib slack, and a slack planar truss has nothing resisting
+            // out-of-plane folding, so it crumples. Under tension a ladder
+            // stays taut and flat.
             std::vector<softwing::Vec3> loopPoints;
             loopPoints.reserve(loop.size());
             for (const int node : loop) {
@@ -762,71 +773,206 @@ public:
             }
             area = std::abs(area) * 0.5;
             const std::size_t interiorCount =
-                loop.size() * static_cast<std::size_t>(ribRings_ - 1) + 1;
+                loop.size() * static_cast<std::size_t>(ribLayers_) / 2 + 1;
             const double interiorMass =
                 std::max(fabricArealDensity * area
                              / static_cast<double>(interiorCount),
                          1.0e-4);
 
-            // Ring ribRings_ is the loop; ring 0 collapses to the centroid.
-            const auto ringPoint = [&](int ring, std::size_t index) {
-                const double blend =
-                    static_cast<double>(ring) / ribRings_;
-                return centroid + (loopPoints[index] - centroid) * blend;
-            };
-            std::map<std::pair<int, std::size_t>, std::size_t> ringNodes;
-            const auto ringNode = [&](int ring,
-                                      std::size_t index) -> std::size_t {
-                if (ring >= ribRings_) {
-                    return static_cast<std::size_t>(loop[index]);
+            // Chord axis: the two outline points furthest apart are the
+            // leading and trailing edge, and they split the outline into
+            // its upper and lower surfaces.
+            std::vector<std::pair<double, double>> flat;
+            flat.reserve(loopPoints.size());
+            for (const softwing::Vec3 &point : loopPoints) {
+                flat.push_back(frame.project(point));
+            }
+            std::size_t front = 0;
+            std::size_t back = 0;
+            double longest = -1.0;
+            for (std::size_t a = 0; a < flat.size(); ++a) {
+                for (std::size_t b = a + 1; b < flat.size(); ++b) {
+                    const double dx = flat[a].first - flat[b].first;
+                    const double dy = flat[a].second - flat[b].second;
+                    const double distance = dx * dx + dy * dy;
+                    if (distance > longest) {
+                        longest = distance;
+                        front = a;
+                        back = b;
+                    }
                 }
-                // Everything on ring 0 is the single centre node.
-                const std::size_t key = ring == 0 ? 0 : index;
-                const auto [entry, inserted] =
-                    ringNodes.try_emplace(std::pair{ring, key}, 0);
-                if (inserted) {
-                    entry->second = body->addNode(
-                        ring == 0 ? centroid : ringPoint(ring, index),
-                        interiorMass);
-                }
-                return entry->second;
+            }
+            if (longest <= 0.0) {
+                continue;
+            }
+            const double axisX =
+                (flat[back].first - flat[front].first) / std::sqrt(longest);
+            const double axisY =
+                (flat[back].second - flat[front].second) / std::sqrt(longest);
+            // Distance along the chord, measured from the leading edge.
+            const auto chordAt = [&](std::size_t index) {
+                return (flat[index].first - flat[front].first) * axisX
+                       + (flat[index].second - flat[front].second) * axisY;
             };
 
-            for (int ring = 0; ring < ribRings_; ++ring) {
-                for (std::size_t index = 0; index < loop.size(); ++index) {
-                    const std::size_t next = (index + 1) % loop.size();
-                    // Drop the cell when its middle falls in a hole. Nodes
-                    // are created lazily, so a node only exists once some
-                    // surviving cell needs it.
+            // Walking the closed outline from the leading edge to the
+            // trailing edge covers one surface; continuing covers the other.
+            std::vector<std::size_t> upper;
+            std::vector<std::size_t> lower;
+            for (std::size_t step = 0; step <= flat.size(); ++step) {
+                const std::size_t index = (front + step) % flat.size();
+                (upper.empty() || upper.back() != back ? upper : lower)
+                    .push_back(index);
+                if (index == front && step > 0) {
+                    break;
+                }
+            }
+            // The split leaves the trailing edge as the last upper node; the
+            // lower surface has to start there too or its aftmost segment
+            // is missing and struts near the trailing edge find no foot.
+            lower.insert(lower.begin(), back);
+            if (upper.size() < 2 || lower.size() < 2) {
+                continue;
+            }
+
+            // Where a chord station meets one of the two surfaces, as an
+            // interpolation between two outline nodes so the strut end is
+            // carried by the skin whether or not it lands on a node.
+            struct SurfacePoint
+            {
+                std::size_t a = 0;
+                std::size_t b = 0;
+                double blend = 0.0;
+            };
+            const auto meets = [&](const std::vector<std::size_t> &chain,
+                                   double chord) {
+                SurfacePoint found{chain.front(), chain.front(), 0.0};
+                for (std::size_t step = 0; step + 1 < chain.size(); ++step) {
+                    const double from = chordAt(chain[step]);
+                    const double to = chordAt(chain[step + 1]);
+                    if ((chord >= std::min(from, to))
+                        && (chord <= std::max(from, to))) {
+                        const double span = to - from;
+                        found = {chain[step],
+                                 chain[step + 1],
+                                 std::abs(span) < 1.0e-9
+                                     ? 0.0
+                                     : (chord - from) / span};
+                        break;
+                    }
+                }
+                return found;
+            };
+            const auto placeOf = [&](const SurfacePoint &point) {
+                return loopPoints[point.a] * (1.0 - point.blend)
+                       + loopPoints[point.b] * point.blend;
+            };
+            // Reuse the outline node when the station lands on one, so the
+            // rib keeps its exact grip on the skin; otherwise pin a new node
+            // onto that outline segment, which the skin still carries.
+            const auto nodeOf = [&](const SurfacePoint &point) {
+                if (point.blend <= 1.0e-6) {
+                    return static_cast<std::size_t>(loop[point.a]);
+                }
+                if (point.blend >= 1.0 - 1.0e-6) {
+                    return static_cast<std::size_t>(loop[point.b]);
+                }
+                const softwing::Vec3 place = placeOf(point);
+                const std::size_t created =
+                    body->addNode(place, interiorMass);
+                for (const std::size_t anchor :
+                     {static_cast<std::size_t>(loop[point.a]),
+                      static_cast<std::size_t>(loop[point.b])}) {
+                    tie(created,
+                        anchor,
+                        length(mesh.nodes[anchor] - place),
+                        skinCompliance);
+                }
+                return created;
+            };
+
+            // Stations are spaced by the mesh the holes need, not by the
+            // outline's own vertex count: with cells bigger than a hole the
+            // middle almost never lands inside one and the holes vanish.
+            std::vector<double> stations;
+            for (std::size_t step = 0; step + 1 < upper.size(); ++step) {
+                const double from = chordAt(upper[step]);
+                const double to = chordAt(upper[step + 1]);
+                for (int split = 0; split < ribStationSplit_; ++split) {
+                    stations.push_back(
+                        from
+                        + (to - from) * split / ribStationSplit_);
+                }
+            }
+            stations.push_back(chordAt(upper.back()));
+
+            std::vector<std::vector<std::size_t>> struts;
+            std::vector<std::vector<softwing::Vec3>> strutPoints;
+            struts.reserve(stations.size());
+            strutPoints.reserve(stations.size());
+            for (const double chord : stations) {
+                const SurfacePoint crest = meets(upper, chord);
+                const SurfacePoint foot = meets(lower, chord);
+                const softwing::Vec3 top = placeOf(crest);
+                const softwing::Vec3 base = placeOf(foot);
+                std::vector<softwing::Vec3> points;
+                points.reserve(
+                    static_cast<std::size_t>(ribLayers_) + 1);
+                for (int layer = 0; layer <= ribLayers_; ++layer) {
+                    const double blend =
+                        static_cast<double>(layer) / ribLayers_;
+                    points.push_back(top * (1.0 - blend) + base * blend);
+                }
+                strutPoints.push_back(std::move(points));
+
+                // Interior node ids are filled lazily below.
+                std::vector<std::size_t> ids(
+                    static_cast<std::size_t>(ribLayers_) + 1, noConstraint);
+                ids.front() = nodeOf(crest);
+                ids.back() = nodeOf(foot);
+                struts.push_back(std::move(ids));
+            }
+
+            const auto strutNode = [&](std::size_t strut,
+                                       std::size_t layer) -> std::size_t {
+                std::size_t &id = struts[strut][layer];
+                if (id == noConstraint) {
+                    id = body->addNode(strutPoints[strut][layer],
+                                       interiorMass);
+                }
+                return id;
+            };
+
+            for (std::size_t strut = 0; strut + 1 < struts.size(); ++strut) {
+                for (std::size_t layer = 0;
+                     layer < static_cast<std::size_t>(ribLayers_);
+                     ++layer) {
                     const softwing::Vec3 middle =
-                        (ringPoint(ring, index) + ringPoint(ring, next)
-                         + ringPoint(ring + 1, index)
-                         + ringPoint(ring + 1, next))
+                        (strutPoints[strut][layer]
+                         + strutPoints[strut][layer + 1]
+                         + strutPoints[strut + 1][layer]
+                         + strutPoints[strut + 1][layer + 1])
                         * 0.25;
                     if (inHole(middle, frame)) {
                         continue;
                     }
-                    const std::size_t innerA = ringNode(ring, index);
-                    const std::size_t innerB = ringNode(ring, next);
-                    const std::size_t outerA = ringNode(ring + 1, index);
-                    const std::size_t outerB = ringNode(ring + 1, next);
+                    const std::size_t topA = strutNode(strut, layer);
+                    const std::size_t lowA = strutNode(strut, layer + 1);
+                    const std::size_t topB = strutNode(strut + 1, layer);
+                    const std::size_t lowB = strutNode(strut + 1, layer + 1);
 
                     const auto &positions = body->nodes();
                     const auto span = [&](std::size_t a, std::size_t b) {
                         return length(positions[b].position
                                       - positions[a].position);
                     };
-                    // Radial and circumferential ties, plus one diagonal so
-                    // the cell resists shear rather than folding flat.
-                    tie(innerA, outerA, span(innerA, outerA), skinCompliance);
-                    tie(outerA, outerB, span(outerA, outerB), skinCompliance);
-                    tie(innerA, outerB, span(innerA, outerB), skinCompliance);
-                    if (innerA != innerB) {
-                        tie(innerA, innerB, span(innerA, innerB),
-                            skinCompliance);
-                        tie(innerB, outerB, span(innerB, outerB),
-                            skinCompliance);
-                    }
+                    // Across the section, along it, and one diagonal so the
+                    // bay carries shear instead of folding over.
+                    tie(topA, lowA, span(topA, lowA), skinCompliance);
+                    tie(topB, lowB, span(topB, lowB), skinCompliance);
+                    tie(topA, topB, span(topA, topB), skinCompliance);
+                    tie(lowA, lowB, span(lowA, lowB), skinCompliance);
+                    tie(topA, lowB, span(topA, lowB), skinCompliance);
 
                     const auto addRibFace = [&](std::size_t a,
                                                 std::size_t b,
@@ -842,18 +988,9 @@ public:
                                        sideConstraint(c, a)};
                         renderFaces_.push_back(drawn);
                     };
-                    addRibFace(innerA, outerA, outerB);
-                    addRibFace(innerA, outerB, innerB);
+                    addRibFace(topA, topB, lowB);
+                    addRibFace(topA, lowB, lowA);
                 }
-            }
-            // Look the hub up rather than asking ringNode for it: if every
-            // ring-0 cell fell inside a hole the node was never needed, and
-            // creating one here would leave a massive node tied to nothing.
-            const auto hub = ringNodes.find({0, std::size_t{0}});
-            if (std::abs(centroid.x) < centrePinAbsX
-                && hub != ringNodes.end()) {
-                centrePinAbsX = std::abs(centroid.x);
-                centrePin = hub->second;
             }
         }
         // No pin here any more: the lift pressure keeps every line taut
@@ -1112,10 +1249,11 @@ public:
     }
 
     // Takes effect on the next build; the page rebuilds when it changes.
-    void setDetailedRibs(bool enabled, int rings)
+    void setDetailedRibs(bool enabled, int layers, int stationSplit)
     {
         detailedRibs_ = enabled;
-        ribRings_ = std::max(2, rings);
+        ribLayers_ = std::max(1, layers);
+        ribStationSplit_ = std::max(1, stationSplit);
     }
 
     bool detailedRibs() const { return detailedRibs_; }
@@ -1305,7 +1443,10 @@ protected:
             const softwing::Vec3 &b = nodes[face.nodes[1]].position;
             const softwing::Vec3 &c = nodes[face.nodes[2]].position;
             const softwing::Vec3 normal = normalized(cross(b - a, c - a));
-            QVector3D tint;
+            // useTint is a per-draw uniform while colourability is per
+            // face, so an uncoloured face still needs a colour of its own
+            // here — leaving it zeroed painted the simple ribs black.
+            QVector3D tint = uncolouredTint;
             if (stressColoring_ && colourable(face)) {
                 tint = stressTint(faceStrain(face, nodes, constraints));
             }
@@ -1603,7 +1744,8 @@ private:
     bool lineTensionColoring_ = false;
     double lineFullScaleNewtons_ = defaultLineFullScaleNewtons;
     bool detailedRibs_ = false;
-    int ribRings_ = defaultRibRings;
+    int ribLayers_ = defaultRibLayers;
+    int ribStationSplit_ = defaultRibStationSplit;
     std::vector<std::size_t> topFaces_;
     std::vector<LineSegment> lineSegments_;
     std::vector<Anchor> anchors_;
@@ -1946,7 +2088,9 @@ void PlaygroundPage::loadIfPending()
     // Refining is quadratic in the factor and can take a moment at 4x.
     QGuiApplication::setOverrideCursor(Qt::WaitCursor);
     // Ribs gain a ring per resolution step so they densify with the skin.
-    view_->setDetailedRibs(detailedRibs_, defaultRibRings + subdivision_ - 1);
+    view_->setDetailedRibs(detailedRibs_,
+                           defaultRibLayers + 2 * (subdivision_ - 1),
+                           defaultRibStationSplit + subdivision_ - 1);
     const SimMesh simulated = refineSimMesh(*mesh, subdivision_);
     const QString buildError = view_->buildFromMesh(simulated);
     QGuiApplication::restoreOverrideCursor();
