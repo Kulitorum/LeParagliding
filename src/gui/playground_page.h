@@ -68,6 +68,7 @@ private:
     QSlider *rightBrake_ = nullptr;
     QPushButton *runButton_ = nullptr;
     QPushButton *resetButton_ = nullptr;
+    QPushButton *flyButton_ = nullptr;
     QCheckBox *showExtrados_ = nullptr;
     QCheckBox *showVent_ = nullptr;
     QCheckBox *showIntrados_ = nullptr;

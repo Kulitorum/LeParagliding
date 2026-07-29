@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -172,6 +173,39 @@ public:
         }
     }
 
+    // Fly mode: the cursor's position over the view IS the brake input.
+    // Top centre is hands-up; straight down pulls both brakes; moving
+    // toward a side releases the opposite brake, so the pair gives full
+    // two-brake control in real time. Esc leaves.
+    void setFlyMode(bool enabled)
+    {
+        if (flyMode_ == enabled) {
+            return;
+        }
+        flyMode_ = enabled;
+        setMouseTracking(enabled);
+        setCursor(enabled ? Qt::CrossCursor : Qt::ArrowCursor);
+        if (enabled) {
+            setFocus(Qt::OtherFocusReason);
+            // The keyboard grab is what makes Esc reliable regardless of
+            // which control happens to have focus; released on exit.
+            grabKeyboard();
+        } else {
+            releaseKeyboard();
+        }
+    }
+
+    bool flyMode() const { return flyMode_; }
+
+    // The page mirrors fly-mode brake input back onto its sliders, and
+    // needs to know when Esc ended the mode.
+    void setFlyModeCallbacks(std::function<void(double, double)> brakes,
+                             std::function<void()> exited)
+    {
+        flyBrakesChanged_ = std::move(brakes);
+        flyModeExited_ = std::move(exited);
+    }
+
     // One line for the flight label: what the wing is doing, in units a
     // pilot would use.
     QString flightReadout() const
@@ -217,10 +251,15 @@ public:
         applyPressure();
     }
 
+    // Takes the VIEWER's left and right. The solver's "left" cascade sits
+    // at negative mesh x, which the default camera shows on the viewer's
+    // right — so the two cross over here, in one place, rather than in
+    // every caller. Before this the Left brake slider pulled the wing's
+    // right side.
     void setBrakePull(double leftMetres, double rightMetres)
     {
-        controls_.brakeLeft = leftMetres;
-        controls_.brakeRight = rightMetres;
+        controls_.brakeLeft = rightMetres;
+        controls_.brakeRight = leftMetres;
     }
 
     void setSurfaceVisible(SimSurface surface, bool visible)
@@ -539,8 +578,42 @@ protected:
         lastMouse_ = event->position();
     }
 
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (flyMode_ && event->key() == Qt::Key_Escape) {
+            setFlyMode(false);
+            if (flyModeExited_) {
+                flyModeExited_();
+            }
+            return;
+        }
+        QOpenGLWidget::keyPressEvent(event);
+    }
+
     void mouseMoveEvent(QMouseEvent *event) override
     {
+        if (flyMode_) {
+            // Horizontal position steers, vertical position is the pull:
+            // -1 at the left edge, +1 at the right, 0 pull at the top,
+            // full travel at the bottom.
+            const double across = std::clamp(
+                event->position().x() / std::max(1, width()) * 2.0 - 1.0,
+                -1.0,
+                1.0);
+            const double pull =
+                std::clamp(event->position().y() / std::max(1, height()),
+                           0.0,
+                           1.0)
+                * maximumBrakeTravelMetres;
+            const double screenLeft =
+                pull * std::clamp(1.0 - across, 0.0, 1.0);
+            const double screenRight =
+                pull * std::clamp(1.0 + across, 0.0, 1.0);
+            setBrakePull(screenLeft, screenRight);
+            if (flyBrakesChanged_) {
+                flyBrakesChanged_(screenLeft, screenRight);
+            }
+        }
         const QPointF delta = event->position() - lastMouse_;
         lastMouse_ = event->position();
         if (event->buttons() & Qt::LeftButton) {
@@ -684,6 +757,9 @@ private:
     std::array<bool, simSurfaceCount> surfaceVisible_{
         true, true, true, true, true};
     bool linesVisible_ = true;
+    bool flyMode_ = false;
+    std::function<void(double, double)> flyBrakesChanged_;
+    std::function<void()> flyModeExited_;
     bool stressColoring_ = false;
     double stressFullScale_ = defaultStressFullScaleStrain;
     bool lineTensionColoring_ = false;
@@ -735,6 +811,12 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     resetButton_->setToolTip(QStringLiteral(
         "Rebuild the wing at its rest pose; in free flight it launches "
         "again on its glide."));
+    flyButton_ = new QPushButton(QStringLiteral("Fly mode"), this);
+    flyButton_->setCheckable(true);
+    flyButton_->setToolTip(QStringLiteral(
+        "Steer with the mouse over the wing: top centre is hands-up, "
+        "straight down pulls both brakes, and moving toward a side "
+        "releases the opposite brake. Esc leaves fly mode."));
 
     // Display filters: the solver always sees the whole wing, these only
     // decide what is drawn, so hiding the extrados looks inside a wing that
@@ -837,6 +919,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     controls->addWidget(rightBrake_, 1);
     controls->addWidget(runButton_);
     controls->addWidget(resetButton_);
+    controls->addWidget(flyButton_);
 
     layout_ = new QVBoxLayout(this);
     layout_->addWidget(status_);
@@ -980,6 +1063,11 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         // The rebuilt body is running; the Pause button must say so.
         runButton_->setChecked(false);
     });
+    connect(flyButton_, &QPushButton::toggled, this, [this](bool enabled) {
+        if (view_ != nullptr) {
+            view_->setFlyMode(enabled);
+        }
+    });
 }
 
 void PlaygroundPage::ensureView()
@@ -1012,6 +1100,22 @@ void PlaygroundPage::ensureView()
     view_->setLineFullScale(static_cast<double>(lineScale_->value()));
     view_->setLineTensionColoring(showLineTension_->isChecked());
     view_->setFreeFlight(freeFlight_->isChecked());
+    view_->setFlyModeCallbacks(
+        // Mirror the live brake input onto the sliders. Signals stay
+        // blocked: the view has already applied the pull, and letting the
+        // sliders re-apply their integer-rounded copy would fight it.
+        [this](double leftMetres, double rightMetres) {
+            const auto mirror = [](QSlider *slider, double metres) {
+                const QSignalBlocker blocker(slider);
+                slider->setValue(static_cast<int>(
+                    std::lround(metres / maximumBrakeTravelMetres
+                                * 100.0)));
+            };
+            mirror(leftBrake_, leftMetres);
+            mirror(rightBrake_, rightMetres);
+        },
+        [this] { flyButton_->setChecked(false); });
+    view_->setFlyMode(flyButton_->isChecked());
     view_->show();
     creatingView_ = false;
 }
