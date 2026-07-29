@@ -1,5 +1,6 @@
 #include "nurbs_model.h"
 
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -13,6 +14,7 @@
 #include <BinXCAFDrivers.hxx>
 #include <BSplCLib.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GeomConvert.hxx>
 #include <Geom_BSplineCurve.hxx>
@@ -3579,6 +3581,9 @@ public:
         }
 
         std::vector<std::vector<int>> ribLoops;
+        // (rib index, mirrored) per emitted loop, so each one can be paired
+        // with the hole outlines of the rib it actually is.
+        std::vector<std::pair<int, bool>> ribLoopKeys;
         std::set<std::vector<int>> uniqueLoops;
         for (auto &[key, column] : ribColumns) {
             std::stable_sort(column.begin(),
@@ -3596,8 +3601,69 @@ public:
             // one copy of each distinct loop.
             if (loop.size() >= 3 && uniqueLoops.insert(loop).second) {
                 ribLoops.push_back(std::move(loop));
+                ribLoopKeys.push_back(key);
             }
         }
+
+        // Hole outlines for one rib, as polylines in model space. The wires
+        // come from the same builder that cuts the STEP rib faces, so every
+        // hole type — ellipse, triangle, rounded rectangle — is exact here
+        // rather than reconstructed downstream. 1 mm of chord deflection is
+        // far finer than the mesh that tests against them.
+        const auto ribHoleOutlines =
+            [this](int ribIndex,
+                   bool mirror) -> std::vector<std::vector<gp_Pnt>> {
+            std::vector<std::vector<gp_Pnt>> outlines;
+            const auto captured = capturedRibs_.find(ribIndex);
+            if (captured == capturedRibs_.end()
+                || captured->second.holes.empty()) {
+                return outlines;
+            }
+            RibFrame frame;
+            if (!fitRibFrame(captured->second.planarPoints,
+                             captured->second.spatialPoints,
+                             frame)) {
+                return outlines;
+            }
+            for (std::size_t holeIndex = 0;
+                 holeIndex < captured->second.holes.size();
+                 ++holeIndex) {
+                int edgeCount = 0;
+                std::vector<std::string> ignored;
+                const TopoDS_Wire wire =
+                    ribHoleWire(captured->second.holes[holeIndex],
+                                frame,
+                                ribIndex,
+                                static_cast<int>(holeIndex) + 1,
+                                edgeCount,
+                                ignored);
+                if (wire.IsNull()) {
+                    continue;
+                }
+                std::vector<gp_Pnt> outline;
+                for (BRepTools_WireExplorer explorer(wire);
+                     explorer.More();
+                     explorer.Next()) {
+                    BRepAdaptor_Curve curve(explorer.Current());
+                    GCPnts_QuasiUniformDeflection sampler(curve, 1.0);
+                    if (!sampler.IsDone()) {
+                        continue;
+                    }
+                    // The last point of one edge is the first of the next.
+                    for (int point = 1; point < sampler.NbPoints(); ++point) {
+                        gp_Pnt placed = sampler.Value(point);
+                        if (mirror) {
+                            placed.SetX(-placed.X());
+                        }
+                        outline.push_back(placed);
+                    }
+                }
+                if (outline.size() >= 3) {
+                    outlines.push_back(std::move(outline));
+                }
+            }
+            return outlines;
+        };
 
         const auto escaped = [](const std::string &text) {
             std::string result;
@@ -3644,6 +3710,32 @@ public:
             }
             json << ']';
         }
+        // Hole outlines per rib loop, in the same order, so the Playground
+        // can mesh the ribs with their holes cut out.
+        json << "\n],\n\"ribHoles\": [";
+        for (std::size_t index = 0; index < ribLoops.size(); ++index) {
+            const std::vector<std::vector<gp_Pnt>> outlines =
+                index < ribLoopKeys.size()
+                    ? ribHoleOutlines(ribLoopKeys[index].first,
+                                      ribLoopKeys[index].second)
+                    : std::vector<std::vector<gp_Pnt>>{};
+            json << (index == 0 ? "\n" : ",\n") << '[';
+            for (std::size_t outline = 0; outline < outlines.size();
+                 ++outline) {
+                json << (outline == 0 ? "" : ",") << '[';
+                for (std::size_t point = 0;
+                     point < outlines[outline].size();
+                     ++point) {
+                    const gp_Pnt &placed = outlines[outline][point];
+                    json << (point == 0 ? "" : ",") << '['
+                         << placed.X() << ',' << placed.Y() << ','
+                         << placed.Z() << ']';
+                }
+                json << ']';
+            }
+            json << ']';
+        }
+
         // Internal diagonal/mini-rib sheets as paired sample rows: the
         // Playground ties each pair together so line load spreads across
         // ribs the way the real V-ribs make it.

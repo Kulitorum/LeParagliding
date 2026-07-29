@@ -37,6 +37,12 @@ public:
     int meshSubdivision() const { return subdivision_; }
     static constexpr int maximumMeshSubdivision = 4;
 
+    // Meshes each rib as a real holed sheet instead of a hub and spokes:
+    // costlier, but the only form in which rib load means anything. Rebuilds
+    // the simulation from the retained mesh.
+    void setDetailedRibs(bool enabled);
+    bool detailedRibs() const { return detailedRibs_; }
+
 protected:
     void showEvent(QShowEvent *event) override;
 
@@ -48,6 +54,9 @@ private:
     // composited GL tab (XFLR5's lazy views avoid this the same way).
     void ensureView();
     void loadIfPending();
+    // Re-reads the retained mesh so a changed preference takes effect
+    // without another engine run. The wing returns to its rest pose.
+    void rebuildSimulation();
 
     QVBoxLayout *layout_ = nullptr;
     PlaygroundView *view_ = nullptr;
@@ -74,6 +83,7 @@ private:
     // re-running the engine (whose output directory is long gone).
     QByteArray meshData_;
     int subdivision_ = 1;
+    bool detailedRibs_ = false;
     // Creating the view's native window pumps the event loop, which can
     // redeliver this page's show event before view_ is assigned; the flag
     // keeps that reentrant call from constructing a second view.

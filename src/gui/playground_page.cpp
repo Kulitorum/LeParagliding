@@ -66,6 +66,9 @@ constexpr double maximumStressFullScaleStrain = 0.05;   // slider top, 5%
 // multiplier instead, which is a force. Newtons per line.
 constexpr double defaultLineFullScaleNewtons = 100.0;
 constexpr double maximumLineFullScaleNewtons = 500.0;
+// Rings between the rib outline and its centre in the detailed rib model.
+// One more ring per resolution step, so ribs get denser along with the skin.
+constexpr int defaultRibRings = 3;
 constexpr double simulationTimeStep = 1.0 / 60.0;
 constexpr int simulationSubsteps = 4;
 constexpr double substepSeconds = simulationTimeStep / simulationSubsteps;
@@ -105,6 +108,74 @@ constexpr int simSurfaceCount = static_cast<int>(SimSurface::Count);
 // Only the three skin surfaces come from the mesh file's tags.
 constexpr int simExportedSurfaceCount = 3;
 
+// A rib is planar, so its holes and its mesh are worked out in the rib's
+// own plane and mapped back.
+struct PlanarFrame
+{
+    softwing::Vec3 origin;
+    softwing::Vec3 u;
+    softwing::Vec3 v;
+
+    [[nodiscard]] std::pair<double, double> project(
+        const softwing::Vec3 &point) const
+    {
+        const softwing::Vec3 offset = point - origin;
+        return {dot(offset, u), dot(offset, v)};
+    }
+};
+
+// Newell's normal, which is stable for the near-planar many-sided loops a
+// rib outline produces, plus an arbitrary in-plane basis.
+PlanarFrame fitPlane(const std::vector<softwing::Vec3> &points)
+{
+    PlanarFrame frame;
+    for (const softwing::Vec3 &point : points) {
+        frame.origin += point;
+    }
+    frame.origin /= static_cast<double>(std::max<std::size_t>(
+        points.size(), 1));
+
+    softwing::Vec3 normal;
+    for (std::size_t index = 0; index < points.size(); ++index) {
+        const softwing::Vec3 &current = points[index];
+        const softwing::Vec3 &next = points[(index + 1) % points.size()];
+        normal.x += (current.y - next.y) * (current.z + next.z);
+        normal.y += (current.z - next.z) * (current.x + next.x);
+        normal.z += (current.x - next.x) * (current.y + next.y);
+    }
+    if (length(normal) <= 0.0) {
+        normal = {0.0, 0.0, 1.0};
+    }
+    normal = normalized(normal);
+
+    // Any axis not parallel to the normal seeds the in-plane basis.
+    const softwing::Vec3 seed = std::abs(normal.x) < 0.9
+                                    ? softwing::Vec3{1.0, 0.0, 0.0}
+                                    : softwing::Vec3{0.0, 1.0, 0.0};
+    frame.u = normalized(cross(normal, seed));
+    frame.v = cross(normal, frame.u);
+    return frame;
+}
+
+using PlanarPolygon = std::vector<std::pair<double, double>>;
+
+// Crossing-number test; the outlines are closed and non-self-intersecting.
+bool insidePolygon(const PlanarPolygon &polygon, double x, double y)
+{
+    bool inside = false;
+    for (std::size_t index = 0, previous = polygon.size() - 1;
+         index < polygon.size();
+         previous = index++) {
+        const auto &[xi, yi] = polygon[index];
+        const auto &[xj, yj] = polygon[previous];
+        if ((yi > y) != (yj > y)
+            && x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
 struct SimMesh
 {
     std::vector<softwing::Vec3> nodes;
@@ -112,6 +183,8 @@ struct SimMesh
     // Parallel to quads.
     std::vector<SimSurface> quadSurfaces;
     std::vector<std::vector<int>> ribLoops;
+    // Parallel to ribLoops: closed hole outlines in the rib's plane.
+    std::vector<std::vector<std::vector<softwing::Vec3>>> ribHoles;
     std::vector<SimStrap> straps;
     std::vector<SimLine> lines;
 };
@@ -163,6 +236,22 @@ std::optional<SimMesh> parseSimMesh(const QByteArray &data, QString &error)
         }
         mesh.ribLoops.push_back(std::move(loop));
     }
+    for (const QJsonValue &value :
+         root.value(QLatin1String("ribHoles")).toArray()) {
+        std::vector<std::vector<softwing::Vec3>> outlines;
+        for (const QJsonValue &outline : value.toArray()) {
+            std::vector<softwing::Vec3> points;
+            for (const QJsonValue &point : outline.toArray()) {
+                points.push_back(vec(point.toArray()));
+            }
+            if (points.size() >= 3) {
+                outlines.push_back(std::move(points));
+            }
+        }
+        mesh.ribHoles.push_back(std::move(outlines));
+    }
+    // Meshes written before holes were exported simply have none.
+    mesh.ribHoles.resize(mesh.ribLoops.size());
     for (const QJsonValue &value :
          root.value(QLatin1String("straps")).toArray()) {
         const QJsonObject strapObject = value.toObject();
@@ -320,7 +409,10 @@ SimMesh refineSimMesh(const SimMesh &mesh, int factor)
     // Rib loops run along quad edges, so their refined points land on the
     // sub-quad corners already welded above and reuse those nodes.
     refined.ribLoops.reserve(mesh.ribLoops.size());
-    for (const auto &loop : mesh.ribLoops) {
+    refined.ribHoles.reserve(mesh.ribHoles.size());
+    for (std::size_t loopIndex = 0; loopIndex < mesh.ribLoops.size();
+         ++loopIndex) {
+        const auto &loop = mesh.ribLoops[loopIndex];
         std::vector<int> refinedLoop;
         refinedLoop.reserve(loop.size() * static_cast<std::size_t>(factor));
         for (std::size_t index = 0; index < loop.size(); ++index) {
@@ -342,6 +434,7 @@ SimMesh refineSimMesh(const SimMesh &mesh, int factor)
         }
         if (refinedLoop.size() >= 3) {
             refined.ribLoops.push_back(std::move(refinedLoop));
+            refined.ribHoles.push_back(mesh.ribHoles[loopIndex]);
         }
     }
 
@@ -582,42 +675,185 @@ public:
         // only — no faces, so the uniform skin pressure stays valid.
         std::size_t centrePin = 0;
         double centrePinAbsX = std::numeric_limits<double>::max();
-        for (const auto &loop : mesh.ribLoops) {
+        for (std::size_t ribIndex = 0; ribIndex < mesh.ribLoops.size();
+             ++ribIndex) {
+            const auto &loop = mesh.ribLoops[ribIndex];
             softwing::Vec3 centroid;
             for (const int node : loop) {
                 centroid += mesh.nodes[static_cast<std::size_t>(node)];
             }
             centroid /= static_cast<double>(loop.size());
-            const std::size_t centre =
-                body->addNode(centroid, ribCentroidMass);
-            if (std::abs(centroid.x) < centrePinAbsX) {
+
+            // The loop perimeter is skin either way.
+            for (std::size_t index = 0; index < loop.size(); ++index) {
+                addEdge(loop[index], loop[(index + 1) % loop.size()]);
+            }
+
+            if (!detailedRibs_) {
+                // Cheap web: one hub, spokes out to the loop. No interior,
+                // so it cannot take holes and gains nothing from a finer
+                // mesh — which is exactly why the detailed model exists.
+                const std::size_t centre =
+                    body->addNode(centroid, ribCentroidMass);
+                if (std::abs(centroid.x) < centrePinAbsX) {
+                    centrePinAbsX = std::abs(centroid.x);
+                    centrePin = centre;
+                }
+                for (std::size_t index = 0; index < loop.size(); ++index) {
+                    const auto node = static_cast<std::size_t>(loop[index]);
+                    const auto next = static_cast<std::size_t>(
+                        loop[(index + 1) % loop.size()]);
+                    tie(node,
+                        centre,
+                        length(mesh.nodes[node] - centroid),
+                        skinCompliance);
+                    RenderFace drawn;
+                    drawn.surface = SimSurface::Rib;
+                    drawn.nodes = {node, next, centre};
+                    drawn.edges = {sideConstraint(node, next),
+                                   sideConstraint(next, centre),
+                                   sideConstraint(centre, node)};
+                    renderFaces_.push_back(drawn);
+                }
+                continue;
+            }
+
+            // Detailed web: rings shrinking from the loop toward the
+            // centroid. The outermost ring *is* the loop, so the rib stays
+            // exactly attached to the skin; the interior rings give it real
+            // in-plane structure, take the holes, and get denser with the
+            // resolution setting. Rings are cheap to build and need no
+            // triangulator, at the cost of skewed cells near the trailing
+            // edge — acceptable for a sandbox, and far better than a hub.
+            std::vector<softwing::Vec3> loopPoints;
+            loopPoints.reserve(loop.size());
+            for (const int node : loop) {
+                loopPoints.push_back(mesh.nodes[static_cast<std::size_t>(
+                    node)]);
+            }
+            const PlanarFrame frame = fitPlane(loopPoints);
+            std::vector<PlanarPolygon> holes;
+            for (const auto &outline : mesh.ribHoles[ribIndex]) {
+                PlanarPolygon polygon;
+                polygon.reserve(outline.size());
+                for (const softwing::Vec3 &point : outline) {
+                    polygon.push_back(frame.project(point));
+                }
+                holes.push_back(std::move(polygon));
+            }
+            const auto inHole = [&holes](const softwing::Vec3 &point,
+                                         const PlanarFrame &plane) {
+                const auto [x, y] = plane.project(point);
+                return std::any_of(holes.begin(),
+                                   holes.end(),
+                                   [x, y](const PlanarPolygon &polygon) {
+                                       return insidePolygon(polygon, x, y);
+                                   });
+            };
+
+            // Rib fabric weighed by its own area, shared over the interior
+            // nodes; the loop nodes already carry their skin mass.
+            double area = 0.0;
+            for (std::size_t index = 0; index < loopPoints.size(); ++index) {
+                const auto [x0, y0] = frame.project(loopPoints[index]);
+                const auto [x1, y1] = frame.project(
+                    loopPoints[(index + 1) % loopPoints.size()]);
+                area += x0 * y1 - x1 * y0;
+            }
+            area = std::abs(area) * 0.5;
+            const std::size_t interiorCount =
+                loop.size() * static_cast<std::size_t>(ribRings_ - 1) + 1;
+            const double interiorMass =
+                std::max(fabricArealDensity * area
+                             / static_cast<double>(interiorCount),
+                         1.0e-4);
+
+            // Ring ribRings_ is the loop; ring 0 collapses to the centroid.
+            const auto ringPoint = [&](int ring, std::size_t index) {
+                const double blend =
+                    static_cast<double>(ring) / ribRings_;
+                return centroid + (loopPoints[index] - centroid) * blend;
+            };
+            std::map<std::pair<int, std::size_t>, std::size_t> ringNodes;
+            const auto ringNode = [&](int ring,
+                                      std::size_t index) -> std::size_t {
+                if (ring >= ribRings_) {
+                    return static_cast<std::size_t>(loop[index]);
+                }
+                // Everything on ring 0 is the single centre node.
+                const std::size_t key = ring == 0 ? 0 : index;
+                const auto [entry, inserted] =
+                    ringNodes.try_emplace(std::pair{ring, key}, 0);
+                if (inserted) {
+                    entry->second = body->addNode(
+                        ring == 0 ? centroid : ringPoint(ring, index),
+                        interiorMass);
+                }
+                return entry->second;
+            };
+
+            for (int ring = 0; ring < ribRings_; ++ring) {
+                for (std::size_t index = 0; index < loop.size(); ++index) {
+                    const std::size_t next = (index + 1) % loop.size();
+                    // Drop the cell when its middle falls in a hole. Nodes
+                    // are created lazily, so a node only exists once some
+                    // surviving cell needs it.
+                    const softwing::Vec3 middle =
+                        (ringPoint(ring, index) + ringPoint(ring, next)
+                         + ringPoint(ring + 1, index)
+                         + ringPoint(ring + 1, next))
+                        * 0.25;
+                    if (inHole(middle, frame)) {
+                        continue;
+                    }
+                    const std::size_t innerA = ringNode(ring, index);
+                    const std::size_t innerB = ringNode(ring, next);
+                    const std::size_t outerA = ringNode(ring + 1, index);
+                    const std::size_t outerB = ringNode(ring + 1, next);
+
+                    const auto &positions = body->nodes();
+                    const auto span = [&](std::size_t a, std::size_t b) {
+                        return length(positions[b].position
+                                      - positions[a].position);
+                    };
+                    // Radial and circumferential ties, plus one diagonal so
+                    // the cell resists shear rather than folding flat.
+                    tie(innerA, outerA, span(innerA, outerA), skinCompliance);
+                    tie(outerA, outerB, span(outerA, outerB), skinCompliance);
+                    tie(innerA, outerB, span(innerA, outerB), skinCompliance);
+                    if (innerA != innerB) {
+                        tie(innerA, innerB, span(innerA, innerB),
+                            skinCompliance);
+                        tie(innerB, outerB, span(innerB, outerB),
+                            skinCompliance);
+                    }
+
+                    const auto addRibFace = [&](std::size_t a,
+                                                std::size_t b,
+                                                std::size_t c) {
+                        if (a == b || b == c || c == a) {
+                            return;
+                        }
+                        RenderFace drawn;
+                        drawn.surface = SimSurface::Rib;
+                        drawn.nodes = {a, b, c};
+                        drawn.edges = {sideConstraint(a, b),
+                                       sideConstraint(b, c),
+                                       sideConstraint(c, a)};
+                        renderFaces_.push_back(drawn);
+                    };
+                    addRibFace(innerA, outerA, outerB);
+                    addRibFace(innerA, outerB, innerB);
+                }
+            }
+            // Look the hub up rather than asking ringNode for it: if every
+            // ring-0 cell fell inside a hole the node was never needed, and
+            // creating one here would leave a massive node tied to nothing.
+            const auto hub = ringNodes.find({0, std::size_t{0}});
+            if (std::abs(centroid.x) < centrePinAbsX
+                && hub != ringNodes.end()) {
                 centrePinAbsX = std::abs(centroid.x);
-                centrePin = centre;
-            }
-            for (std::size_t index = 0; index < loop.size(); ++index) {
-                const int node = loop[index];
-                const int next =
-                    loop[(index + 1) % loop.size()];
-                addEdge(node, next);
-                tie(static_cast<std::size_t>(node),
-                    centre,
-                    length(mesh.nodes[static_cast<std::size_t>(node)]
-                           - centroid),
-                    skinCompliance);
-            }
-            // Draw the web as a fan on the same spokes the solver uses, so
-            // what is shown is exactly what is simulated.
-            for (std::size_t index = 0; index < loop.size(); ++index) {
-                const auto node = static_cast<std::size_t>(loop[index]);
-                const auto next = static_cast<std::size_t>(
-                    loop[(index + 1) % loop.size()]);
-                RenderFace drawn;
-                drawn.surface = SimSurface::Rib;
-                drawn.nodes = {node, next, centre};
-                drawn.edges = {sideConstraint(node, next),
-                               sideConstraint(next, centre),
-                               sideConstraint(centre, node)};
-                renderFaces_.push_back(drawn);
+                centrePin = hub->second;
             }
         }
         // No pin here any more: the lift pressure keeps every line taut
@@ -875,6 +1111,15 @@ public:
         update();
     }
 
+    // Takes effect on the next build; the page rebuilds when it changes.
+    void setDetailedRibs(bool enabled, int rings)
+    {
+        detailedRibs_ = enabled;
+        ribRings_ = std::max(2, rings);
+    }
+
+    bool detailedRibs() const { return detailedRibs_; }
+
     void setLineTensionColoring(bool enabled)
     {
         lineTensionColoring_ = enabled;
@@ -912,7 +1157,8 @@ public:
         const auto &constraints = body_->constraints();
         double peak = 0.0;
         for (const RenderFace &face : renderFaces_) {
-            if (surfaceVisible_[static_cast<std::size_t>(face.surface)]) {
+            if (surfaceVisible_[static_cast<std::size_t>(face.surface)]
+                && colourable(face)) {
                 peak = std::max(peak, faceStrain(face, nodes, constraints));
             }
         }
@@ -1060,7 +1306,7 @@ protected:
             const softwing::Vec3 &c = nodes[face.nodes[2]].position;
             const softwing::Vec3 normal = normalized(cross(b - a, c - a));
             QVector3D tint;
-            if (stressColoring_) {
+            if (stressColoring_ && colourable(face)) {
                 tint = stressTint(faceStrain(face, nodes, constraints));
             }
             for (const softwing::Vec3 *point : {&a, &b, &c}) {
@@ -1206,6 +1452,14 @@ private:
     // three sides are stretched past their rest length. Because every skin
     // edge shares one compliance, tension is proportional to this, so the
     // picture reads the same as a tension plot.
+    // Without the detailed model a rib is a hub and spokes, so its colour
+    // would be spoke tension dressed up as rib stress. Leave those faces
+    // plain rather than show a number that means nothing.
+    bool colourable(const RenderFace &face) const
+    {
+        return face.surface != SimSurface::Rib || detailedRibs_;
+    }
+
     // Tensile only: slack fabric carries no load, so edges shorter than
     // their rest length read as zero rather than as compression.
     static double faceStrain(
@@ -1348,6 +1602,8 @@ private:
     double stressFullScale_ = defaultStressFullScaleStrain;
     bool lineTensionColoring_ = false;
     double lineFullScaleNewtons_ = defaultLineFullScaleNewtons;
+    bool detailedRibs_ = false;
+    int ribRings_ = defaultRibRings;
     std::vector<std::size_t> topFaces_;
     std::vector<LineSegment> lineSegments_;
     std::vector<Anchor> anchors_;
@@ -1631,6 +1887,20 @@ void PlaygroundPage::setMeshSubdivision(int factor)
         return;
     }
     subdivision_ = clamped;
+    rebuildSimulation();
+}
+
+void PlaygroundPage::setDetailedRibs(bool enabled)
+{
+    if (enabled == detailedRibs_) {
+        return;
+    }
+    detailedRibs_ = enabled;
+    rebuildSimulation();
+}
+
+void PlaygroundPage::rebuildSimulation()
+{
     if (meshData_.isEmpty()) {
         return;
     }
@@ -1675,6 +1945,8 @@ void PlaygroundPage::loadIfPending()
     }
     // Refining is quadratic in the factor and can take a moment at 4x.
     QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+    // Ribs gain a ring per resolution step so they densify with the skin.
+    view_->setDetailedRibs(detailedRibs_, defaultRibRings + subdivision_ - 1);
     const SimMesh simulated = refineSimMesh(*mesh, subdivision_);
     const QString buildError = view_->buildFromMesh(simulated);
     QGuiApplication::restoreOverrideCursor();

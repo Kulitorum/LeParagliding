@@ -3326,7 +3326,33 @@ void MainWindow::showPreferences()
     subdivisionHint->setObjectName(QStringLiteral("hint"));
     subdivisionHint->setWordWrap(true);
     playgroundLayout->addWidget(subdivisionHint, 1, 0, 1, 3);
+
+    auto *detailedRibsCheck = new QCheckBox(
+        QStringLiteral("Detailed rib model"), playgroundGroup);
+    detailedRibsCheck->setChecked(playgroundPage_->detailedRibs());
+    playgroundLayout->addWidget(detailedRibsCheck, 2, 0, 1, 3);
+
+    auto *detailedRibsHint = new QLabel(
+        QStringLiteral(
+            "Meshes every rib as a real sheet with its airfoil holes cut "
+            "out, so rib load can be read and the ribs sharpen with the "
+            "resolution above. Off, a rib is a hub with spokes to its "
+            "outline: much faster to inflate and to draw, but it has no "
+            "interior, so it takes no holes and is left uncoloured when "
+            "stress colouring is on."),
+        playgroundGroup);
+    detailedRibsHint->setObjectName(QStringLiteral("hint"));
+    detailedRibsHint->setWordWrap(true);
+    playgroundLayout->addWidget(detailedRibsHint, 3, 0, 1, 3);
     layout->addWidget(playgroundGroup);
+
+    connect(detailedRibsCheck, &QCheckBox::toggled, &dialog,
+            [this](bool enabled) {
+                QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+                playgroundPage_->setDetailedRibs(enabled);
+                QGuiApplication::restoreOverrideCursor();
+                saveSettings();
+            });
 
     const auto describeSubdivision = [](int factor) {
         if (factor <= 1) {
@@ -3497,6 +3523,9 @@ void MainWindow::loadSettings()
     playgroundPage_->setMeshSubdivision(
         settings.value(QStringLiteral("playground/meshSubdivision"), 1)
             .toInt());
+    playgroundPage_->setDetailedRibs(
+        settings.value(QStringLiteral("playground/detailedRibs"), false)
+            .toBool());
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
@@ -3526,6 +3555,9 @@ void MainWindow::saveSettings() const
     settings.setValue(
         QStringLiteral("playground/meshSubdivision"),
         playgroundPage_->meshSubdivision());
+    settings.setValue(
+        QStringLiteral("playground/detailedRibs"),
+        playgroundPage_->detailedRibs());
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
