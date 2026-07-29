@@ -1787,7 +1787,10 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         slider->setValue(value);
         return slider;
     };
-    pressure_ = makeSlider(300, 80);
+    // Capped at a third of what the slider used to reach: past roughly this
+    // the skin inflates further than the fabric would really allow and the
+    // wing stops looking like one, so the extra travel was only misleading.
+    pressure_ = makeSlider(100, 80);
     lift_ = makeSlider(200, 30);
     leftBrake_ = makeSlider(100, 0);
     rightBrake_ = makeSlider(100, 0);
