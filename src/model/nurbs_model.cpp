@@ -253,8 +253,22 @@ constexpr int simSpanColumnCount = 5;
 struct SimRegionCapture
 {
     int panelIndex = 0;
+    // Which skin the rows came from, so the Playground can draw the
+    // surfaces separately (hiding the extrados to look inside).
+    Region surface = Region::Extrados;
     std::vector<int> stations;
     std::vector<std::array<gp_Pnt, simSpanColumnCount>> rows;
+
+    // True when the panel spans symmetrically across x=0, so mirroring it
+    // would reproduce the panel itself.
+    [[nodiscard]] bool selfMirrored() const
+    {
+        if (rows.empty()) {
+            return false;
+        }
+        const auto &row = rows.front();
+        return std::abs(row.front().X() + row.back().X()) < 0.5;
+    }
 };
 
 struct PanelSurface
@@ -699,18 +713,25 @@ public:
         // stamps a uniform pressure difference per face, so open intakes
         // would both leave flapping rims and give the closed-surface
         // pressure field a spurious net thrust through the hole.
-        captureSimRegion(source, panelIndex, 1, upperPointCount, 16);
+        captureSimRegion(source,
+                         panelIndex,
+                         1,
+                         upperPointCount,
+                         16,
+                         Region::Extrados);
         captureSimRegion(source,
                          panelIndex,
                          upperPointCount,
                          ventLast,
-                         3);
+                         3,
+                         Region::Vent);
         if (!singleSkin && ventLast < totalPointCount) {
             captureSimRegion(source,
                              panelIndex,
                              ventLast,
                              totalPointCount,
-                             12);
+                             12,
+                             Region::Intrados);
         }
     }
 
@@ -1748,7 +1769,8 @@ private:
                           int panelIndex,
                           int firstPoint,
                           int lastPoint,
-                          int targetRows)
+                          int targetRows,
+                          Region surface)
     {
         const int stationCount = lastPoint - firstPoint + 1;
         if (stationCount < 2) {
@@ -1759,6 +1781,7 @@ private:
 
         SimRegionCapture capture;
         capture.panelIndex = panelIndex;
+        capture.surface = surface;
         try {
             for (int station = firstPoint;
                  station <= lastPoint;
@@ -3490,6 +3513,9 @@ public:
         };
 
         std::vector<std::array<int, 4>> quads;
+        // Which skin each quad came from, parallel to `quads`, so the
+        // Playground can draw the surfaces separately.
+        std::vector<int> quadSurfaces;
         // Rib outline loops keyed by (ribIndex, mirrored side), assembled
         // from the regions' rib-side sample columns in station order.
         std::map<std::pair<int, bool>, std::vector<std::pair<int, int>>>
@@ -3497,11 +3523,14 @@ public:
 
         for (const SimRegionCapture &region : simRegions_) {
             for (const bool mirror : {false, true}) {
-                // Panel 1 spans rib 0..rib 1, and rib 0 is rib 1 mirrored
-                // by construction, so on odd-cell wings the panel is its
-                // own mirror image; emitting the mirrored copy would lay
-                // duplicate faces over it.
-                if (mirror && region.panelIndex == 1) {
+                // A panel that straddles the centreline (the centre cell of
+                // a wing whose innermost ribs sit either side of x=0) is its
+                // own mirror image, and emitting the mirrored copy would lay
+                // duplicate faces over it. Decided from the geometry rather
+                // than from panelIndex == 1: wings whose innermost rib sits
+                // *on* the centreline have a genuine second half-panel there
+                // that must be mirrored.
+                if (mirror && region.selfMirrored()) {
                     continue;
                 }
                 std::vector<std::array<int, simSpanColumnCount>> grid;
@@ -3525,21 +3554,26 @@ public:
                                          grid[rowIndex][column + 1],
                                          grid[rowIndex + 1][column + 1],
                                          grid[rowIndex + 1][column]});
+                        quadSurfaces.push_back(
+                            static_cast<int>(region.surface));
                     }
                 }
                 // Span column 0 lies on rib panelIndex, the last column on
-                // rib panelIndex-1; only the innermost panel contributes
-                // the latter (every other rib is some panel's column 0).
+                // rib panelIndex-1. Both edges are registered: on wings
+                // whose innermost rib sits on the centreline that rib is no
+                // panel's column 0, and harvesting only column 0 dropped it
+                // — leaving the two centre bays joined into one, which then
+                // ballooned as a single double-width cell. Ribs shared by
+                // neighbouring panels yield identical loops and are removed
+                // by the uniqueLoops filter below.
                 for (std::size_t rowIndex = 0;
                      rowIndex < grid.size();
                      ++rowIndex) {
                     ribColumns[{region.panelIndex, mirror}].emplace_back(
                         region.stations[rowIndex], grid[rowIndex][0]);
-                    if (region.panelIndex == 1) {
-                        ribColumns[{0, mirror}].emplace_back(
-                            region.stations[rowIndex],
-                            grid[rowIndex][simSpanColumnCount - 1]);
-                    }
+                    ribColumns[{region.panelIndex - 1, mirror}].emplace_back(
+                        region.stations[rowIndex],
+                        grid[rowIndex][simSpanColumnCount - 1]);
                 }
             }
         }
@@ -3592,7 +3626,15 @@ public:
                  << '[' << quad[0] << ',' << quad[1] << ',' << quad[2]
                  << ',' << quad[3] << ']';
         }
-        json << "\n],\n\"ribLoops\": [";
+        // Per-quad skin tag, indexing surfaceNames. Readers that predate
+        // this field simply draw every quad alike.
+        json << "\n],\n\"surfaceNames\": "
+                "[\"extrados\",\"vent\",\"intrados\"],\n"
+                "\"quadSurfaces\": [";
+        for (std::size_t index = 0; index < quadSurfaces.size(); ++index) {
+            json << (index == 0 ? "" : ",") << quadSurfaces[index];
+        }
+        json << "],\n\"ribLoops\": [";
         for (std::size_t index = 0; index < ribLoops.size(); ++index) {
             json << (index == 0 ? "\n" : ",\n") << '[';
             for (std::size_t node = 0;

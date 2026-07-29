@@ -3288,6 +3288,70 @@ void MainWindow::showPreferences()
                 resolutionValue->setText(describeStep(index));
             });
 
+    auto *playgroundGroup =
+        new QGroupBox(QStringLiteral("Playground simulation"), &dialog);
+    auto *playgroundLayout = new QGridLayout(playgroundGroup);
+    playgroundLayout->setContentsMargins(14, 18, 14, 12);
+    playgroundLayout->setHorizontalSpacing(10);
+    playgroundLayout->setVerticalSpacing(8);
+    playgroundLayout->setColumnStretch(1, 1);
+
+    auto *subdivisionLabel =
+        new QLabel(QStringLiteral("Mesh resolution"), playgroundGroup);
+    subdivisionLabel->setObjectName(QStringLiteral("fieldLabel"));
+    playgroundLayout->addWidget(subdivisionLabel, 0, 0);
+
+    auto *subdivisionSlider = new QSlider(Qt::Horizontal, playgroundGroup);
+    subdivisionSlider->setRange(1, PlaygroundPage::maximumMeshSubdivision);
+    subdivisionSlider->setPageStep(1);
+    subdivisionSlider->setTickPosition(QSlider::TicksBelow);
+    subdivisionSlider->setTickInterval(1);
+    // Rebuilding the soft body is expensive; only apply on release.
+    subdivisionSlider->setTracking(false);
+    subdivisionSlider->setValue(playgroundPage_->meshSubdivision());
+    playgroundLayout->addWidget(subdivisionSlider, 0, 1);
+
+    auto *subdivisionValue = new QLabel(playgroundGroup);
+    subdivisionValue->setMinimumWidth(150);
+    playgroundLayout->addWidget(subdivisionValue, 0, 2);
+
+    auto *subdivisionHint = new QLabel(
+        QStringLiteral(
+            "Splits each exported skin quad before the cloth solver runs. "
+            "A finer mesh drapes and wrinkles more convincingly, but costs "
+            "the square of the setting — the highest step is sixteen times "
+            "the triangles and will not hold full speed on every machine. "
+            "Changing it rebuilds the wing in its rest pose."),
+        playgroundGroup);
+    subdivisionHint->setObjectName(QStringLiteral("hint"));
+    subdivisionHint->setWordWrap(true);
+    playgroundLayout->addWidget(subdivisionHint, 1, 0, 1, 3);
+    layout->addWidget(playgroundGroup);
+
+    const auto describeSubdivision = [](int factor) {
+        if (factor <= 1) {
+            return QStringLiteral("1x · as exported");
+        }
+        return QStringLiteral("%1x split · %2x triangles")
+            .arg(factor)
+            .arg(factor * factor);
+    };
+    subdivisionValue->setText(
+        describeSubdivision(subdivisionSlider->value()));
+
+    connect(subdivisionSlider, &QSlider::sliderMoved, subdivisionValue,
+            [subdivisionValue, describeSubdivision](int factor) {
+                subdivisionValue->setText(describeSubdivision(factor));
+            });
+    connect(subdivisionSlider, &QSlider::valueChanged, &dialog,
+            [this, subdivisionValue, describeSubdivision](int factor) {
+                QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+                playgroundPage_->setMeshSubdivision(factor);
+                QGuiApplication::restoreOverrideCursor();
+                subdivisionValue->setText(describeSubdivision(factor));
+                saveSettings();
+            });
+
     auto *exportGroup = new QGroupBox(QStringLiteral("STEP export"), &dialog);
     auto *exportLayout = new QVBoxLayout(exportGroup);
     exportLayout->setContentsMargins(14, 18, 14, 12);
@@ -3430,6 +3494,9 @@ void MainWindow::loadSettings()
     exportConstructionCurves_ =
         settings.value(QStringLiteral("export/constructionCurves"), true)
             .toBool();
+    playgroundPage_->setMeshSubdivision(
+        settings.value(QStringLiteral("playground/meshSubdivision"), 1)
+            .toInt());
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 
@@ -3456,6 +3523,9 @@ void MainWindow::saveSettings() const
     settings.setValue(
         QStringLiteral("export/constructionCurves"),
         exportConstructionCurves_);
+    settings.setValue(
+        QStringLiteral("playground/meshSubdivision"),
+        playgroundPage_->meshSubdivision());
     settings.remove(QStringLiteral("behavior/openWhenFinished"));
 }
 

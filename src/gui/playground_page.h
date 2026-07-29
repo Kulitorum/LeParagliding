@@ -2,9 +2,11 @@
 
 #include <QWidget>
 
+class QCheckBox;
 class QLabel;
 class QPushButton;
 class QSlider;
+class QTimer;
 class QVBoxLayout;
 
 class PlaygroundView;
@@ -27,6 +29,14 @@ public:
     // simulation when the tab is next shown, or right away if visible.
     void setSimMeshPath(const QString &path);
 
+    // Splits each exported skin quad into factor x factor sub-quads before
+    // the body is assembled: 1 is the engine's own mesh, 4 is sixteen times
+    // the triangles. Rebuilds the running simulation from the retained
+    // mesh, so the wing resets to its rest pose.
+    void setMeshSubdivision(int factor);
+    int meshSubdivision() const { return subdivision_; }
+    static constexpr int maximumMeshSubdivision = 4;
+
 protected:
     void showEvent(QShowEvent *event) override;
 
@@ -47,7 +57,23 @@ private:
     QSlider *leftBrake_ = nullptr;
     QSlider *rightBrake_ = nullptr;
     QPushButton *runButton_ = nullptr;
+    QCheckBox *showExtrados_ = nullptr;
+    QCheckBox *showVent_ = nullptr;
+    QCheckBox *showIntrados_ = nullptr;
+    QCheckBox *showRibs_ = nullptr;
+    QCheckBox *showStraps_ = nullptr;
+    QCheckBox *showLines_ = nullptr;
+    QCheckBox *showStress_ = nullptr;
+    QSlider *stressScale_ = nullptr;
+    QCheckBox *showLineTension_ = nullptr;
+    QSlider *lineScale_ = nullptr;
+    QLabel *stressLegend_ = nullptr;
+    QTimer *legendTimer_ = nullptr;
     QByteArray pendingData_;
+    // Retained so a resolution change can rebuild the body without
+    // re-running the engine (whose output directory is long gone).
+    QByteArray meshData_;
+    int subdivision_ = 1;
     // Creating the view's native window pumps the event loop, which can
     // redeliver this page's show event before view_ is assigned; the flag
     // keeps that reentrant call from constructing a second view.
