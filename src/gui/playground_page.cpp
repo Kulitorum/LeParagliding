@@ -163,6 +163,15 @@ public:
 
     bool freeFlight() const { return controls_.freeFlight; }
 
+    // Back to the rest pose (and, in free flight, a fresh launch on the
+    // glide), from the retained mesh — no engine run needed.
+    void resetSimulation()
+    {
+        if (!mesh_.nodes.empty()) {
+            rebuildBody();
+        }
+    }
+
     // One line for the flight label: what the wing is doing, in units a
     // pilot would use.
     QString flightReadout() const
@@ -722,6 +731,10 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     rightBrake_ = makeSlider(100, 0);
     runButton_ = new QPushButton(QStringLiteral("Pause"), this);
     runButton_->setCheckable(true);
+    resetButton_ = new QPushButton(QStringLiteral("Reset"), this);
+    resetButton_->setToolTip(QStringLiteral(
+        "Rebuild the wing at its rest pose; in free flight it launches "
+        "again on its glide."));
 
     // Display filters: the solver always sees the whole wing, these only
     // decide what is drawn, so hiding the extrados looks inside a wing that
@@ -823,6 +836,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     controls->addWidget(new QLabel(QStringLiteral("Right brake"), this));
     controls->addWidget(rightBrake_, 1);
     controls->addWidget(runButton_);
+    controls->addWidget(resetButton_);
 
     layout_ = new QVBoxLayout(this);
     layout_->addWidget(status_);
@@ -958,6 +972,13 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         }
         runButton_->setText(paused ? QStringLiteral("Run")
                                    : QStringLiteral("Pause"));
+    });
+    connect(resetButton_, &QPushButton::clicked, this, [this] {
+        if (view_ != nullptr) {
+            view_->resetSimulation();
+        }
+        // The rebuilt body is running; the Pause button must say so.
+        runButton_->setChecked(false);
     });
 }
 
