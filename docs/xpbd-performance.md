@@ -545,8 +545,14 @@ Three earlier lessons that still stand:
 ### Controls
 
 `Pressure` is now q in pascals; `Lift` is replaced by `Angle`, the angle of
-attack in degrees (0–15, default 6). In free flight the Angle slider is
-ignored — the wing finds its own trim, and tilting the oncoming air is a
+attack in degrees (0–15, default 6). The brake sliders take the VIEWER's
+left and right (the solver's "left" cascade sits at negative mesh x, which
+the camera shows on the viewer's right; the crossover lives in
+`setBrakePull` alone). **Reset** rebuilds the wing at its rest pose from
+the retained mesh; **Fly mode** turns the cursor over the view into the
+brake input — top centre hands-up, straight down both brakes, toward a
+side releases the opposite brake, Esc leaves. In free flight the Angle
+slider is ignored — the wing finds its own trim, and tilting the oncoming air is a
 hillside, not an angle-of-attack control; at the pinned default of 6° it
 trimmed the flying wing into its stall. Note the sign-convention fix
 changed the pinned numbers slightly too (the wind now genuinely comes from
