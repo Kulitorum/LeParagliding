@@ -13,9 +13,33 @@ and `aerodynamic_test_access.h` ride along headers-only because the
 vendored .cpp files define (never call) methods of their access
 structs.
 
-Files are copied **unmodified** so they can be re-synced from SoftWingLab
-by copying over them; keep local changes out of these files and put any
-LEparagliding-specific glue in `src/gui` / `src/engine` instead. The
-Studio uses this core for the Playground tab's toy live-wing simulation
+The Studio uses this core for the Playground tab's toy live-wing simulation
 (inflation and line pulling); it makes no engineering claims — see
 `wingDesignConfidenceBoundary` in SoftWingLab.
+
+## No longer a verbatim copy
+
+These files started as an unmodified copy so they could be re-synced from
+SoftWingLab by copying over them. **That contract has been dropped**, by the
+owner's decision, and `soft_body.{h,cpp}` has diverged: the Playground's wing
+is a mass-spring cloth of distance constraints with no membrane elements, so
+none of the vendored parallel machinery applied to it and 98% of every frame
+sat in a single-threaded loop. See `docs/xpbd-performance.md` for the
+measurements and the reasoning.
+
+What changed, all of it modelled on the membrane paths already here and
+carrying the same reproducibility contract (bit-identical at any worker
+count; `workerThreads == 0` still selects the untouched serial sweep):
+
+- `ConstraintColouring` / `solveConstraintsColoured` — a coloured parallel
+  sweep for the distance/cable constraints.
+- `SolveNode` and the packed sweep — the constraint iteration loop runs on a
+  32-byte hot copy of node position and inverse mass when nothing else in the
+  substep moves nodes.
+- `projectDistanceConstraint` — the projection itself, shared by both sweeps,
+  with three of its five divisions removed.
+- `constraintColouringReport` / `constraintColouringView` — observation only,
+  for the benchmark and for the GPU backend in `tools/`.
+
+Re-syncing from SoftWingLab now means merging rather than copying. Anything
+LEparagliding-specific still belongs in `src/gui` / `src/engine` instead.

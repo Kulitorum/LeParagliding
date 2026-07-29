@@ -26,6 +26,20 @@ Gotchas learned the hard way:
   composited windows); it renders background windows without touching focus.
 - **Never inject global mouse/keyboard input** — clicks land in the user's
   live session.
+- **`PrintWindow` cannot capture the Playground's 3D view.** That widget sets
+  `WA_NativeWindow` and owns a native swapchain, so it comes back blank while
+  the surrounding chrome captures fine. Verify the Playground from its status
+  line (it carries the node/quad counts, and any solver exception replaces it
+  with the error) plus process metrics, and say plainly that the wing itself
+  was not photographed.
+- **Prefer a command-line entry point over driving the UI.** `--playground
+  <lep-sim.json>` opens straight onto the tab with a mesh loaded, `--xflr5`
+  onto the aerodynamics tab; no preview run or clicking needed.
+- **`Add-Type` with System.Drawing differs across PowerShell editions.** On
+  PS7/.NET 9 a C# block using `Bitmap`/`Graphics` needs
+  `System.Private.Windows.Core`, and on 5.1 the `-ReferencedAssemblies` list
+  that fixes PS7 fails instead. Keep the C# to the P/Invoke signatures and do
+  the bitmap work in PowerShell after `Add-Type -AssemblyName System.Drawing`.
 
 Interaction testing without the user's session: build an offscreen harness —
 a tiny CMake project compiling the widget sources from `src/gui` plus a

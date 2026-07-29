@@ -137,6 +137,18 @@ struct StepPerformanceProfile {
     void reset() noexcept { *this = {}; }
 };
 
+// Shape of the parallel distance-constraint sweep, for tuning and reporting.
+// Like StepPerformanceProfile this is an observation only: nothing in the
+// solver reads it back.
+struct ConstraintColouringReport {
+    std::size_t colourCount = 0;
+    // Colours wide enough to be worth a barrier; the rest run serially.
+    std::size_t parallelColours = 0;
+    std::size_t largestColour = 0;
+    std::size_t parallelConstraints = 0;
+    std::size_t serialConstraints = 0;
+};
+
 enum class ParallelMembraneMode {
     ColouredGaussSeidel,
     Jacobi,
@@ -152,11 +164,12 @@ struct StepSettings {
     // 0 keeps the single-threaded solver and its exact element ordering, which
     // is what every acceptance gate is baselined against.
     //
-    // Any value >= 1 runs the explicitly selected parallel membrane mode. Both
-    // modes follow a different sweep from serial index-order Gauss-Seidel, but
-    // each is bit-identical at every worker count, including 1. The count buys
-    // speed only; it never selects physics. Set it explicitly: the core never
-    // reads the core count.
+    // Any value >= 1 runs the parallel sweeps: the coloured distance/cable
+    // constraint sweep, and the explicitly selected parallel membrane mode.
+    // All of them follow a different sweep from serial index-order
+    // Gauss-Seidel, but each is bit-identical at every worker count, including
+    // 1. The count buys speed only; it never selects physics. Set it
+    // explicitly: the core never reads the core count.
     unsigned workerThreads = 0;
     ParallelMembraneMode parallelMembraneMode =
         ParallelMembraneMode::ColouredGaussSeidel;
@@ -335,9 +348,29 @@ public:
     [[nodiscard]] const std::vector<DistanceConstraint>& constraints() const {
         return constraints_;
     }
+    // Mutable for the same reason nodes() is: a host may need to retune a
+    // constraint between steps -- a brake line shortening, say. Changing a
+    // rest length or a compliance is safe; adding or removing constraints
+    // through this reference is not, and would leave the colouring stale.
+    [[nodiscard]] std::vector<DistanceConstraint>& constraints() {
+        return constraints_;
+    }
     [[nodiscard]] const std::vector<MembraneElement>& membraneElements() const {
         return membraneElements_;
     }
+    // Builds the colouring if it is not current, so it reports what a
+    // parallel step would actually run.
+    [[nodiscard]] ConstraintColouringReport constraintColouringReport() const;
+    // The partition itself, for a backend that wants to run the same sweep
+    // somewhere else (see tools/softwing_gpu.cpp). `order` lists constraint
+    // indices colour-major; `colourOffsets` bounds each colour within it and
+    // has one more entry than there are colours. Both are owned by the body
+    // and are invalidated by any topology change.
+    struct ConstraintColouringView {
+        std::span<const std::size_t> order;
+        std::span<const std::size_t> colourOffsets;
+    };
+    [[nodiscard]] ConstraintColouringView constraintColouringView() const;
     [[nodiscard]] const std::vector<RegisteredContactSurface>&
     contactSurfaces() const {
         return contactSurfaces_;
@@ -397,14 +430,86 @@ private:
     void solveContactIteration(double dt, const StepSettings& settings);
     void certifyContactState(double dt, const StepSettings& settings);
     void applyContactFriction();
-    void accumulatePressureForces();
-    void solveConstraint(DistanceConstraint& constraint, double dt);
+    // A substep-heavy budget (many substeps, few iterations) converges far
+    // better per unit work than an iteration-heavy one, which leaves the
+    // once-per-substep passes -- pressure, prediction, finalization -- as a
+    // third of the frame rather than the 4% they were. They parallelise
+    // trivially: every node writes only itself.
+    void accumulatePressureForces(WorkerPool* pool);
+    void predictPositions(double dt,
+                          const StepSettings& settings,
+                          double damping,
+                          WorkerPool* pool);
+    void finalizeVelocities(double dt, WorkerPool* pool);
+
+    // Node -> incident triangles. The pressure pass walks faces and scatters
+    // a third of each load to its corners, which cannot be shared out without
+    // atomics; gathering per node can. Each node sums its incident faces in
+    // ascending triangle index, which is the order the scatter added them in,
+    // so the gather is bit-identical to it and to itself at any worker count.
+    struct TriangleIncidence {
+        std::vector<std::size_t> nodeOffsets;
+        std::vector<std::size_t> triangles;
+        std::size_t builtForTriangleCount = 0;
+        std::size_t builtForNodeCount = 0;
+    };
+    [[nodiscard]] const TriangleIncidence& triangleIncidence() const;
+    // Takes 1/dt^2 rather than dt: it is loop-invariant across the whole
+    // sweep and computing it per constraint is a division the solver cannot
+    // afford (see projectDistanceConstraint).
+    void solveConstraint(DistanceConstraint& constraint,
+                         double inverseTimeStepSquared);
+
+    // A distance/cable projection reads exactly two things per node: its
+    // position and its inverse mass. A Node is 104 bytes, so a sweep over it
+    // drags four times that through the cache for nothing -- and the sweep is
+    // pure cache-latency work, which is where nearly all of a mass-spring
+    // step goes. Packed to 32 bytes, two nodes share a line and a mid-sized
+    // body's hot state fits in L2 instead of spilling to L3.
+    //
+    // Only usable when nothing else in the substep moves nodes; membrane,
+    // contact and suspension all do, so those substeps sweep Node directly.
+    // Same arithmetic on the same values either way: the packing is a
+    // container change, not a physics one.
+    struct SolveNode {
+        Vec3 position;
+        double inverseMass = 0.0;
+    };
+    void packConstraintSolveNodes(WorkerPool* pool);
+    void unpackConstraintSolveNodes(WorkerPool* pool);
+    void solveConstraintPacked(DistanceConstraint& constraint,
+                               double inverseTimeStepSquared);
     [[nodiscard]] std::array<Vec3, 3> membraneElementCorrections(
         MembraneElement& element,
         double dt);
     void solveMembraneElement(MembraneElement& element, double dt);
     void updateMembraneSolverDiagnostics(MembraneElement& element,
                                          double dt);
+
+    // The same colouring idea applied to the distance/cable constraints.
+    // Constraints sharing a colour share no node, so a colour is one
+    // deterministic Gauss-Seidel phase whatever the worker count.
+    //
+    // Unlike the membrane graph this one is not degree-bounded: a mass-spring
+    // rib hub can carry a hundred spokes, and every spoke needs its own
+    // colour. The colouring therefore uses a wide per-node mask rather than a
+    // single 64-bit word, and colours too small to be worth a barrier are run
+    // serially after the parallel ones (see parallelColours).
+    struct ConstraintColouring {
+        std::vector<std::size_t> constraints;
+        std::vector<std::size_t> colourOffsets;
+        std::size_t parallelColours = 0;
+        std::size_t largestColour = 0;
+        std::size_t serialConstraints = 0;
+        std::size_t builtForConstraintCount = 0;
+        std::size_t builtForNodeCount = 0;
+
+        [[nodiscard]] unsigned workerCap(unsigned requested) const;
+    };
+    [[nodiscard]] const ConstraintColouring& constraintColouring() const;
+    void solveConstraintsColoured(double inverseTimeStepSquared,
+                                  WorkerPool& pool,
+                                  bool packed);
 
     // Stable general parallel path: elements in one colour share no nodes, so
     // each colour is a deterministic Gauss-Seidel phase.
@@ -483,6 +588,9 @@ private:
     ContactAuditState contactAudit_;
     std::weak_ptr<void> aerodynamicRegistration_;
     bool interiorPressurePartitions_ = false;
+    std::vector<SolveNode> constraintSolveNodes_;
+    mutable TriangleIncidence triangleIncidence_;
+    mutable ConstraintColouring constraintColouring_;
     mutable MembraneColouring membraneColouring_;
     MembraneJacobiScratch membraneJacobiScratch_;
     WorkerPoolSlot workerPool_;

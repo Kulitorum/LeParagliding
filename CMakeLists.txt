@@ -191,6 +191,18 @@ else()
     target_compile_options(softwing_core PRIVATE -w)
 endif()
 
+# The Playground's wing: mesh parsing, refinement, SoftBody assembly and the
+# per-frame step, with no widget attached. A library rather than GUI sources
+# so the headless solver benchmark drives the identical simulation.
+add_library(playground_sim STATIC
+    src/gui/playground_sim.cpp
+    src/gui/playground_sim.h
+)
+target_link_libraries(playground_sim PUBLIC Qt6::Core softwing_core)
+target_include_directories(playground_sim PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
+)
+
 # Vendored XFLR5 v6.62 (third_party/xflr5, see PROVENANCE.md): the XFoil
 # solver library plus the complete xflr5v6 application compiled as a static
 # library. The GUI hosts XFLR5's MainFrame in a tab; XFLR5's own
@@ -372,8 +384,18 @@ qt_add_executable(LEparagliding WIN32
 )
 set_target_properties(LEparagliding PROPERTIES AUTORCC ON AUTOMOC ON)
 target_link_libraries(LEparagliding PRIVATE
-    Qt6::Widgets Qt6::OpenGLWidgets lep_occt xflr5core softwing_core)
+    Qt6::Widgets Qt6::OpenGLWidgets lep_occt xflr5core softwing_core
+    playground_sim)
 add_dependencies(LEparagliding leparagliding-engine)
+
+# Headless timing harness for the Playground's XPBD solve. Developer tool,
+# not shipped: it is excluded from the installer and the release archives.
+add_executable(softwing-bench
+    tools/softwing_bench.cpp
+    tools/softwing_gpu.cpp
+    tools/softwing_gpu.h
+)
+target_link_libraries(softwing-bench PRIVATE playground_sim Qt6::OpenGL)
 
 # Wing presets from laboratoridenvol.com: shipped with the executable so the
 # Presets menu (and the installer wildcard) picks them up. On macOS they must
@@ -403,6 +425,7 @@ set_target_properties(
     spline-fit-test
     section-grid-test
     airfoil-file-test
+    softwing-bench
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -417,6 +440,7 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         spline-fit-test
         section-grid-test
         airfoil-file-test
+        softwing-bench
         PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
     )

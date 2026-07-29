@@ -3,6 +3,7 @@
 #include <QWidget>
 
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QPushButton;
 class QSlider;
@@ -76,6 +77,7 @@ private:
     QSlider *stressScale_ = nullptr;
     QCheckBox *showLineTension_ = nullptr;
     QSlider *lineScale_ = nullptr;
+    QComboBox *quality_ = nullptr;
     QLabel *stressLegend_ = nullptr;
     QTimer *legendTimer_ = nullptr;
     QByteArray pendingData_;

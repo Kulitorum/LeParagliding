@@ -1,15 +1,15 @@
 #include "playground_page.h"
 
+#include "playground_sim.h"
+
 #include "softwing/soft_body.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDebug>
 #include <QFile>
 #include <QGuiApplication>
 #include <QHBoxLayout>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QMatrix4x4>
 #include <QMouseEvent>
@@ -28,33 +28,34 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdint>
-#include <limits>
-#include <map>
 #include <memory>
 #include <optional>
-#include <queue>
-#include <set>
 #include <utility>
 #include <vector>
 
+// The wing itself — mesh parsing, refinement, body assembly and the step —
+// lives in playground_sim.{h,cpp} so the headless solver benchmark can drive
+// exactly the same simulation. What is left here is the view: camera,
+// shading, colour ramps and the control panel.
+using lep::playground::LineSegment;
+using lep::playground::RenderFace;
+using lep::playground::SimBody;
+using lep::playground::SimBuildOptions;
+using lep::playground::SimControls;
+using lep::playground::SimMesh;
+using lep::playground::SimSurface;
+using lep::playground::buildSimBody;
+using lep::playground::defaultRibLayers;
+using lep::playground::defaultRibStationSplit;
+using lep::playground::noConstraint;
+using lep::playground::parseSimMesh;
+using lep::playground::refineSimMesh;
+using lep::playground::simSurfaceCount;
+
 namespace {
 
-constexpr double metresPerMillimetre = 0.001;
 constexpr float cameraFieldOfViewDegrees = 40.0F;
 constexpr float degreesToRadians = 3.14159265358979323846F / 180.0F;
-constexpr double fabricArealDensity = 0.045;   // kg/m^2
-// Tuned on the Swoop harness: at 1e-8/1e-9 with 4 substeps and 25
-// iterations the wing settles at +23% volume under 80 Pa instead of
-// creeping past its own fabric.
-constexpr double skinCompliance = 1.0e-8;      // XPBD, m/N
-constexpr double lineCompliance = 1.0e-9;
-// Heavy enough that ~1 kN of lift through the cascade keeps a workable
-// mass ratio for the solver (5 g junctions let the wing creep skyward).
-constexpr double lineJunctionMass = 0.05;      // kg
-constexpr double ribCentroidMass = 0.002;
-constexpr double anchorBandMetres = 0.3;
-constexpr double lineAttachRadiusMetres = 0.12;
 constexpr double maximumBrakeTravelMetres = 0.6;
 // Stretch that saturates the stress ramp, adjustable so slack fabric and
 // hard-loaded seams can each be examined at a useful contrast. The legend
@@ -69,459 +70,6 @@ constexpr double maximumLineFullScaleNewtons = 500.0;
 // Grey for faces that are drawn while stress colouring is on but carry no
 // meaningful stress of their own — the simple rib web.
 const QVector3D uncolouredTint(0.58F, 0.60F, 0.63F);
-// Cells across the section in each rib strut. One more per resolution step,
-// so ribs get denser along with the skin. Kept small deliberately: every
-// interior node is one more thing that can buckle out of the rib's plane.
-constexpr int defaultRibLayers = 4;
-// Extra chord stations per outline segment. Cells must come out smaller
-// than an airfoil hole or dropping them by their middle misses the holes
-// entirely — at one station per outline node only 1% of cells fell in a
-// hole, against holes covering 22% of the rib.
-constexpr int defaultRibStationSplit = 3;
-constexpr double simulationTimeStep = 1.0 / 60.0;
-constexpr int simulationSubsteps = 4;
-constexpr double substepSeconds = simulationTimeStep / simulationSubsteps;
-constexpr std::size_t noConstraint =
-    std::numeric_limits<std::size_t>::max();
-
-struct SimLine
-{
-    softwing::Vec3 a;
-    softwing::Vec3 b;
-    bool brake = false;
-};
-
-struct SimStrap
-{
-    std::vector<softwing::Vec3> a;
-    std::vector<softwing::Vec3> b;
-};
-
-// Which skin a quad belongs to, matching the engine's surfaceNames order.
-// Meshes written before the tag existed report everything as Extrados.
-enum class SimSurface
-{
-    Extrados,
-    Vent,
-    Intrados,
-    // Drawn from the constraint structure rather than from exported quads:
-    // the rib webs (loop plus spokes to the rib centre) and the internal
-    // V/H-rib sheets. They carry no pressure — they are the load path
-    // between the skin and the lines, which is where the interesting
-    // stress lives.
-    Rib,
-    Strap,
-    Count,
-};
-constexpr int simSurfaceCount = static_cast<int>(SimSurface::Count);
-// Only the three skin surfaces come from the mesh file's tags.
-constexpr int simExportedSurfaceCount = 3;
-
-// A rib is planar, so its holes and its mesh are worked out in the rib's
-// own plane and mapped back.
-struct PlanarFrame
-{
-    softwing::Vec3 origin;
-    softwing::Vec3 u;
-    softwing::Vec3 v;
-
-    [[nodiscard]] std::pair<double, double> project(
-        const softwing::Vec3 &point) const
-    {
-        const softwing::Vec3 offset = point - origin;
-        return {dot(offset, u), dot(offset, v)};
-    }
-};
-
-// Newell's normal, which is stable for the near-planar many-sided loops a
-// rib outline produces, plus an arbitrary in-plane basis.
-PlanarFrame fitPlane(const std::vector<softwing::Vec3> &points)
-{
-    PlanarFrame frame;
-    for (const softwing::Vec3 &point : points) {
-        frame.origin += point;
-    }
-    frame.origin /= static_cast<double>(std::max<std::size_t>(
-        points.size(), 1));
-
-    softwing::Vec3 normal;
-    for (std::size_t index = 0; index < points.size(); ++index) {
-        const softwing::Vec3 &current = points[index];
-        const softwing::Vec3 &next = points[(index + 1) % points.size()];
-        normal.x += (current.y - next.y) * (current.z + next.z);
-        normal.y += (current.z - next.z) * (current.x + next.x);
-        normal.z += (current.x - next.x) * (current.y + next.y);
-    }
-    if (length(normal) <= 0.0) {
-        normal = {0.0, 0.0, 1.0};
-    }
-    normal = normalized(normal);
-
-    // Any axis not parallel to the normal seeds the in-plane basis.
-    const softwing::Vec3 seed = std::abs(normal.x) < 0.9
-                                    ? softwing::Vec3{1.0, 0.0, 0.0}
-                                    : softwing::Vec3{0.0, 1.0, 0.0};
-    frame.u = normalized(cross(normal, seed));
-    frame.v = cross(normal, frame.u);
-    return frame;
-}
-
-using PlanarPolygon = std::vector<std::pair<double, double>>;
-
-// Crossing-number test; the outlines are closed and non-self-intersecting.
-bool insidePolygon(const PlanarPolygon &polygon, double x, double y)
-{
-    bool inside = false;
-    for (std::size_t index = 0, previous = polygon.size() - 1;
-         index < polygon.size();
-         previous = index++) {
-        const auto &[xi, yi] = polygon[index];
-        const auto &[xj, yj] = polygon[previous];
-        if ((yi > y) != (yj > y)
-            && x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
-            inside = !inside;
-        }
-    }
-    return inside;
-}
-
-struct SimMesh
-{
-    std::vector<softwing::Vec3> nodes;
-    std::vector<std::array<int, 4>> quads;
-    // Parallel to quads.
-    std::vector<SimSurface> quadSurfaces;
-    std::vector<std::vector<int>> ribLoops;
-    // Parallel to ribLoops: closed hole outlines in the rib's plane.
-    std::vector<std::vector<std::vector<softwing::Vec3>>> ribHoles;
-    std::vector<SimStrap> straps;
-    std::vector<SimLine> lines;
-};
-
-std::optional<SimMesh> parseSimMesh(const QByteArray &data, QString &error)
-{
-    QJsonParseError parseError{};
-    const QJsonDocument document =
-        QJsonDocument::fromJson(data, &parseError);
-    if (document.isNull() || !document.isObject()) {
-        error = QStringLiteral("Not a simulation mesh: %1")
-                    .arg(parseError.errorString());
-        return std::nullopt;
-    }
-    const QJsonObject root = document.object();
-
-    SimMesh mesh;
-    const auto vec = [](const QJsonArray &array) {
-        return softwing::Vec3{array.at(0).toDouble() * metresPerMillimetre,
-                              array.at(1).toDouble() * metresPerMillimetre,
-                              array.at(2).toDouble() * metresPerMillimetre};
-    };
-    for (const QJsonValue &value : root.value(QLatin1String("nodes")).toArray()) {
-        mesh.nodes.push_back(vec(value.toArray()));
-    }
-    for (const QJsonValue &value : root.value(QLatin1String("quads")).toArray()) {
-        const QJsonArray quad = value.toArray();
-        mesh.quads.push_back({quad.at(0).toInt(),
-                              quad.at(1).toInt(),
-                              quad.at(2).toInt(),
-                              quad.at(3).toInt()});
-    }
-    for (const QJsonValue &value :
-         root.value(QLatin1String("quadSurfaces")).toArray()) {
-        const int tag = value.toInt();
-        mesh.quadSurfaces.push_back(
-            tag >= 0 && tag < simExportedSurfaceCount
-                ? static_cast<SimSurface>(tag)
-                : SimSurface::Extrados);
-    }
-    // Older meshes carry no tags; treating the whole skin as one surface
-    // keeps them loadable, just without the per-surface toggles.
-    mesh.quadSurfaces.resize(mesh.quads.size(), SimSurface::Extrados);
-    for (const QJsonValue &value :
-         root.value(QLatin1String("ribLoops")).toArray()) {
-        std::vector<int> loop;
-        for (const QJsonValue &node : value.toArray()) {
-            loop.push_back(node.toInt());
-        }
-        mesh.ribLoops.push_back(std::move(loop));
-    }
-    for (const QJsonValue &value :
-         root.value(QLatin1String("ribHoles")).toArray()) {
-        std::vector<std::vector<softwing::Vec3>> outlines;
-        for (const QJsonValue &outline : value.toArray()) {
-            std::vector<softwing::Vec3> points;
-            for (const QJsonValue &point : outline.toArray()) {
-                points.push_back(vec(point.toArray()));
-            }
-            if (points.size() >= 3) {
-                outlines.push_back(std::move(points));
-            }
-        }
-        mesh.ribHoles.push_back(std::move(outlines));
-    }
-    // Meshes written before holes were exported simply have none.
-    mesh.ribHoles.resize(mesh.ribLoops.size());
-    for (const QJsonValue &value :
-         root.value(QLatin1String("straps")).toArray()) {
-        const QJsonObject strapObject = value.toObject();
-        SimStrap strap;
-        for (const QJsonValue &point :
-             strapObject.value(QLatin1String("a")).toArray()) {
-            strap.a.push_back(vec(point.toArray()));
-        }
-        for (const QJsonValue &point :
-             strapObject.value(QLatin1String("b")).toArray()) {
-            strap.b.push_back(vec(point.toArray()));
-        }
-        if (strap.a.size() == strap.b.size() && !strap.a.empty()) {
-            mesh.straps.push_back(std::move(strap));
-        }
-    }
-    for (const QJsonValue &value : root.value(QLatin1String("lines")).toArray()) {
-        const QJsonObject line = value.toObject();
-        mesh.lines.push_back(
-            {vec(line.value(QLatin1String("a")).toArray()),
-             vec(line.value(QLatin1String("b")).toArray()),
-             line.value(QLatin1String("brake")).toInt() != 0});
-    }
-
-    const int nodeCount = static_cast<int>(mesh.nodes.size());
-    const auto inRange = [nodeCount](int index) {
-        return index >= 0 && index < nodeCount;
-    };
-    for (const auto &quad : mesh.quads) {
-        if (!std::all_of(quad.begin(), quad.end(), inRange)) {
-            error = QStringLiteral("Mesh references nodes out of range");
-            return std::nullopt;
-        }
-    }
-    for (const auto &loop : mesh.ribLoops) {
-        if (!std::all_of(loop.begin(), loop.end(), inRange)) {
-            error = QStringLiteral("Rib loop references nodes out of range");
-            return std::nullopt;
-        }
-    }
-    if (mesh.nodes.size() < 4 || mesh.quads.empty()) {
-        error = QStringLiteral("Simulation mesh is empty");
-        return std::nullopt;
-    }
-    return mesh;
-}
-
-// Welds by position at millimetre resolution: the mesh exporter, the
-// refinement below, and the suspension-line junctions all rely on points
-// that are meant to coincide landing on one node.
-std::uint64_t quantizedKey(const softwing::Vec3 &point)
-{
-    const auto component = [](double value) {
-        return static_cast<std::uint64_t>(
-                   static_cast<std::int64_t>(std::llround(value * 1000.0))
-                   & 0x1FFFFF);
-    };
-    return component(point.x) | (component(point.y) << 21)
-           | (component(point.z) << 42);
-}
-
-// Splits every skin quad into factor x factor sub-quads, bilinear on the
-// quad's corners, and refines the rib loops to the same spacing so their
-// webs keep matching the skin. The engine's mesh is a decimated sampling
-// of the exact ballooning law, so this adds no shape detail — it buys the
-// XPBD solver a finer cloth discretization (factor^2 the triangles) at
-// factor^2 the cost per step.
-//
-// Sub-quad corners are welded by quantized position rather than by index
-// arithmetic: two quads sharing an edge parameterize it in opposite
-// directions, and j/factor versus (factor-j)/factor are not bit-identical,
-// so only position welding keeps the refined skin a closed surface. The
-// pressure field depends on that closure.
-//
-// Straps and lines are stored as positions and bind to the skin by
-// proximity when the body is assembled, so they carry over untouched and
-// simply find the nearer refined nodes.
-SimMesh refineSimMesh(const SimMesh &mesh, int factor)
-{
-    if (factor <= 1) {
-        return mesh;
-    }
-
-    SimMesh refined;
-    refined.straps = mesh.straps;
-    refined.lines = mesh.lines;
-    refined.nodes.reserve(mesh.nodes.size()
-                          * static_cast<std::size_t>(factor) * factor);
-    refined.quads.reserve(mesh.quads.size()
-                          * static_cast<std::size_t>(factor) * factor);
-    refined.quadSurfaces.reserve(refined.quads.capacity());
-
-    std::map<std::uint64_t, int> welded;
-    const auto nodeAt = [&](const softwing::Vec3 &point) {
-        const auto [entry, inserted] =
-            welded.try_emplace(quantizedKey(point), 0);
-        if (inserted) {
-            entry->second = static_cast<int>(refined.nodes.size());
-            refined.nodes.push_back(point);
-        }
-        return entry->second;
-    };
-
-    const double span = static_cast<double>(factor);
-    for (std::size_t quadIndex = 0; quadIndex < mesh.quads.size();
-         ++quadIndex) {
-        const auto &quad = mesh.quads[quadIndex];
-        const softwing::Vec3 &corner0 =
-            mesh.nodes[static_cast<std::size_t>(quad[0])];
-        const softwing::Vec3 &corner1 =
-            mesh.nodes[static_cast<std::size_t>(quad[1])];
-        const softwing::Vec3 &corner2 =
-            mesh.nodes[static_cast<std::size_t>(quad[2])];
-        const softwing::Vec3 &corner3 =
-            mesh.nodes[static_cast<std::size_t>(quad[3])];
-
-        // Grid of (factor + 1)^2 corners; u runs 0->1, v runs 0->3.
-        std::vector<int> grid(static_cast<std::size_t>(factor + 1)
-                              * (factor + 1));
-        for (int v = 0; v <= factor; ++v) {
-            const double t = v / span;
-            for (int u = 0; u <= factor; ++u) {
-                const double s = u / span;
-                const softwing::Vec3 front =
-                    corner0 * (1.0 - s) + corner1 * s;
-                const softwing::Vec3 back =
-                    corner3 * (1.0 - s) + corner2 * s;
-                grid[static_cast<std::size_t>(v) * (factor + 1) + u] =
-                    nodeAt(front * (1.0 - t) + back * t);
-            }
-        }
-        for (int v = 0; v < factor; ++v) {
-            for (int u = 0; u < factor; ++u) {
-                const auto at = [&](int row, int column) {
-                    return grid[static_cast<std::size_t>(row) * (factor + 1)
-                                + column];
-                };
-                const std::array<int, 4> cell{at(v, u),
-                                              at(v, u + 1),
-                                              at(v + 1, u + 1),
-                                              at(v + 1, u)};
-                // A degenerate source quad (collapsed trailing edge) can
-                // weld a whole sub-quad onto one or two nodes; those carry
-                // no area and would only feed zero-length constraints.
-                if (cell[0] != cell[1] && cell[1] != cell[2]
-                    && cell[2] != cell[3] && cell[3] != cell[0]) {
-                    refined.quads.push_back(cell);
-                    refined.quadSurfaces.push_back(
-                        mesh.quadSurfaces[quadIndex]);
-                }
-            }
-        }
-    }
-
-    // Rib loops run along quad edges, so their refined points land on the
-    // sub-quad corners already welded above and reuse those nodes.
-    refined.ribLoops.reserve(mesh.ribLoops.size());
-    refined.ribHoles.reserve(mesh.ribHoles.size());
-    for (std::size_t loopIndex = 0; loopIndex < mesh.ribLoops.size();
-         ++loopIndex) {
-        const auto &loop = mesh.ribLoops[loopIndex];
-        std::vector<int> refinedLoop;
-        refinedLoop.reserve(loop.size() * static_cast<std::size_t>(factor));
-        for (std::size_t index = 0; index < loop.size(); ++index) {
-            const softwing::Vec3 &from =
-                mesh.nodes[static_cast<std::size_t>(loop[index])];
-            const softwing::Vec3 &to =
-                mesh.nodes[static_cast<std::size_t>(
-                    loop[(index + 1) % loop.size()])];
-            for (int step = 0; step < factor; ++step) {
-                const double t = step / span;
-                const int node = nodeAt(from * (1.0 - t) + to * t);
-                if (refinedLoop.empty() || refinedLoop.back() != node) {
-                    refinedLoop.push_back(node);
-                }
-            }
-        }
-        if (refinedLoop.size() >= 3 && refinedLoop.front() == refinedLoop.back()) {
-            refinedLoop.pop_back();
-        }
-        if (refinedLoop.size() >= 3) {
-            refined.ribLoops.push_back(std::move(refinedLoop));
-            refined.ribHoles.push_back(mesh.ribHoles[loopIndex]);
-        }
-    }
-
-    return refined;
-}
-
-// Consistently orients the skin triangles (flood fill over shared edges),
-// then flips the whole skin outward by signed volume, so a positive
-// uniform pressure inflates the wing instead of crushing it.
-void orientOutward(const std::vector<softwing::Vec3> &nodes,
-                   std::vector<std::array<int, 3>> &triangles)
-{
-    std::map<std::pair<int, int>, std::vector<int>> edgeFaces;
-    for (int face = 0; face < static_cast<int>(triangles.size()); ++face) {
-        const auto &tri = triangles[face];
-        for (int corner = 0; corner < 3; ++corner) {
-            const int a = tri[corner];
-            const int b = tri[(corner + 1) % 3];
-            edgeFaces[{std::min(a, b), std::max(a, b)}].push_back(face);
-        }
-    }
-    const auto hasDirectedEdge = [&](const std::array<int, 3> &tri,
-                                     int from,
-                                     int to) {
-        for (int corner = 0; corner < 3; ++corner) {
-            if (tri[corner] == from && tri[(corner + 1) % 3] == to) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    std::vector<char> visited(triangles.size(), 0);
-    for (int seed = 0; seed < static_cast<int>(triangles.size()); ++seed) {
-        if (visited[seed]) {
-            continue;
-        }
-        std::queue<int> frontier;
-        frontier.push(seed);
-        visited[seed] = 1;
-        while (!frontier.empty()) {
-            const int face = frontier.front();
-            frontier.pop();
-            const auto tri = triangles[face];
-            for (int corner = 0; corner < 3; ++corner) {
-                const int a = tri[corner];
-                const int b = tri[(corner + 1) % 3];
-                for (const int neighbour :
-                     edgeFaces[{std::min(a, b), std::max(a, b)}]) {
-                    if (neighbour == face || visited[neighbour]) {
-                        continue;
-                    }
-                    // A consistently wound neighbour traverses the shared
-                    // edge in the opposite direction.
-                    if (hasDirectedEdge(triangles[neighbour], a, b)) {
-                        std::swap(triangles[neighbour][1],
-                                  triangles[neighbour][2]);
-                    }
-                    visited[neighbour] = 1;
-                    frontier.push(neighbour);
-                }
-            }
-        }
-    }
-
-    double signedVolume = 0.0;
-    for (const auto &tri : triangles) {
-        signedVolume += dot(nodes[tri[0]],
-                            cross(nodes[tri[1]], nodes[tri[2]]))
-                        / 6.0;
-    }
-    if (signedVolume < 0.0) {
-        for (auto &tri : triangles) {
-            std::swap(tri[1], tri[2]);
-        }
-    }
-}
-
 } // namespace
 
 // A minimal orbit-camera OpenGL view running the XPBD body on a timer.
@@ -539,6 +87,7 @@ public:
         // out the other GL tabs and left a ghost copy of this view at its
         // pre-layout geometry.
         setAttribute(Qt::WA_NativeWindow, true);
+        controls_.workerThreads = lep::playground::playgroundWorkerThreads();
         timer_ = new QTimer(this);
         timer_->setInterval(16);
         connect(timer_, &QTimer::timeout, this, [this] {
@@ -549,656 +98,14 @@ public:
 
     QString buildFromMesh(const SimMesh &mesh)
     {
-        auto body = std::make_unique<softwing::SoftBody>();
-        topFaces_.clear();
-        lineSegments_.clear();
-        anchors_.clear();
+        sim_ = buildSimBody(mesh, buildOptions_, controls_);
 
-        // Skin triangles, oriented outward for the pressure field. The
-        // surface tag is recorded per triangle in the same order, so the
-        // renderer can drop whole skins without disturbing the solver.
-        std::vector<std::array<int, 3>> triangles;
-        std::vector<SimSurface> triangleSurfaces;
-        triangles.reserve(mesh.quads.size() * 2);
-        triangleSurfaces.reserve(mesh.quads.size() * 2);
-        renderFaces_.clear();
-        for (std::size_t quadIndex = 0; quadIndex < mesh.quads.size();
-             ++quadIndex) {
-            const auto &quad = mesh.quads[quadIndex];
-            triangles.push_back({quad[0], quad[1], quad[2]});
-            triangles.push_back({quad[0], quad[2], quad[3]});
-            triangleSurfaces.push_back(mesh.quadSurfaces[quadIndex]);
-            triangleSurfaces.push_back(mesh.quadSurfaces[quadIndex]);
-        }
-        orientOutward(mesh.nodes, triangles);
-
-        // Area-lumped node masses.
-        std::vector<double> masses(mesh.nodes.size(), 0.0);
-        for (const auto &tri : triangles) {
-            const double area =
-                0.5
-                * length(cross(mesh.nodes[tri[1]] - mesh.nodes[tri[0]],
-                               mesh.nodes[tri[2]] - mesh.nodes[tri[0]]));
-            for (const int node : tri) {
-                masses[static_cast<std::size_t>(node)] +=
-                    fabricArealDensity * area / 3.0;
-            }
-        }
-        for (std::size_t index = 0; index < mesh.nodes.size(); ++index) {
-            body->addNode(mesh.nodes[index],
-                          std::max(masses[index], 5.0e-4));
-        }
-        for (const auto &tri : triangles) {
-            body->addTriangle(static_cast<std::size_t>(tri[0]),
-                              static_cast<std::size_t>(tri[1]),
-                              static_cast<std::size_t>(tri[2]));
-        }
-        skinTriangleCount_ = triangles.size();
-
-        // Upward-facing faces in the rest pose form the "top surface":
-        // fake lift is applied there as extra outward pressure, mimicking
-        // upper-surface suction. The cosine falloff toward the tips comes
-        // free from the orientation test.
-        for (std::size_t face = 0; face < triangles.size(); ++face) {
-            const auto &tri = triangles[face];
-            const softwing::Vec3 normal =
-                cross(mesh.nodes[static_cast<std::size_t>(tri[1])]
-                          - mesh.nodes[static_cast<std::size_t>(tri[0])],
-                      mesh.nodes[static_cast<std::size_t>(tri[2])]
-                          - mesh.nodes[static_cast<std::size_t>(tri[0])]);
-            if (normal.z > 0.0) {
-                topFaces_.push_back(face);
-            }
-        }
-
-        // Stretch constraints on every unique edge, plus the second quad
-        // diagonal for shear.
-        // Node pair -> constraint index, so any drawn face can report the
-        // stretch of its sides when the view colours by stress. Rib spokes
-        // and strap ties register here too, not just skin edges.
-        std::map<std::pair<std::size_t, std::size_t>, std::size_t>
-            edgeConstraints;
-        const auto constraintKey = [](std::size_t a, std::size_t b) {
-            return std::pair<std::size_t, std::size_t>{std::min(a, b),
-                                                       std::max(a, b)};
-        };
-        const auto sideConstraint =
-            [&](std::size_t a, std::size_t b) -> std::size_t {
-            const auto found = edgeConstraints.find(constraintKey(a, b));
-            return found == edgeConstraints.end() ? noConstraint
-                                                  : found->second;
-        };
-        // Adds a constraint between two body nodes unless the pair is
-        // already tied, and remembers which constraint it is.
-        const auto tie = [&](std::size_t a,
-                             std::size_t b,
-                             double restLength,
-                             double compliance) {
-            if (a == b || edgeConstraints.count(constraintKey(a, b)) != 0) {
-                return;
-            }
-            edgeConstraints.emplace(
-                constraintKey(a, b),
-                body->addDistanceConstraint(a, b, restLength, compliance));
-        };
-        const auto addEdge = [&](int a, int b) {
-            if (a == b) {
-                return;
-            }
-            tie(static_cast<std::size_t>(a),
-                static_cast<std::size_t>(b),
-                length(mesh.nodes[static_cast<std::size_t>(b)]
-                       - mesh.nodes[static_cast<std::size_t>(a)]),
-                skinCompliance);
-        };
-        for (const auto &tri : triangles) {
-            addEdge(tri[0], tri[1]);
-            addEdge(tri[1], tri[2]);
-            addEdge(tri[2], tri[0]);
-        }
-        for (const auto &quad : mesh.quads) {
-            addEdge(quad[1], quad[3]);
-        }
-
-        // Register the skin faces for drawing. Rib webs and V/H sheets are
-        // appended further down, once their nodes exist.
-        renderFaces_.reserve(triangles.size());
-        for (std::size_t face = 0; face < triangles.size(); ++face) {
-            const auto &tri = triangles[face];
-            RenderFace drawn;
-            drawn.surface = triangleSurfaces[face];
-            for (int corner = 0; corner < 3; ++corner) {
-                drawn.nodes[static_cast<std::size_t>(corner)] =
-                    static_cast<std::size_t>(tri[corner]);
-            }
-            for (int corner = 0; corner < 3; ++corner) {
-                drawn.edges[static_cast<std::size_t>(corner)] =
-                    sideConstraint(
-                        static_cast<std::size_t>(tri[corner]),
-                        static_cast<std::size_t>(tri[(corner + 1) % 3]));
-            }
-            renderFaces_.push_back(drawn);
-        }
-
-        // Rib webs: perimeter plus spokes to a centroid node. Constraints
-        // only — no faces, so the uniform skin pressure stays valid.
-        std::size_t centrePin = 0;
-        double centrePinAbsX = std::numeric_limits<double>::max();
-        for (std::size_t ribIndex = 0; ribIndex < mesh.ribLoops.size();
-             ++ribIndex) {
-            const auto &loop = mesh.ribLoops[ribIndex];
-            softwing::Vec3 centroid;
-            for (const int node : loop) {
-                centroid += mesh.nodes[static_cast<std::size_t>(node)];
-            }
-            centroid /= static_cast<double>(loop.size());
-
-            // The loop perimeter is skin either way.
-            for (std::size_t index = 0; index < loop.size(); ++index) {
-                addEdge(loop[index], loop[(index + 1) % loop.size()]);
-            }
-
-            if (!detailedRibs_) {
-                // Cheap web: one hub, spokes out to the loop. No interior,
-                // so it cannot take holes and gains nothing from a finer
-                // mesh — which is exactly why the detailed model exists.
-                const std::size_t centre =
-                    body->addNode(centroid, ribCentroidMass);
-                if (std::abs(centroid.x) < centrePinAbsX) {
-                    centrePinAbsX = std::abs(centroid.x);
-                    centrePin = centre;
-                }
-                for (std::size_t index = 0; index < loop.size(); ++index) {
-                    const auto node = static_cast<std::size_t>(loop[index]);
-                    const auto next = static_cast<std::size_t>(
-                        loop[(index + 1) % loop.size()]);
-                    tie(node,
-                        centre,
-                        length(mesh.nodes[node] - centroid),
-                        skinCompliance);
-                    RenderFace drawn;
-                    drawn.surface = SimSurface::Rib;
-                    drawn.nodes = {node, next, centre};
-                    drawn.edges = {sideConstraint(node, next),
-                                   sideConstraint(next, centre),
-                                   sideConstraint(centre, node)};
-                    renderFaces_.push_back(drawn);
-                }
-                continue;
-            }
-
-            // Detailed web: a ladder from the upper surface to the lower
-            // one. A rib's job is to hold the two skins apart at their
-            // designed spacing, so every strut runs straight across the
-            // section — the same short load path the hub happened to give,
-            // but at every station instead of one. Rings were tried and are
-            // wrong here: routing upper-to-lower the long way round leaves
-            // the rib slack, and a slack planar truss has nothing resisting
-            // out-of-plane folding, so it crumples. Under tension a ladder
-            // stays taut and flat.
-            std::vector<softwing::Vec3> loopPoints;
-            loopPoints.reserve(loop.size());
-            for (const int node : loop) {
-                loopPoints.push_back(mesh.nodes[static_cast<std::size_t>(
-                    node)]);
-            }
-            const PlanarFrame frame = fitPlane(loopPoints);
-            std::vector<PlanarPolygon> holes;
-            for (const auto &outline : mesh.ribHoles[ribIndex]) {
-                PlanarPolygon polygon;
-                polygon.reserve(outline.size());
-                for (const softwing::Vec3 &point : outline) {
-                    polygon.push_back(frame.project(point));
-                }
-                holes.push_back(std::move(polygon));
-            }
-            const auto inHole = [&holes](const softwing::Vec3 &point,
-                                         const PlanarFrame &plane) {
-                const auto [x, y] = plane.project(point);
-                return std::any_of(holes.begin(),
-                                   holes.end(),
-                                   [x, y](const PlanarPolygon &polygon) {
-                                       return insidePolygon(polygon, x, y);
-                                   });
-            };
-
-            // Rib fabric weighed by its own area, shared over the interior
-            // nodes; the loop nodes already carry their skin mass.
-            double area = 0.0;
-            for (std::size_t index = 0; index < loopPoints.size(); ++index) {
-                const auto [x0, y0] = frame.project(loopPoints[index]);
-                const auto [x1, y1] = frame.project(
-                    loopPoints[(index + 1) % loopPoints.size()]);
-                area += x0 * y1 - x1 * y0;
-            }
-            area = std::abs(area) * 0.5;
-            const std::size_t interiorCount =
-                loop.size() * static_cast<std::size_t>(ribLayers_) / 2 + 1;
-            const double interiorMass =
-                std::max(fabricArealDensity * area
-                             / static_cast<double>(interiorCount),
-                         1.0e-4);
-
-            // Chord axis: the two outline points furthest apart are the
-            // leading and trailing edge, and they split the outline into
-            // its upper and lower surfaces.
-            std::vector<std::pair<double, double>> flat;
-            flat.reserve(loopPoints.size());
-            for (const softwing::Vec3 &point : loopPoints) {
-                flat.push_back(frame.project(point));
-            }
-            std::size_t front = 0;
-            std::size_t back = 0;
-            double longest = -1.0;
-            for (std::size_t a = 0; a < flat.size(); ++a) {
-                for (std::size_t b = a + 1; b < flat.size(); ++b) {
-                    const double dx = flat[a].first - flat[b].first;
-                    const double dy = flat[a].second - flat[b].second;
-                    const double distance = dx * dx + dy * dy;
-                    if (distance > longest) {
-                        longest = distance;
-                        front = a;
-                        back = b;
-                    }
-                }
-            }
-            if (longest <= 0.0) {
-                continue;
-            }
-            const double axisX =
-                (flat[back].first - flat[front].first) / std::sqrt(longest);
-            const double axisY =
-                (flat[back].second - flat[front].second) / std::sqrt(longest);
-            // Distance along the chord, measured from the leading edge.
-            const auto chordAt = [&](std::size_t index) {
-                return (flat[index].first - flat[front].first) * axisX
-                       + (flat[index].second - flat[front].second) * axisY;
-            };
-
-            // Walking the closed outline from the leading edge to the
-            // trailing edge covers one surface; continuing covers the other.
-            std::vector<std::size_t> upper;
-            std::vector<std::size_t> lower;
-            for (std::size_t step = 0; step <= flat.size(); ++step) {
-                const std::size_t index = (front + step) % flat.size();
-                (upper.empty() || upper.back() != back ? upper : lower)
-                    .push_back(index);
-                if (index == front && step > 0) {
-                    break;
-                }
-            }
-            // The split leaves the trailing edge as the last upper node; the
-            // lower surface has to start there too or its aftmost segment
-            // is missing and struts near the trailing edge find no foot.
-            lower.insert(lower.begin(), back);
-            if (upper.size() < 2 || lower.size() < 2) {
-                continue;
-            }
-
-            // Where a chord station meets one of the two surfaces, as an
-            // interpolation between two outline nodes so the strut end is
-            // carried by the skin whether or not it lands on a node.
-            struct SurfacePoint
-            {
-                std::size_t a = 0;
-                std::size_t b = 0;
-                double blend = 0.0;
-            };
-            const auto meets = [&](const std::vector<std::size_t> &chain,
-                                   double chord) {
-                SurfacePoint found{chain.front(), chain.front(), 0.0};
-                for (std::size_t step = 0; step + 1 < chain.size(); ++step) {
-                    const double from = chordAt(chain[step]);
-                    const double to = chordAt(chain[step + 1]);
-                    if ((chord >= std::min(from, to))
-                        && (chord <= std::max(from, to))) {
-                        const double span = to - from;
-                        found = {chain[step],
-                                 chain[step + 1],
-                                 std::abs(span) < 1.0e-9
-                                     ? 0.0
-                                     : (chord - from) / span};
-                        break;
-                    }
-                }
-                return found;
-            };
-            const auto placeOf = [&](const SurfacePoint &point) {
-                return loopPoints[point.a] * (1.0 - point.blend)
-                       + loopPoints[point.b] * point.blend;
-            };
-            // Reuse the outline node when the station lands on one, so the
-            // rib keeps its exact grip on the skin; otherwise pin a new node
-            // onto that outline segment, which the skin still carries.
-            const auto nodeOf = [&](const SurfacePoint &point) {
-                if (point.blend <= 1.0e-6) {
-                    return static_cast<std::size_t>(loop[point.a]);
-                }
-                if (point.blend >= 1.0 - 1.0e-6) {
-                    return static_cast<std::size_t>(loop[point.b]);
-                }
-                const softwing::Vec3 place = placeOf(point);
-                const std::size_t created =
-                    body->addNode(place, interiorMass);
-                for (const std::size_t anchor :
-                     {static_cast<std::size_t>(loop[point.a]),
-                      static_cast<std::size_t>(loop[point.b])}) {
-                    tie(created,
-                        anchor,
-                        length(mesh.nodes[anchor] - place),
-                        skinCompliance);
-                }
-                return created;
-            };
-
-            // Stations are spaced by the mesh the holes need, not by the
-            // outline's own vertex count: with cells bigger than a hole the
-            // middle almost never lands inside one and the holes vanish.
-            std::vector<double> stations;
-            for (std::size_t step = 0; step + 1 < upper.size(); ++step) {
-                const double from = chordAt(upper[step]);
-                const double to = chordAt(upper[step + 1]);
-                for (int split = 0; split < ribStationSplit_; ++split) {
-                    stations.push_back(
-                        from
-                        + (to - from) * split / ribStationSplit_);
-                }
-            }
-            stations.push_back(chordAt(upper.back()));
-
-            std::vector<std::vector<std::size_t>> struts;
-            std::vector<std::vector<softwing::Vec3>> strutPoints;
-            struts.reserve(stations.size());
-            strutPoints.reserve(stations.size());
-            for (const double chord : stations) {
-                const SurfacePoint crest = meets(upper, chord);
-                const SurfacePoint foot = meets(lower, chord);
-                const softwing::Vec3 top = placeOf(crest);
-                const softwing::Vec3 base = placeOf(foot);
-                std::vector<softwing::Vec3> points;
-                points.reserve(
-                    static_cast<std::size_t>(ribLayers_) + 1);
-                for (int layer = 0; layer <= ribLayers_; ++layer) {
-                    const double blend =
-                        static_cast<double>(layer) / ribLayers_;
-                    points.push_back(top * (1.0 - blend) + base * blend);
-                }
-                strutPoints.push_back(std::move(points));
-
-                // Interior node ids are filled lazily below.
-                std::vector<std::size_t> ids(
-                    static_cast<std::size_t>(ribLayers_) + 1, noConstraint);
-                ids.front() = nodeOf(crest);
-                ids.back() = nodeOf(foot);
-                struts.push_back(std::move(ids));
-            }
-
-            const auto strutNode = [&](std::size_t strut,
-                                       std::size_t layer) -> std::size_t {
-                std::size_t &id = struts[strut][layer];
-                if (id == noConstraint) {
-                    id = body->addNode(strutPoints[strut][layer],
-                                       interiorMass);
-                }
-                return id;
-            };
-
-            for (std::size_t strut = 0; strut + 1 < struts.size(); ++strut) {
-                for (std::size_t layer = 0;
-                     layer < static_cast<std::size_t>(ribLayers_);
-                     ++layer) {
-                    const softwing::Vec3 middle =
-                        (strutPoints[strut][layer]
-                         + strutPoints[strut][layer + 1]
-                         + strutPoints[strut + 1][layer]
-                         + strutPoints[strut + 1][layer + 1])
-                        * 0.25;
-                    if (inHole(middle, frame)) {
-                        continue;
-                    }
-                    const std::size_t topA = strutNode(strut, layer);
-                    const std::size_t lowA = strutNode(strut, layer + 1);
-                    const std::size_t topB = strutNode(strut + 1, layer);
-                    const std::size_t lowB = strutNode(strut + 1, layer + 1);
-
-                    const auto &positions = body->nodes();
-                    const auto span = [&](std::size_t a, std::size_t b) {
-                        return length(positions[b].position
-                                      - positions[a].position);
-                    };
-                    // Across the section, along it, and one diagonal so the
-                    // bay carries shear instead of folding over.
-                    tie(topA, lowA, span(topA, lowA), skinCompliance);
-                    tie(topB, lowB, span(topB, lowB), skinCompliance);
-                    tie(topA, topB, span(topA, topB), skinCompliance);
-                    tie(lowA, lowB, span(lowA, lowB), skinCompliance);
-                    tie(topA, lowB, span(topA, lowB), skinCompliance);
-
-                    const auto addRibFace = [&](std::size_t a,
-                                                std::size_t b,
-                                                std::size_t c) {
-                        if (a == b || b == c || c == a) {
-                            return;
-                        }
-                        RenderFace drawn;
-                        drawn.surface = SimSurface::Rib;
-                        drawn.nodes = {a, b, c};
-                        drawn.edges = {sideConstraint(a, b),
-                                       sideConstraint(b, c),
-                                       sideConstraint(c, a)};
-                        renderFaces_.push_back(drawn);
-                    };
-                    addRibFace(topA, topB, lowB);
-                    addRibFace(topA, lowB, lowA);
-                }
-            }
-        }
-        // No pin here any more: the lift pressure keeps every line taut
-        // against the fixed pilot-end anchors, and the wing hangs in its
-        // lines like the real thing.
-        (void)centrePin;
-
-        // Internal V/H/VH-rib and mini-rib sheets: tie each sample pair of
-        // a strap together through the nearest mesh nodes, so line load
-        // spreads across neighbouring ribs like the real diagonals do.
-        const auto nearestMeshNode = [&](const softwing::Vec3 &point) {
-            double bestDistance = 0.08;
-            int bestNode = -1;
-            for (std::size_t index = 0; index < mesh.nodes.size(); ++index) {
-                const double distance = length(mesh.nodes[index] - point);
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    bestNode = static_cast<int>(index);
-                }
-            }
-            return bestNode;
-        };
-        for (const SimStrap &strap : mesh.straps) {
-            // Sample pairs that resolved to real nodes, kept in order so
-            // the sheet between them can be drawn as a ribbon.
-            std::vector<std::pair<std::size_t, std::size_t>> rungs;
-            for (std::size_t sample = 0; sample < strap.a.size(); ++sample) {
-                const int nodeA = nearestMeshNode(strap.a[sample]);
-                const int nodeB = nearestMeshNode(strap.b[sample]);
-                if (nodeA < 0 || nodeB < 0 || nodeA == nodeB) {
-                    continue;
-                }
-                tie(static_cast<std::size_t>(nodeA),
-                    static_cast<std::size_t>(nodeB),
-                    length(mesh.nodes[static_cast<std::size_t>(nodeB)]
-                           - mesh.nodes[static_cast<std::size_t>(nodeA)]),
-                    skinCompliance);
-                rungs.emplace_back(static_cast<std::size_t>(nodeA),
-                                   static_cast<std::size_t>(nodeB));
-            }
-            // Two triangles per gap between consecutive rungs. The rails
-            // run along the ribs and are usually not constrained, so a
-            // sheet's colour comes from the ties that hold it.
-            for (std::size_t rung = 0; rung + 1 < rungs.size(); ++rung) {
-                const auto [a0, b0] = rungs[rung];
-                const auto [a1, b1] = rungs[rung + 1];
-                for (const std::array<std::size_t, 3> corners :
-                     {std::array<std::size_t, 3>{a0, b0, b1},
-                      std::array<std::size_t, 3>{a0, b1, a1}}) {
-                    if (corners[0] == corners[1] || corners[1] == corners[2]
-                        || corners[2] == corners[0]) {
-                        continue;
-                    }
-                    RenderFace drawn;
-                    drawn.surface = SimSurface::Strap;
-                    drawn.nodes = corners;
-                    for (int corner = 0; corner < 3; ++corner) {
-                        drawn.edges[static_cast<std::size_t>(corner)] =
-                            sideConstraint(
-                                corners[static_cast<std::size_t>(corner)],
-                                corners[static_cast<std::size_t>(
-                                    (corner + 1) % 3)]);
-                    }
-                    renderFaces_.push_back(drawn);
-                }
-            }
-        }
-
-        // Suspension lines: weld junctions, cable constraints per segment,
-        // attach top ends to the nearest skin node, fix the pilot band.
-        std::map<std::uint64_t, std::size_t> junctions;
-        const auto lineNode = [&](const softwing::Vec3 &point) {
-            const auto [entry, inserted] =
-                junctions.try_emplace(quantizedKey(point), 0);
-            if (inserted) {
-                entry->second = body->addNode(point, lineJunctionMass);
-            }
-            return entry->second;
-        };
-        double lowestZ = std::numeric_limits<double>::max();
-        for (const SimLine &line : mesh.lines) {
-            lowestZ = std::min({lowestZ, line.a.z, line.b.z});
-        }
-        for (const SimLine &line : mesh.lines) {
-            const std::size_t a = lineNode(line.a);
-            const std::size_t b = lineNode(line.b);
-            if (a == b) {
-                continue;
-            }
-            lineSegments_.push_back(
-                {a,
-                 b,
-                 line.brake,
-                 body->addCableConstraint(
-                     a, b, length(line.b - line.a), lineCompliance)});
-        }
-        for (const auto &[key, node] : junctions) {
-            const softwing::Vec3 position = body->nodes()[node].position;
-            if (position.z < lowestZ + anchorBandMetres) {
-                // Pilot-end anchor (the carabiners); they stay put.
-                body->fixNode(node);
-                anchors_.push_back({node, position, false});
-                continue;
-            }
-            // Tie upper junctions to the canopy when they sit on it.
-            double bestDistance = lineAttachRadiusMetres;
-            int bestSkinNode = -1;
-            for (std::size_t skin = 0; skin < mesh.nodes.size(); ++skin) {
-                const double distance =
-                    length(mesh.nodes[skin] - position);
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    bestSkinNode = static_cast<int>(skin);
-                }
-            }
-            if (bestSkinNode >= 0) {
-                body->addDistanceConstraint(
-                    node,
-                    static_cast<std::size_t>(bestSkinNode),
-                    bestDistance,
-                    lineCompliance);
-            }
-        }
-
-        // The captured line set ends at the carabiners — there is no brake
-        // handle node. Synthesize one per side, hanging below the
-        // carabiner and cabled to the tops of the brake segments that
-        // leave the lowest brake junction, so pulling it hauls the brake
-        // cascade like the real handle would.
-        for (const double side : {-1.0, 1.0}) {
-            std::size_t lowestBrake = 0;
-            double lowestBrakeZ = std::numeric_limits<double>::max();
-            softwing::Vec3 carabiner;
-            double carabinerZ = std::numeric_limits<double>::max();
-            bool sawBrake = false;
-            for (const auto &[key, node] : junctions) {
-                const softwing::Vec3 position =
-                    body->nodes()[node].position;
-                if (position.x * side <= 0.0) {
-                    continue;
-                }
-                if (position.z < carabinerZ) {
-                    carabinerZ = position.z;
-                    carabiner = position;
-                }
-                for (const LineSegment &segment : lineSegments_) {
-                    if (segment.brake
-                        && (segment.a == node || segment.b == node)
-                        && position.z < lowestBrakeZ) {
-                        lowestBrakeZ = position.z;
-                        lowestBrake = node;
-                        sawBrake = true;
-                        break;
-                    }
-                }
-            }
-            if (!sawBrake) {
-                continue;
-            }
-            std::vector<std::size_t> brakeTops;
-            for (const LineSegment &segment : lineSegments_) {
-                if (!segment.brake) {
-                    continue;
-                }
-                if (segment.a == lowestBrake) {
-                    brakeTops.push_back(segment.b);
-                } else if (segment.b == lowestBrake) {
-                    brakeTops.push_back(segment.a);
-                }
-            }
-            softwing::Vec3 handlePosition = carabiner;
-            handlePosition.z -= 0.3;
-            const std::size_t handle =
-                body->addNode(handlePosition, lineJunctionMass);
-            body->fixNode(handle);
-            for (const std::size_t top : brakeTops) {
-                lineSegments_.push_back(
-                    {handle,
-                     top,
-                     true,
-                     body->addCableConstraint(
-                         handle,
-                         top,
-                         length(body->nodes()[top].position
-                                - handlePosition),
-                         lineCompliance)});
-            }
-            anchors_.push_back({handle, handlePosition, true});
-        }
-
-        body_ = std::move(body);
-        applyPressure();
-
-        softwing::Vec3 low{1e9, 1e9, 1e9};
-        softwing::Vec3 high{-1e9, -1e9, -1e9};
-        for (const softwing::Vec3 &node : mesh.nodes) {
-            low = {std::min(low.x, node.x),
-                   std::min(low.y, node.y),
-                   std::min(low.z, node.z)};
-            high = {std::max(high.x, node.x),
-                    std::max(high.y, node.y),
-                    std::max(high.z, node.z)};
-        }
+        const softwing::Vec3 low = sim_.boundsLow;
+        const softwing::Vec3 high = sim_.boundsHigh;
         target_ = QVector3D(static_cast<float>((low.x + high.x) / 2),
                             static_cast<float>((low.y + high.y) / 2),
                             static_cast<float>((low.z + high.z) / 2));
-        distance_ =
-            static_cast<float>(2.0 * length(high - low));
+        distance_ = static_cast<float>(2.0 * length(high - low));
 
         setRunning(true);
         return {};
@@ -1206,20 +113,23 @@ public:
 
     void setPressurePascal(double pressure)
     {
-        pressurePascal_ = pressure;
+        controls_.pressurePascal = pressure;
         applyPressure();
     }
 
-    void setLiftPascal(double lift)
+    // Degrees between the airflow and the wing's rest chord. The load falls
+    // out of the pressure field now, so this is the only handle the
+    // aerodynamics needs — it replaces a slider that dialled in a fake force.
+    void setAngleOfAttack(double degrees)
     {
-        liftPascal_ = lift;
+        controls_.angleOfAttackDegrees = degrees;
         applyPressure();
     }
 
     void setBrakePull(double leftMetres, double rightMetres)
     {
-        brakeLeft_ = leftMetres;
-        brakeRight_ = rightMetres;
+        controls_.brakeLeft = leftMetres;
+        controls_.brakeRight = rightMetres;
     }
 
     void setSurfaceVisible(SimSurface surface, bool visible)
@@ -1232,6 +142,18 @@ public:
     {
         linesVisible_ = visible;
         update();
+    }
+
+    // Index into lep::playground::solverQualities. Applies from the next
+    // frame; the body is untouched, only how hard it is solved.
+    void setSolverQuality(int index)
+    {
+        const auto &table = lep::playground::solverQualities;
+        const int count = static_cast<int>(std::size(table));
+        const lep::playground::SolverQuality &chosen =
+            table[std::clamp(index, 0, count - 1)];
+        controls_.substeps = chosen.substeps;
+        controls_.constraintIterations = chosen.iterations;
     }
 
     void setStressColoring(bool enabled)
@@ -1251,12 +173,12 @@ public:
     // Takes effect on the next build; the page rebuilds when it changes.
     void setDetailedRibs(bool enabled, int layers, int stationSplit)
     {
-        detailedRibs_ = enabled;
-        ribLayers_ = std::max(1, layers);
-        ribStationSplit_ = std::max(1, stationSplit);
+        buildOptions_.detailedRibs = enabled;
+        buildOptions_.ribLayers = std::max(1, layers);
+        buildOptions_.ribStationSplit = std::max(1, stationSplit);
     }
 
-    bool detailedRibs() const { return detailedRibs_; }
+    bool detailedRibs() const { return buildOptions_.detailedRibs; }
 
     void setLineTensionColoring(bool enabled)
     {
@@ -1275,12 +197,12 @@ public:
     // Highest cable load in the wing right now, for the legend.
     double peakLineTension() const
     {
-        if (!body_) {
+        if (!sim_.body) {
             return 0.0;
         }
-        const auto &constraints = body_->constraints();
+        const auto &constraints = sim_.body->constraints();
         double peak = 0.0;
-        for (const LineSegment &segment : lineSegments_) {
+        for (const LineSegment &segment : sim_.lineSegments) {
             peak = std::max(peak, lineTension(segment, constraints));
         }
         return peak;
@@ -1288,13 +210,13 @@ public:
 
     double peakStrain() const
     {
-        if (!body_) {
+        if (!sim_.body) {
             return 0.0;
         }
-        const auto &nodes = body_->nodes();
-        const auto &constraints = body_->constraints();
+        const auto &nodes = sim_.body->nodes();
+        const auto &constraints = sim_.body->constraints();
         double peak = 0.0;
-        for (const RenderFace &face : renderFaces_) {
+        for (const RenderFace &face : sim_.renderFaces) {
             if (surfaceVisible_[static_cast<std::size_t>(face.surface)]
                 && colourable(face)) {
                 peak = std::max(peak, faceStrain(face, nodes, constraints));
@@ -1305,7 +227,7 @@ public:
 
     void setRunning(bool running)
     {
-        if (running && body_) {
+        if (running && sim_.body) {
             timer_->start();
         } else {
             timer_->stop();
@@ -1313,7 +235,7 @@ public:
     }
 
     bool isRunning() const { return timer_->isActive(); }
-    bool hasBody() const { return body_ != nullptr; }
+    bool hasBody() const { return sim_.body != nullptr; }
     QString lastSimError() const { return simError_; }
     QString lastGlError() const { return glError_; }
 
@@ -1412,7 +334,7 @@ protected:
     void paintGL() override
     {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (!body_ || !glError_.isEmpty()) {
+        if (!sim_.body || !glError_.isEmpty()) {
             return;
         }
 
@@ -1430,12 +352,12 @@ protected:
         view.translate(-target_);
         const QMatrix4x4 mvp = projection * view;
 
-        const auto &nodes = body_->nodes();
+        const auto &nodes = sim_.body->nodes();
 
         vertexScratch_.clear();
-        vertexScratch_.reserve(renderFaces_.size() * 27);
-        const auto &constraints = body_->constraints();
-        for (const RenderFace &face : renderFaces_) {
+        vertexScratch_.reserve(sim_.renderFaces.size() * 27);
+        const auto &constraints = sim_.body->constraints();
+        for (const RenderFace &face : sim_.renderFaces) {
             if (!surfaceVisible_[static_cast<std::size_t>(face.surface)]) {
                 continue;
             }
@@ -1464,7 +386,7 @@ protected:
         }
         const int skinFloats = static_cast<int>(vertexScratch_.size());
         if (linesVisible_) {
-            for (const LineSegment &segment : lineSegments_) {
+            for (const LineSegment &segment : sim_.lineSegments) {
                 QVector3D tint;
                 if (lineTensionColoring_) {
                     tint = rampTint(
@@ -1564,30 +486,6 @@ protected:
     }
 
 private:
-    struct LineSegment
-    {
-        std::size_t a = 0;
-        std::size_t b = 0;
-        bool brake = false;
-        std::size_t constraint = noConstraint;
-    };
-    struct Anchor
-    {
-        std::size_t node = 0;
-        softwing::Vec3 restPosition;
-        bool brakeHandle = false;
-    };
-    // One drawn triangle: the skin quads, plus the rib webs and V/H sheets
-    // that are otherwise constraint-only.
-    struct RenderFace
-    {
-        std::array<std::size_t, 3> nodes{};
-        SimSurface surface = SimSurface::Extrados;
-        // Constraint index per side, noConstraint where the side is not
-        // constrained (a rib fan's perimeter is, its rails are not).
-        std::array<std::size_t, 3> edges{};
-    };
-
     // The skin is a mass-spring cloth, not a membrane element, so there is
     // no stress tensor to read: the honest per-face measure is how far its
     // three sides are stretched past their rest length. Because every skin
@@ -1598,7 +496,7 @@ private:
     // plain rather than show a number that means nothing.
     bool colourable(const RenderFace &face) const
     {
-        return face.surface != SimSurface::Rib || detailedRibs_;
+        return face.surface != SimSurface::Rib || buildOptions_.detailedRibs;
     }
 
     // Tensile only: slack fabric carries no load, so edges shorter than
@@ -1632,16 +530,22 @@ private:
     // substep, so dividing by the substep squared recovers the force; the
     // sign convention makes a tensile multiplier negative, hence the
     // magnitude. A slack cable holds zero, which is what we want to show.
-    static double lineTension(
+    // The substep length is whatever the solver quality currently asks for,
+    // so it is read from the live controls rather than from a constant --
+    // otherwise switching quality would silently rescale every line load.
+    double lineTension(
         const LineSegment &segment,
-        const std::vector<softwing::DistanceConstraint> &constraints)
+        const std::vector<softwing::DistanceConstraint> &constraints) const
     {
         if (segment.constraint == noConstraint
             || segment.constraint >= constraints.size()) {
             return 0.0;
         }
+        const double substep =
+            lep::playground::simulationTimeStep
+            / std::max(1, controls_.substeps);
         return std::abs(constraints[segment.constraint].accumulatedLambda)
-               / (substepSeconds * substepSeconds);
+               / (substep * substep);
     }
 
     // Unloaded blue -> teal -> green -> amber -> red at full scale.
@@ -1669,73 +573,22 @@ private:
 
     void applyPressure()
     {
-        if (!body_) {
-            return;
-        }
-        body_->setUniformPressureDifference(
-            body_->surfaceGroup(0, skinTriangleCount_), pressurePascal_);
-        stampLift();
-    }
-
-    // Orientation-aware lift, restamped every frame: each top face gets
-    // extra pressure along its live normal, weighted by how much that
-    // normal still points up. A pure follower force rotating with the
-    // wing has no preferred attitude and winds the wing around its span
-    // axis forever; the weighting gives it a restoring pitch moment and
-    // a stable upright equilibrium.
-    void stampLift()
-    {
-        const auto &nodes = body_->nodes();
-        const auto &triangles = body_->triangles();
-        for (const std::size_t face : topFaces_) {
-            const auto &tri = triangles[face];
-            const softwing::Vec3 normal = normalized(
-                cross(nodes[tri.b].position - nodes[tri.a].position,
-                      nodes[tri.c].position - nodes[tri.a].position));
-            body_->setFacePressureDifference(
-                face,
-                pressurePascal_ + liftPascal_ * std::max(0.0, normal.z));
-        }
+        lep::playground::applyPressure(sim_, controls_);
     }
 
     void stepSimulation()
     {
-        if (!body_) {
-            return;
-        }
-        // Pull brake handles straight down; other anchors stay put.
-        for (const Anchor &anchor : anchors_) {
-            softwing::Vec3 position = anchor.restPosition;
-            if (anchor.brakeHandle) {
-                position.z -= anchor.restPosition.x < 0.0 ? brakeLeft_
-                                                          : brakeRight_;
-            }
-            body_->nodes()[anchor.node].position = position;
-            body_->nodes()[anchor.node].previousPosition = position;
-            body_->nodes()[anchor.node].velocity = {};
-        }
-        stampLift();
-
-        softwing::StepSettings settings;
-        settings.timeStep = simulationTimeStep;
-        settings.substeps = simulationSubsteps;
-        settings.constraintIterations = 30;
-        settings.gravity = {0.0, 0.0, 0.0};
-        settings.velocityDampingPerSecond = 3.0;
         try {
-            body_->step(settings);
+            lep::playground::stepSimulation(sim_, controls_);
         } catch (const std::exception &exception) {
             simError_ = QString::fromUtf8(exception.what());
             setRunning(false);
         }
     }
 
-    std::unique_ptr<softwing::SoftBody> body_;
-    std::size_t skinTriangleCount_ = 0;
-    // Parallel to the skin triangles: which skin each came from, and the
-    // constraint index of each of its three sides (noConstraint where an
-    // edge was welded away).
-    std::vector<RenderFace> renderFaces_;
+    SimBody sim_;
+    SimControls controls_;
+    SimBuildOptions buildOptions_;
     std::array<bool, simSurfaceCount> surfaceVisible_{
         true, true, true, true, true};
     bool linesVisible_ = true;
@@ -1743,17 +596,7 @@ private:
     double stressFullScale_ = defaultStressFullScaleStrain;
     bool lineTensionColoring_ = false;
     double lineFullScaleNewtons_ = defaultLineFullScaleNewtons;
-    bool detailedRibs_ = false;
-    int ribLayers_ = defaultRibLayers;
-    int ribStationSplit_ = defaultRibStationSplit;
-    std::vector<std::size_t> topFaces_;
-    std::vector<LineSegment> lineSegments_;
-    std::vector<Anchor> anchors_;
     std::vector<float> vertexScratch_;
-    double pressurePascal_ = 80.0;
-    double liftPascal_ = 30.0;
-    double brakeLeft_ = 0.0;
-    double brakeRight_ = 0.0;
     QString simError_;
     QString glError_;
 
@@ -1791,7 +634,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     // the skin inflates further than the fabric would really allow and the
     // wing stops looking like one, so the extra travel was only misleading.
     pressure_ = makeSlider(100, 80);
-    lift_ = makeSlider(200, 30);
+    lift_ = makeSlider(15, 6);
     leftBrake_ = makeSlider(100, 0);
     rightBrake_ = makeSlider(100, 0);
     runButton_ = new QPushButton(QStringLiteral("Pause"), this);
@@ -1834,6 +677,24 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     stressLegend_ = new QLabel(this);
     stressLegend_->setVisible(false);
 
+    // How much solving each frame gets. This is a sandbox, so the default
+    // is the setting that keeps a mid-sized wing interactive; the higher
+    // ones are there for when the shape matters more than the frame rate.
+    // Takes effect on the next frame — no rebuild.
+    quality_ = new QComboBox(this);
+    for (const lep::playground::SolverQuality &entry :
+         lep::playground::solverQualities) {
+        quality_->addItem(
+            QStringLiteral("%1 (%2x%3)")
+                .arg(QString::fromLatin1(entry.label))
+                .arg(entry.substeps)
+                .arg(entry.iterations));
+    }
+    quality_->setCurrentIndex(lep::playground::defaultSolverQuality);
+    quality_->setToolTip(QStringLiteral(
+        "Substeps x iterations per frame. More substeps hold the fabric "
+        "closer to its designed length; fewer keep the wing interactive."));
+
     auto *view = new QHBoxLayout;
     view->addWidget(new QLabel(QStringLiteral("Show"), this));
     view->addWidget(showExtrados_);
@@ -1850,10 +711,19 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     view->addWidget(stressLegend_, 1);
     view->addStretch();
 
+    // Its own row. The other two are already full edge to edge — the filter
+    // row runs to the legend and the wing row's four stretching sliders will
+    // grow until whatever follows them is pushed off the window — so a
+    // widget added to either disappears rather than wraps.
+    auto *solver = new QHBoxLayout;
+    solver->addWidget(new QLabel(QStringLiteral("Solver"), this));
+    solver->addWidget(quality_);
+    solver->addStretch();
+
     auto *controls = new QHBoxLayout;
     controls->addWidget(new QLabel(QStringLiteral("Pressure"), this));
     controls->addWidget(pressure_, 1);
-    controls->addWidget(new QLabel(QStringLiteral("Lift"), this));
+    controls->addWidget(new QLabel(QStringLiteral("Angle"), this));
     controls->addWidget(lift_, 1);
     controls->addWidget(new QLabel(QStringLiteral("Left brake"), this));
     controls->addWidget(leftBrake_, 1);
@@ -1864,6 +734,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     layout_ = new QVBoxLayout(this);
     layout_->addWidget(status_);
     layout_->addLayout(view);
+    layout_->addLayout(solver);
     layout_->addLayout(controls);
 
     const auto bindSurface = [this](QCheckBox *check, SimSurface surface) {
@@ -1882,6 +753,11 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     connect(showLines_, &QCheckBox::toggled, this, [this](bool visible) {
         if (view_ != nullptr) {
             view_->setLinesVisible(visible);
+        }
+    });
+    connect(quality_, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (view_ != nullptr) {
+            view_->setSolverQuality(index);
         }
     });
 
@@ -1952,7 +828,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     });
     connect(lift_, &QSlider::valueChanged, this, [this](int value) {
         if (view_ != nullptr) {
-            view_->setLiftPascal(static_cast<double>(value));
+            view_->setAngleOfAttack(static_cast<double>(value));
         }
     });
     const auto pushBrakes = [this] {
@@ -1986,7 +862,7 @@ void PlaygroundPage::ensureView()
     view_ = new PlaygroundView(this);
     layout_->addWidget(view_, 1);
     view_->setPressurePascal(static_cast<double>(pressure_->value()));
-    view_->setLiftPascal(static_cast<double>(lift_->value()));
+    view_->setAngleOfAttack(static_cast<double>(lift_->value()));
     view_->setBrakePull(
         leftBrake_->value() / 100.0 * maximumBrakeTravelMetres,
         rightBrake_->value() / 100.0 * maximumBrakeTravelMetres);

@@ -817,25 +817,13 @@ void SoftBody::integrateSubstepTrial(double dt,
     {
         PerformanceScope prediction(profileField(
             profile, &StepPerformanceProfile::predictionNanoseconds));
-        accumulatePressureForces();
+        accumulatePressureForces(pool);
         if (suspension != nullptr) {
             suspension->beginSubstep(*this, dt, settings.gravity);
         }
         const double damping =
             std::exp(-settings.velocityDampingPerSecond * dt);
-
-        for (Node& node : nodes_) {
-            node.previousPosition = node.position;
-            if (node.inverseMass == 0.0) {
-                node.velocity = {};
-                continue;
-            }
-
-            const Vec3 acceleration =
-                settings.gravity + node.force * node.inverseMass;
-            node.velocity = (node.velocity + acceleration * dt) * damping;
-            node.position += node.velocity * dt;
-        }
+        predictPositions(dt, settings, damping, pool);
         // Solver-drift momentum restoration applies only to isolated free
         // membranes. A participating suspension applies external line
         // impulses inside the bracketed constraint loop with their reaction
@@ -879,13 +867,38 @@ void SoftBody::integrateSubstepTrial(double dt,
                 static_cast<std::uint64_t>(settings.constraintIterations);
     }
 
+    // Membrane, contact and suspension all move nodes inside the iteration
+    // loop, so the packed constraint state is only coherent when none of them
+    // is present -- which is exactly the mass-spring cloth case it is for.
+    const bool packedConstraints =
+        !constraints_.empty() && membraneElements_.empty() &&
+        contactPairs_.empty() && suspension == nullptr;
+    if (packedConstraints) {
+        PerformanceScope distance(profileField(
+            profile, &StepPerformanceProfile::distanceConstraintNanoseconds));
+        packConstraintSolveNodes(pool);
+    }
+
+    // Loop-invariant, and a division the sweep would otherwise redo for every
+    // constraint on every iteration.
+    const double inverseTimeStepSquared = 1.0 / (dt * dt);
+
     for (int iteration = 0; iteration < settings.constraintIterations; ++iteration) {
         {
             PerformanceScope distance(profileField(
                 profile,
                 &StepPerformanceProfile::distanceConstraintNanoseconds));
-            for (DistanceConstraint& constraint : constraints_) {
-                solveConstraint(constraint, dt);
+            if (pool != nullptr && !constraints_.empty()) {
+                solveConstraintsColoured(
+                    inverseTimeStepSquared, *pool, packedConstraints);
+            } else if (packedConstraints) {
+                for (DistanceConstraint& constraint : constraints_) {
+                    solveConstraintPacked(constraint, inverseTimeStepSquared);
+                }
+            } else {
+                for (DistanceConstraint& constraint : constraints_) {
+                    solveConstraint(constraint, inverseTimeStepSquared);
+                }
             }
         }
         {
@@ -918,6 +931,11 @@ void SoftBody::integrateSubstepTrial(double dt,
                 &StepPerformanceProfile::contactConstraintNanoseconds));
             solveContactIteration(dt, settings);
         }
+    }
+    if (packedConstraints) {
+        PerformanceScope distance(profileField(
+            profile, &StepPerformanceProfile::distanceConstraintNanoseconds));
+        unpackConstraintSolveNodes(pool);
     }
     if (!contactPairs_.empty()) {
         PerformanceScope contactCertification(profileField(
@@ -953,14 +971,7 @@ void SoftBody::integrateSubstepTrial(double dt,
     {
         PerformanceScope finalization(profileField(
             profile, &StepPerformanceProfile::finalizationNanoseconds));
-        for (Node& node : nodes_) {
-            if (node.inverseMass == 0.0) {
-                node.velocity = {};
-            } else {
-                node.velocity =
-                    (node.position - node.previousPosition) / dt;
-            }
-        }
+        finalizeVelocities(dt, pool);
         if (preserveFreeMembraneMomentum) {
             restoreMomentum(std::span<Node>{nodes_}, predictedMomentum);
         }
@@ -977,23 +988,142 @@ void SoftBody::integrateSubstepTrial(double dt,
 
 }
 
-void SoftBody::accumulatePressureForces() {
-    for (const Triangle& triangle : triangles_) {
-        const Vec3& a = nodes_[triangle.a].position;
-        const Vec3& b = nodes_[triangle.b].position;
-        const Vec3& c = nodes_[triangle.c].position;
-        const Vec3 areaVector = 0.5 * cross(b - a, c - a);
-        const Vec3 nodalForce = triangle.pressureDifference * areaVector / 3.0;
-        nodes_[triangle.a].force += nodalForce;
-        nodes_[triangle.b].force += nodalForce;
-        nodes_[triangle.c].force += nodalForce;
+const SoftBody::TriangleIncidence& SoftBody::triangleIncidence() const {
+    TriangleIncidence& incidence = triangleIncidence_;
+    if (incidence.builtForTriangleCount == triangles_.size() &&
+        incidence.builtForNodeCount == nodes_.size() &&
+        !triangles_.empty()) {
+        return incidence;
     }
+    incidence.nodeOffsets.assign(nodes_.size() + 1, 0);
+    for (const Triangle& triangle : triangles_) {
+        ++incidence.nodeOffsets[triangle.a + 1];
+        ++incidence.nodeOffsets[triangle.b + 1];
+        ++incidence.nodeOffsets[triangle.c + 1];
+    }
+    for (std::size_t node = 0; node < nodes_.size(); ++node) {
+        incidence.nodeOffsets[node + 1] += incidence.nodeOffsets[node];
+    }
+    incidence.triangles.assign(3 * triangles_.size(), 0);
+    std::vector<std::size_t> cursor(incidence.nodeOffsets.begin(),
+                                    incidence.nodeOffsets.end() - 1);
+    for (std::size_t index = 0; index < triangles_.size(); ++index) {
+        const Triangle& triangle = triangles_[index];
+        for (const std::size_t node : {triangle.a, triangle.b, triangle.c}) {
+            incidence.triangles[cursor[node]++] = index;
+        }
+    }
+    incidence.builtForTriangleCount = triangles_.size();
+    incidence.builtForNodeCount = nodes_.size();
+    return incidence;
 }
 
-void SoftBody::solveConstraint(DistanceConstraint& constraint, double dt) {
-    Node& a = nodes_[constraint.a];
-    Node& b = nodes_[constraint.b];
-    const Vec3 difference = b.position - a.position;
+void SoftBody::accumulatePressureForces(WorkerPool* pool) {
+    if (triangles_.empty()) {
+        return;
+    }
+    if (pool == nullptr) {
+        for (const Triangle& triangle : triangles_) {
+            const Vec3& a = nodes_[triangle.a].position;
+            const Vec3& b = nodes_[triangle.b].position;
+            const Vec3& c = nodes_[triangle.c].position;
+            const Vec3 areaVector = 0.5 * cross(b - a, c - a);
+            const Vec3 nodalForce =
+                triangle.pressureDifference * areaVector / 3.0;
+            nodes_[triangle.a].force += nodalForce;
+            nodes_[triangle.b].force += nodalForce;
+            nodes_[triangle.c].force += nodalForce;
+        }
+        return;
+    }
+
+    const TriangleIncidence& incidence = triangleIncidence();
+    pool->forEachRange(
+        nodes_.size(), [&](std::size_t begin, std::size_t end) {
+            for (std::size_t node = begin; node < end; ++node) {
+                // Starts from the force already there, which is where the
+                // scatter started too -- that is what makes the two agree to
+                // the last bit rather than merely to the last few.
+                Vec3 total = nodes_[node].force;
+                const std::size_t first = incidence.nodeOffsets[node];
+                const std::size_t last = incidence.nodeOffsets[node + 1];
+                for (std::size_t slot = first; slot < last; ++slot) {
+                    const Triangle& triangle =
+                        triangles_[incidence.triangles[slot]];
+                    const Vec3& a = nodes_[triangle.a].position;
+                    const Vec3& b = nodes_[triangle.b].position;
+                    const Vec3& c = nodes_[triangle.c].position;
+                    const Vec3 areaVector = 0.5 * cross(b - a, c - a);
+                    total +=
+                        triangle.pressureDifference * areaVector / 3.0;
+                }
+                nodes_[node].force = total;
+            }
+        });
+}
+
+void SoftBody::predictPositions(double dt,
+                                const StepSettings& settings,
+                                double damping,
+                                WorkerPool* pool) {
+    const auto predict = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t index = begin; index < end; ++index) {
+            Node& node = nodes_[index];
+            node.previousPosition = node.position;
+            if (node.inverseMass == 0.0) {
+                node.velocity = {};
+                continue;
+            }
+            const Vec3 acceleration =
+                settings.gravity + node.force * node.inverseMass;
+            node.velocity = (node.velocity + acceleration * dt) * damping;
+            node.position += node.velocity * dt;
+        }
+    };
+    if (pool == nullptr) {
+        predict(0, nodes_.size());
+        return;
+    }
+    pool->forEachRange(nodes_.size(), predict);
+}
+
+void SoftBody::finalizeVelocities(double dt, WorkerPool* pool) {
+    const double inverseTimeStep = 1.0 / dt;
+    const auto finalize = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t index = begin; index < end; ++index) {
+            Node& node = nodes_[index];
+            node.velocity =
+                node.inverseMass == 0.0
+                    ? Vec3{}
+                    : (node.position - node.previousPosition) *
+                          inverseTimeStep;
+        }
+    };
+    if (pool == nullptr) {
+        finalize(0, nodes_.size());
+        return;
+    }
+    pool->forEachRange(nodes_.size(), finalize);
+}
+
+namespace {
+
+// One XPBD distance/cable projection. Both sweeps -- over Node and over the
+// packed SolveNode copy -- route through this, so there is exactly one copy
+// of the physics and the two paths cannot drift apart.
+// The sweep is division-latency bound rather than cache bound, so the
+// divisions are counted: `alpha` takes the caller's precomputed 1/dt^2
+// instead of dividing per constraint, and the unit direction is never
+// materialised -- one reciprocal folded into the correction scale replaces
+// the three divisions of `difference / currentLength`. That leaves two
+// divisions and the square root, down from five and one.
+inline void projectDistanceConstraint(DistanceConstraint& constraint,
+                                      Vec3& positionA,
+                                      double inverseMassA,
+                                      Vec3& positionB,
+                                      double inverseMassB,
+                                      double inverseTimeStepSquared) {
+    const Vec3 difference = positionB - positionA;
     const double currentLength = length(difference);
     if (currentLength <= kMinimumLength) {
         return;
@@ -1005,8 +1135,8 @@ void SoftBody::solveConstraint(DistanceConstraint& constraint, double dt) {
         return;
     }
 
-    const double inverseMassSum = a.inverseMass + b.inverseMass;
-    const double alpha = constraint.compliance / (dt * dt);
+    const double inverseMassSum = inverseMassA + inverseMassB;
+    const double alpha = constraint.compliance * inverseTimeStepSquared;
     if (inverseMassSum + alpha <= 0.0) {
         return;
     }
@@ -1026,9 +1156,63 @@ void SoftBody::solveConstraint(DistanceConstraint& constraint, double dt) {
         constraint.accumulatedLambda += deltaLambda;
     }
 
-    const Vec3 direction = difference / currentLength;
-    a.position -= a.inverseMass * direction * appliedDelta;
-    b.position += b.inverseMass * direction * appliedDelta;
+    const double scale = appliedDelta / currentLength;
+    positionA -= (inverseMassA * scale) * difference;
+    positionB += (inverseMassB * scale) * difference;
+}
+
+}  // namespace
+
+void SoftBody::solveConstraint(DistanceConstraint& constraint,
+                               double inverseTimeStepSquared) {
+    Node& a = nodes_[constraint.a];
+    Node& b = nodes_[constraint.b];
+    projectDistanceConstraint(constraint,
+                              a.position,
+                              a.inverseMass,
+                              b.position,
+                              b.inverseMass,
+                              inverseTimeStepSquared);
+}
+
+void SoftBody::solveConstraintPacked(DistanceConstraint& constraint,
+                                     double inverseTimeStepSquared) {
+    SolveNode& a = constraintSolveNodes_[constraint.a];
+    SolveNode& b = constraintSolveNodes_[constraint.b];
+    projectDistanceConstraint(constraint,
+                              a.position,
+                              a.inverseMass,
+                              b.position,
+                              b.inverseMass,
+                              inverseTimeStepSquared);
+}
+
+void SoftBody::packConstraintSolveNodes(WorkerPool* pool) {
+    constraintSolveNodes_.resize(nodes_.size());
+    const auto pack = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t index = begin; index < end; ++index) {
+            constraintSolveNodes_[index] = {nodes_[index].position,
+                                            nodes_[index].inverseMass};
+        }
+    };
+    if (pool == nullptr) {
+        pack(0, nodes_.size());
+        return;
+    }
+    pool->forEachRange(nodes_.size(), pack);
+}
+
+void SoftBody::unpackConstraintSolveNodes(WorkerPool* pool) {
+    const auto unpack = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t index = begin; index < end; ++index) {
+            nodes_[index].position = constraintSolveNodes_[index].position;
+        }
+    };
+    if (pool == nullptr) {
+        unpack(0, nodes_.size());
+        return;
+    }
+    pool->forEachRange(nodes_.size(), unpack);
 }
 
 std::array<Vec3, 3> SoftBody::membraneElementCorrections(
@@ -1135,27 +1319,230 @@ void SoftBody::solveMembraneElement(MembraneElement& element, double dt) {
     }
 }
 
-WorkerPool* SoftBody::poolFor(const StepSettings& settings) {
-    // Ordering must not hinge on the worker count, or a 2-core machine and a
-    // 24-core one would run different physics from the same settings. The mode
-    // explicitly selects physics; workerThreads only sizes that mode's pool.
-    if (settings.workerThreads == 0 || membraneElements_.empty()) {
-        return nullptr;
-    }
-    const unsigned requested = std::max(1u, settings.workerThreads);
-    if (settings.parallelMembraneMode == ParallelMembraneMode::Jacobi) {
-        return workerPool_.get(requested);
-    }
-    return workerPool_.get(membraneColouring().workerCap(requested));
-}
-
 namespace {
 
 constexpr std::size_t kElementsPerBarrier = 128;
 constexpr std::size_t kMinimumElementsPerWorker = 16;
 constexpr std::size_t kColouredChunkGrain = 8;
+// A distance-constraint solve is a fraction of a membrane element's work, so
+// a colour has to be correspondingly wider before a barrier pays for itself.
+constexpr std::size_t kConstraintsPerBarrier = 1024;
+constexpr std::size_t kMinimumConstraintsPerWorker = 256;
+// ...and correspondingly, a chunk has to hold many more of them before the
+// claim atomic stops dominating. At the membrane grain of 8 a chunk is barely
+// a hundred nanoseconds of work, and the cache line holding the chunk cursor
+// ping-pongs between cores faster than the constraints are solved.
+constexpr std::size_t kMinimumConstraintChunk = 64;
+constexpr std::size_t kConstraintClaimsPerWorker = 4;
 
 }  // namespace
+
+WorkerPool* SoftBody::poolFor(const StepSettings& settings) {
+    // Ordering must not hinge on the worker count, or a 2-core machine and a
+    // 24-core one would run different physics from the same settings. The mode
+    // explicitly selects physics; workerThreads only sizes that mode's pool.
+    if (settings.workerThreads == 0 ||
+        (membraneElements_.empty() && constraints_.empty())) {
+        return nullptr;
+    }
+    // One pool serves every sweep in the substep, so it is sized by the most
+    // constrained of them. Each sweep is bit-identical at any worker count, so
+    // sharing a count costs nothing but a little parallelism.
+    unsigned cap = std::max(1u, settings.workerThreads);
+    if (!membraneElements_.empty() &&
+        settings.parallelMembraneMode != ParallelMembraneMode::Jacobi) {
+        cap = membraneColouring().workerCap(cap);
+    }
+    if (!constraints_.empty()) {
+        cap = constraintColouring().workerCap(cap);
+    }
+    return workerPool_.get(cap);
+}
+
+unsigned SoftBody::ConstraintColouring::workerCap(unsigned requested) const {
+    const std::size_t affordable = std::max<std::size_t>(
+        1, largestColour / kMinimumConstraintsPerWorker);
+    return static_cast<unsigned>(
+        std::min<std::size_t>(requested, affordable));
+}
+
+const SoftBody::ConstraintColouring& SoftBody::constraintColouring() const {
+    ConstraintColouring& colouring = constraintColouring_;
+    if (colouring.builtForConstraintCount == constraints_.size() &&
+        colouring.builtForNodeCount == nodes_.size() &&
+        !constraints_.empty()) {
+        return colouring;
+    }
+
+    // Greedy first-fit over the line graph. A constraint conflicts only with
+    // the others touching one of its two nodes, so the smallest free colour is
+    // below degree(a) + degree(b) - 1; twice the largest degree bounds every
+    // constraint at once and sizes the per-node mask up front. A single
+    // 64-bit word would not do: rib hubs routinely exceed 64 spokes.
+    std::vector<std::size_t> degree(nodes_.size(), 0);
+    for (const DistanceConstraint& constraint : constraints_) {
+        ++degree[constraint.a];
+        ++degree[constraint.b];
+    }
+    const std::size_t maximumDegree =
+        degree.empty() ? 0 : *std::max_element(degree.begin(), degree.end());
+    const std::size_t colourBound = 2 * maximumDegree + 1;
+    const std::size_t words = std::max<std::size_t>(1, (colourBound + 63) / 64);
+    std::vector<std::uint64_t> nodeColours(nodes_.size() * words, 0);
+
+    std::vector<std::size_t> colourOf(constraints_.size(), 0);
+    std::size_t colourCount = 0;
+    for (std::size_t index = 0; index < constraints_.size(); ++index) {
+        const DistanceConstraint& constraint = constraints_[index];
+        const std::uint64_t* const a = &nodeColours[constraint.a * words];
+        const std::uint64_t* const b = &nodeColours[constraint.b * words];
+        std::size_t colour = 0;
+        for (std::size_t word = 0; word < words; ++word) {
+            const std::uint64_t used = a[word] | b[word];
+            if (used != ~std::uint64_t{0}) {
+                colour = 64 * word +
+                         static_cast<std::size_t>(std::countr_one(used));
+                break;
+            }
+            colour = 64 * (word + 1);
+        }
+        if (colour >= colourBound) {
+            throw std::logic_error(
+                "Constraint colouring exceeded its degree bound");
+        }
+        const std::uint64_t bit = std::uint64_t{1} << (colour % 64);
+        nodeColours[constraint.a * words + colour / 64] |= bit;
+        nodeColours[constraint.b * words + colour / 64] |= bit;
+        colourOf[index] = colour;
+        colourCount = std::max(colourCount, colour + 1);
+    }
+
+    // Largest colour first, so the barrier-worthy phases run before the tail
+    // of one- and two-constraint colours that a high-degree hub leaves behind.
+    std::vector<std::size_t> sizes(colourCount, 0);
+    for (const std::size_t colour : colourOf) ++sizes[colour];
+    std::vector<std::size_t> byDescendingSize(colourCount);
+    for (std::size_t colour = 0; colour < colourCount; ++colour) {
+        byDescendingSize[colour] = colour;
+    }
+    std::sort(byDescendingSize.begin(), byDescendingSize.end(),
+              [&](std::size_t left, std::size_t right) {
+                  if (sizes[left] != sizes[right]) {
+                      return sizes[left] > sizes[right];
+                  }
+                  return left < right;
+              });
+    std::vector<std::size_t> rankOfColour(colourCount, 0);
+    for (std::size_t rank = 0; rank < colourCount; ++rank) {
+        rankOfColour[byDescendingSize[rank]] = rank;
+    }
+
+    std::vector<std::size_t> offsets(colourCount + 1, 0);
+    for (std::size_t rank = 0; rank < colourCount; ++rank) {
+        offsets[rank + 1] = offsets[rank] + sizes[byDescendingSize[rank]];
+    }
+    std::vector<std::size_t> ordered(constraints_.size(), 0);
+    std::vector<std::size_t> cursor(offsets.begin(), offsets.end() - 1);
+    for (std::size_t index = 0; index < colourOf.size(); ++index) {
+        ordered[cursor[rankOfColour[colourOf[index]]]++] = index;
+    }
+
+    std::size_t parallelColours = colourCount;
+    while (parallelColours > 0 &&
+           offsets[parallelColours] - offsets[parallelColours - 1] <
+               kConstraintsPerBarrier) {
+        --parallelColours;
+    }
+
+    colouring.largestColour = offsets.size() > 1 ? offsets[1] - offsets[0] : 0;
+    colouring.serialConstraints =
+        constraints_.size() - offsets[parallelColours];
+    colouring.constraints = std::move(ordered);
+    colouring.colourOffsets = std::move(offsets);
+    colouring.parallelColours = parallelColours;
+    colouring.builtForConstraintCount = constraints_.size();
+    colouring.builtForNodeCount = nodes_.size();
+    return colouring;
+}
+
+ConstraintColouringReport SoftBody::constraintColouringReport() const {
+    ConstraintColouringReport report;
+    if (constraints_.empty()) {
+        return report;
+    }
+    const ConstraintColouring& colouring = constraintColouring();
+    report.colourCount = colouring.colourOffsets.size() - 1;
+    report.parallelColours = colouring.parallelColours;
+    report.largestColour = colouring.largestColour;
+    report.serialConstraints = colouring.serialConstraints;
+    report.parallelConstraints =
+        constraints_.size() - colouring.serialConstraints;
+    return report;
+}
+
+SoftBody::ConstraintColouringView SoftBody::constraintColouringView() const {
+    if (constraints_.empty()) {
+        return {};
+    }
+    const ConstraintColouring& colouring = constraintColouring();
+    return {std::span<const std::size_t>{colouring.constraints},
+            std::span<const std::size_t>{colouring.colourOffsets}};
+}
+
+void SoftBody::solveConstraintsColoured(double inverseTimeStepSquared,
+                                        WorkerPool& pool,
+                                        bool packed) {
+    const ConstraintColouring& colouring = constraintColouring();
+    const std::size_t parallelColours = colouring.parallelColours;
+    const auto colourSize = [&](std::size_t colour) {
+        return colouring.colourOffsets[colour + 1] -
+               colouring.colourOffsets[colour];
+    };
+    pool.forEachPhase(
+        parallelColours,
+        colourSize,
+        [&](std::size_t colour) {
+            // Enough chunks that a straggling worker can be helped out, few
+            // enough that claiming them is not the work.
+            const std::size_t claims =
+                static_cast<std::size_t>(pool.workerCount()) *
+                kConstraintClaimsPerWorker;
+            return std::max(kMinimumConstraintChunk,
+                            colourSize(colour) / claims);
+        },
+        [&](std::size_t colour, std::size_t first, std::size_t last) {
+            const std::size_t begin = colouring.colourOffsets[colour];
+            if (packed) {
+                for (std::size_t slot = first; slot < last; ++slot) {
+                    solveConstraintPacked(
+                        constraints_[colouring.constraints[begin + slot]],
+                        inverseTimeStepSquared);
+                }
+                return;
+            }
+            for (std::size_t slot = first; slot < last; ++slot) {
+                solveConstraint(
+                    constraints_[colouring.constraints[begin + slot]],
+                    inverseTimeStepSquared);
+            }
+        });
+
+    // The tail: colours too thin to pay for a barrier. Running them here in
+    // colour order keeps the sweep identical to the parallel path's.
+    const std::size_t colourCount = colouring.colourOffsets.size() - 1;
+    for (std::size_t colour = parallelColours; colour < colourCount; ++colour) {
+        for (std::size_t slot = colouring.colourOffsets[colour];
+             slot < colouring.colourOffsets[colour + 1]; ++slot) {
+            DistanceConstraint& constraint =
+                constraints_[colouring.constraints[slot]];
+            if (packed) {
+                solveConstraintPacked(constraint, inverseTimeStepSquared);
+            } else {
+                solveConstraint(constraint, inverseTimeStepSquared);
+            }
+        }
+    }
+}
 
 unsigned SoftBody::MembraneColouring::workerCap(unsigned requested) const {
     const std::size_t affordable =
