@@ -901,6 +901,39 @@ void MainWindow::buildInterface()
         QLineEdit {
             padding: 7px 9px;
         }
+        /* Styling QWidget backgrounds above costs check boxes their native
+           indicator, which then draws as a dark box on a dark panel and is
+           effectively invisible. Give it the same treatment as an input
+           field; a filled accent square reads as checked without needing a
+           tick image from a resource. */
+        QCheckBox {
+            spacing: 7px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #2a3a50;
+            border-radius: 4px;
+            background: #0e1726;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #38bdf8;
+        }
+        QCheckBox::indicator:checked {
+            background: #38bdf8;
+            border-color: #38bdf8;
+        }
+        QCheckBox::indicator:checked:hover {
+            background: #67d3ff;
+            border-color: #67d3ff;
+        }
+        QCheckBox::indicator:disabled {
+            background: #131c2b;
+            border-color: #22304a;
+        }
+        QCheckBox:disabled {
+            color: #6b7a8f;
+        }
         QLineEdit:focus, QPlainTextEdit:focus, QTreeWidget:focus, QListWidget:focus {
             border-color: #38bdf8;
         }
