@@ -1014,10 +1014,37 @@ void MainWindow::buildInterface()
         QSlider::handle:horizontal:hover {
             background: #63cdf8;
         }
+        /* The bare padding/radius rule alone switches buttons to
+           stylesheet rendering, which drops the native fill — every
+           button without an objectName drew as a black frame on the
+           black window. The default button therefore carries the
+           secondary treatment itself; the named variants below
+           override it. */
         QPushButton, QToolButton {
+            background: #223149;
+            border: 1px solid #354a66;
+            color: #dce7f5;
             border-radius: 6px;
             padding: 7px 11px;
             font-weight: 600;
+        }
+        QPushButton:hover, QToolButton:hover {
+            background: #2a3d59;
+        }
+        QPushButton:pressed, QToolButton:pressed {
+            background: #1b2a3e;
+        }
+        /* Checkable buttons (Run/Pause, Fly mode) show their held state
+           in the accent, not just in their caption. */
+        QPushButton:checked {
+            background: #1f5571;
+            border-color: #38bdf8;
+            color: #f7fbff;
+        }
+        QPushButton:disabled, QToolButton:disabled {
+            background: #16202f;
+            color: #6b7a8f;
+            border-color: #22304a;
         }
         QPushButton#primaryButton {
             background: #38bdf8;

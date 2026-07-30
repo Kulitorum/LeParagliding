@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <vector>
 
 // Shape-fidelity instrumentation for the Playground's wind-tunnel mode.
@@ -241,12 +242,23 @@ struct SettleResult
     double simulatedSeconds = 0.0;
     bool settled = false;
 };
+// `progress`, when given, is called at every quiescence probe (each
+// quarter second of simulated time) with the simulated time so far and
+// the current agitation — the number that trends toward the quiescence
+// target, which is the honest thing to show as progress. Called on the
+// stepping thread.
 [[nodiscard]] SettleResult settleAndMeasure(
     SimBody &sim,
     const SimControls &controls,
     const ShapeBaseline &baseline,
     double maxSeconds = 6.0,
-    const std::atomic<bool> *cancelled = nullptr);
+    const std::atomic<bool> *cancelled = nullptr,
+    const std::function<void(double simulatedSeconds,
+                             double agitationMetresPerSecond)> *progress =
+        nullptr);
+// The agitation the settle loop counts as quiet at the given dynamic
+// pressure, for callers displaying progress against it.
+[[nodiscard]] double settleQuiescenceTarget(double pressurePascal);
 
 // CSV serialisation for the sweep exports; header first, then one row per
 // report. Row-load columns are emitted for rows A..F unconditionally so

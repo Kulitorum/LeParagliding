@@ -1181,11 +1181,21 @@ void nodeStrainFields(const SimBody &sim,
     }
 }
 
-SettleResult settleAndMeasure(SimBody &sim,
-                              const SimControls &controls,
-                              const ShapeBaseline &baseline,
-                              double maxSeconds,
-                              const std::atomic<bool> *cancelled)
+double settleQuiescenceTarget(double pressurePascal)
+{
+    const double airspeed =
+        std::sqrt(2.0 * std::max(0.0, pressurePascal) / kAirDensity);
+    return std::max(settleAgitationFloorMetresPerSecond,
+                    settleAgitationAirspeedFraction * airspeed);
+}
+
+SettleResult settleAndMeasure(
+    SimBody &sim,
+    const SimControls &controls,
+    const ShapeBaseline &baseline,
+    double maxSeconds,
+    const std::atomic<bool> *cancelled,
+    const std::function<void(double, double)> *progress)
 {
     SettleResult result;
     int frame = 0;
@@ -1203,11 +1213,8 @@ SettleResult settleAndMeasure(SimBody &sim,
     // Quiescence scales with the tunnel speed: fabric micro-flutter is
     // driven by the airflow, so what counts as "still" at 60 km/h would
     // be a storm at 15.
-    const double airspeed = std::sqrt(
-        2.0 * std::max(0.0, controls.pressurePascal) / kAirDensity);
     const double quiescence =
-        std::max(settleAgitationFloorMetresPerSecond,
-                 settleAgitationAirspeedFraction * airspeed);
+        settleQuiescenceTarget(controls.pressurePascal);
     // Stationarity window: eight quarter-second probes of agitation and
     // the aerodynamic resultant. Wings differ in how loudly they flutter
     // while perfectly stationary, so "converged" is the honest criterion
@@ -1230,13 +1237,20 @@ SettleResult settleAndMeasure(SimBody &sim,
         result.simulatedSeconds += simulationTimeStep;
         ++frame;
         // Quiescence is not a per-frame question; a quarter second
-        // between probes keeps the settle loop's cost in the steps. The
-        // ramp itself is motion, so settling only counts after it.
-        if (result.simulatedSeconds <= rampSeconds + 1.0
-            || frame % 15 != 0) {
+        // between probes keeps the settle loop's cost in the steps.
+        if (frame % 15 != 0) {
             continue;
         }
         const double agitation = agitationOf(sim);
+        if (progress != nullptr && *progress) {
+            (*progress)(result.simulatedSeconds, agitation);
+        }
+        // The ramp itself is motion, so settling only counts after it —
+        // but progress above reports from the first probe, so a watcher
+        // sees life immediately.
+        if (result.simulatedSeconds <= rampSeconds + 1.0) {
+            continue;
+        }
         if (agitation < quiescence) {
             result.settled = true;
             break;

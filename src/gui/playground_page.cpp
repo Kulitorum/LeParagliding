@@ -1197,6 +1197,22 @@ public:
         return cancelled_.load(std::memory_order_relaxed);
     }
 
+    // Live progress for the status ticker, written from the worker at
+    // every quiescence probe.
+    [[nodiscard]] double progressSimSeconds() const
+    {
+        return progressSimSeconds_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] double progressAgitation() const
+    {
+        return progressAgitation_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] double quiescenceTarget() const
+    {
+        return lep::playground::settleQuiescenceTarget(
+            controls_.pressurePascal);
+    }
+
     // GUI thread, after finished() only.
     [[nodiscard]] const SimBody &settledBody() const { return sim_; }
     [[nodiscard]] const lep::playground::SettleResult &result() const
@@ -1211,9 +1227,16 @@ public:
             sim_ = buildSimBody(mesh_, options_, controls_);
             const lep::playground::ShapeBaseline baseline =
                 lep::playground::captureShapeBaseline(sim_);
+            const std::function<void(double, double)> progress =
+                [this](double seconds, double agitation) {
+                    progressSimSeconds_.store(seconds,
+                                              std::memory_order_relaxed);
+                    progressAgitation_.store(agitation,
+                                             std::memory_order_relaxed);
+                };
             result_ = lep::playground::settleAndMeasure(
                 sim_, controls_, baseline, settleBudgetSeconds,
-                &cancelled_);
+                &cancelled_, &progress);
         } catch (const std::exception &failure) {
             error_ = QString::fromUtf8(failure.what());
         }
@@ -1229,6 +1252,8 @@ private:
     SimBuildOptions options_;
     SimControls controls_;
     std::atomic<bool> cancelled_{false};
+    std::atomic<double> progressSimSeconds_{0.0};
+    std::atomic<double> progressAgitation_{0.0};
     SimBody sim_;
     lep::playground::SettleResult result_;
     QString error_;
@@ -1795,8 +1820,33 @@ void PlaygroundPage::toggleSettle()
     setSweepActive(true);
     settleButton_->setText(QStringLiteral("Cancel"));
     status_->setText(QStringLiteral(
-        "Settling at 60×4 on a worker thread — the view resumes with "
-        "the converged pose…"));
+        "Settling in the background at 60×4…"));
+    // Live progress in the status line. The convergence-relevant number
+    // is the agitation falling toward its target, so that is the
+    // "progress bar"; the simulated clock against the budget bounds it.
+    // The ticker is parented to the worker and dies with it.
+    auto *ticker = new QTimer(settleWorker_);
+    ticker->setInterval(500);
+    connect(ticker, &QTimer::timeout, this, [this] {
+        if (settleWorker_ == nullptr) {
+            return;
+        }
+        const double seconds = settleWorker_->progressSimSeconds();
+        if (seconds <= 0.0) {
+            return;   // still building the twin
+        }
+        status_->setText(
+            QStringLiteral("Settling in the background at 60×4… %1 of "
+                           "max %2 s simulated · agitation %3 mm/s "
+                           "(quiet below %4)")
+                .arg(seconds, 0, 'f', 1)
+                .arg(SettleWorker::settleBudgetSeconds, 0, 'f', 0)
+                .arg(settleWorker_->progressAgitation() * 1000.0, 0, 'f',
+                     0)
+                .arg(settleWorker_->quiescenceTarget() * 1000.0, 0, 'f',
+                     0));
+    });
+    ticker->start();
     settleWorker_->start();
 }
 
@@ -1819,23 +1869,42 @@ void PlaygroundPage::finishSettle()
         if (!adoptError.isEmpty()) {
             outcome = QStringLiteral("Settle: %1").arg(adoptError);
         } else {
+            // The Done message earns its place with the numbers a
+            // designer would ask for first; the HUD below carries the
+            // full instrument line.
             const lep::playground::SettleResult &result = worker->result();
-            outcome =
+            const lep::playground::ShapeReport &report = result.report;
+            QString flagText;
+            if (report.flags.empty()) {
+                flagText = QStringLiteral("no flags");
+            } else {
+                QStringList names;
+                for (const auto &flag : report.flags) {
+                    names << lep::playground::shapeFlagName(flag.flag);
+                }
+                flagText = QStringLiteral("⚠ ") + names.join(
+                               QStringLiteral(", "));
+            }
+            const QString headline =
                 result.settled
-                    ? QStringLiteral(
-                          "Settled at 60×4 in %1 s simulated — paused "
-                          "for review (%2 flag%3).")
+                    ? QStringLiteral("Done: settled at 60×4 in %1 s "
+                                     "simulated")
                           .arg(result.simulatedSeconds, 0, 'f', 1)
-                          .arg(result.report.flags.size())
-                          .arg(result.report.flags.size() == 1
-                                   ? QString()
-                                   : QStringLiteral("s"))
-                    : QStringLiteral(
-                          "Did not converge within %1 s simulated — "
-                          "adopted the final pose anyway, paused for "
-                          "review.")
+                    : QStringLiteral("Done: did not converge within %1 s "
+                                     "simulated (final pose adopted)")
                           .arg(SettleWorker::settleBudgetSeconds, 0, 'f',
                                0);
+            outcome =
+                QStringLiteral(
+                    "%1 · L/D %2 · lift %3 N · worst deviation %4 mm @ "
+                    "rib %5 · %6 — paused for review, Run resumes.")
+                    .arg(headline)
+                    .arg(report.glideRatio, 0, 'f', 2)
+                    .arg(report.liftNewtons, 0, 'f', 0)
+                    .arg(report.worstDeviationMetres * 1000.0, 0, 'f', 0)
+                    .arg(static_cast<qulonglong>(
+                        report.worstDeviationRib))
+                    .arg(flagText);
             // Paused ON PURPOSE: the settled pose is the deliverable.
             // Checked == paused, so the run button reads "Run" and one
             // click resumes.
