@@ -209,6 +209,14 @@ void nodeDeviationField(const SimBody &sim,
 // taut), skin surfaces only. Feeds the "Slack fabric" heatmap.
 void faceSlackField(const SimBody &sim, std::vector<float> &strainOut);
 
+// Per-render-face pressure DIFFERENCE across the fabric in pascals
+// (cell gauge pressure minus the outer Cp share), skin faces only, 0
+// elsewhere. Deliberately per face and unsmoothed: the point of the
+// pressure heatmap is to examine how inflation load lands cell by
+// cell, and the discontinuities at section boundaries are the
+// finding, not an artefact to blur away.
+void facePressureField(const SimBody &sim, std::vector<float> &pascalOut);
+
 // Per-NODE fabric strain over the constrained edges touching each
 // node: the LENGTH-WEIGHTED mean tension into tensileOut (>= 0) and
 // the length-weighted mean compression into slackOut (<= 0), each over

@@ -1149,6 +1149,21 @@ void faceSlackField(const SimBody &sim, std::vector<float> &strainOut)
     }
 }
 
+void facePressureField(const SimBody &sim, std::vector<float> &pascalOut)
+{
+    pascalOut.assign(sim.renderFaces.size(), 0.0F);
+    if (!sim.body) {
+        return;
+    }
+    const auto &triangles = sim.body->triangles();
+    const std::size_t skinFaces =
+        std::min(sim.skinTriangleCount, triangles.size());
+    for (std::size_t face = 0; face < skinFaces; ++face) {
+        pascalOut[face] =
+            static_cast<float>(triangles[face].pressureDifference);
+    }
+}
+
 void nodeStrainFields(const SimBody &sim,
                       bool detailedRibs,
                       std::vector<float> &tensileOut,

@@ -136,10 +136,15 @@ airspeed forever).
 
 ## Ways of looking
 
-- **Colour by** — the skin heatmap now has three sources: *Stress*
-  (edge strain), *Shape deviation* (per-node distance from the aligned
-  rest shape, mm) and *Slack fabric* (compression strain — the wrinkle
-  map). One combo box, one shared scale slider. All three tint per
+- **Colour by** — the skin heatmap has four sources: *Stress* (edge
+  strain), *Shape deviation* (per-node distance from the aligned rest
+  shape, mm), *Slack fabric* (compression strain — the wrinkle map)
+  and *Pressure* (the pressure difference across each cell face, Pa —
+  per FACE and unsmoothed on purpose, because the cell-by-cell
+  structure of the inflation load is the thing being examined; note
+  the model stamps each section at its own ram pressure and models no
+  cross-port flow between neighbours, which this display makes
+  visible). One combo box, one shared scale slider. All three tint per
   VERTEX from per-node fields (edge strains scattered to their
   endpoints), so the skin shades smoothly instead of rendering as
   facets. A calibrated legend paints INSIDE the viewport (top right)

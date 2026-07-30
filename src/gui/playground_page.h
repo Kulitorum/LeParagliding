@@ -130,6 +130,9 @@ private:
     QPushButton *analyseButton_ = nullptr;
     QTimer *shapeTimer_ = nullptr;
     QByteArray pendingData_;
+    // The success status line, held back until the asynchronous build's
+    // topology arrives.
+    QString pendingBuildStatus_;
     // Retained so a resolution change can rebuild the body without
     // re-running the engine (whose output directory is long gone).
     QByteArray meshData_;

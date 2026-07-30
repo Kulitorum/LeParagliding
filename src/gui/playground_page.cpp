@@ -135,9 +135,13 @@ public:
     {
         // Everything paintGL needs, in render precision.
         std::vector<QVector3D> positions;
-        // Per NODE, for the active colour mode (metres for deviation,
-        // strain otherwise); empty in Plain mode.
+        // For the mode in fieldMode: per NODE (metres for deviation,
+        // strain for stress/slack) or per FACE (pascals for pressure);
+        // empty in Plain mode. The tag lets the GUI keep interpreting
+        // the field under the ramp that produced it during the window
+        // between a mode switch and the worker's recomputation.
         std::vector<float> colourField;
+        int fieldMode = 0;
         std::vector<float> lineTension;   // parallel to the segments
         // The instrument pass, refreshed on its own slower cadence.
         lep::playground::ShapeReport report;
@@ -180,6 +184,9 @@ public:
 
     SimWorker() { start(); }
 
+    // Joining can block for one solver frame or one buildSimBody —
+    // seconds at heavy subdivision. Accepted: teardown happens at page
+    // destruction only, and aborting mid-build has no safe point.
     ~SimWorker() override
     {
         {
@@ -233,6 +240,11 @@ public:
     {
         QMutexLocker lock(&mutex_);
         grabBegin_ = junction;
+        // A begin supersedes a queued end (release-then-regrab within
+        // one worker cycle): sim-side beginGrab already releases any
+        // previous grab, and replaying the stale end AFTER the new
+        // begin killed the fresh grab.
+        grabEnd_ = false;
         wake_.wakeAll();
     }
 
@@ -265,6 +277,12 @@ public:
     {
         QMutexLocker lock(&mutex_);
         settleCancel_ = true;
+        // Erase a pending start too: the flags are a batch, not a
+        // queue, and without this a start+cancel arriving in one worker
+        // cycle replayed in inverted order and ran a phantom settle.
+        // startSettle clears settleCancel_ symmetrically, so the last
+        // GUI call wins in both orders.
+        settleRequested_ = false;
         // So the cleared settle state reaches the GUI even while paused.
         displayDirty_ = true;
         wake_.wakeAll();
@@ -329,12 +347,12 @@ public:
                 if (quit_) {
                     return;
                 }
-                const bool idle = !rebuildRequested_ && !displayDirty_
-                                  && grabBegin_ == noConstraint
-                                  && !grabMove_ && !grabEnd_
-                                  && !settleRequested_
-                                  && ((paused_ && !settling)
-                                      || !sim.body);
+                const bool idle =
+                    !rebuildRequested_ && !displayDirty_
+                    && grabBegin_ == noConstraint && !grabMove_
+                    && !grabEnd_ && !settleRequested_
+                    && (((paused_ || !simError.isEmpty()) && !settling)
+                        || !sim.body);
                 if (idle && !settleCancel_) {
                     wake_.wait(&mutex_);
                     if (quit_) {
@@ -428,16 +446,27 @@ public:
                         settleConverged = monitor->settled();
                         settling = false;
                         settleDone = true;
-                        // Freeze exactly at the converged pose; the GUI
+                        // The Done numbers must describe the exact
+                        // frozen pose, not a report from up to half a
+                        // second of flat-out stepping earlier.
+                        fieldClock.invalidate();
+                        reportClock.invalidate();
+                        // Freeze at the converged pose; the GUI
                         // acknowledges with cancelSettle and decides
-                        // the run state.
+                        // the run state. Guarded: a cancel or rebuild
+                        // already pending owns the run state instead.
                         QMutexLocker lock(&mutex_);
-                        paused_ = true;
+                        if (!settleCancel_) {
+                            paused_ = true;
+                        }
                     }
                 } catch (const std::exception &failure) {
                     simError = QString::fromUtf8(failure.what());
+                    // settleDone only when a settle was the thing that
+                    // failed: outside one, nothing ever acknowledges
+                    // the latch.
+                    settleDone = settling;
                     settling = false;
-                    settleDone = true;
                     settleConverged = false;
                 }
             } else if (!displayDirty) {
@@ -533,12 +562,18 @@ private:
                         sim.lineSegments[index].constraint));
             }
             if (refreshFields) {
+                currentFieldMode_ = colorMode;
                 // ColorMode order matches the page's combo. Computed
                 // into the PERSISTENT field and copied out per
                 // snapshot: writing straight into the ping-pong buffer
                 // alternated a fresh field with a stale one and the
                 // heatmap flickered.
-                if (colorMode == 2) {
+                if (colorMode == 4) {
+                    // Per FACE, unsmoothed on purpose: the cell-by-cell
+                    // pressure structure is the thing being examined.
+                    lep::playground::facePressureField(sim,
+                                                       currentField_);
+                } else if (colorMode == 2) {
                     lep::playground::nodeDeviationField(
                         sim, baseline, currentField_);
                 } else if (colorMode == 1 || colorMode == 3) {
@@ -552,6 +587,7 @@ private:
                 }
             }
             back.colourField = currentField_;
+            back.fieldMode = currentFieldMode_;
             if (refreshReport && !baseline.restPositions.empty()) {
                 currentReport_ = lep::playground::measureShape(
                     sim, controls, baseline);
@@ -655,6 +691,7 @@ private:
     bool topologyFresh_ = false;
     std::vector<float> scratchField_;
     std::vector<float> currentField_;
+    int currentFieldMode_ = 0;
     lep::playground::ShapeReport currentReport_;
 };
 
@@ -691,18 +728,39 @@ public:
     void pollWorker()
     {
         bool changed = false;
+        // Snapshot FIRST: a rebuild publishes topology and snapshot in
+        // that order on the worker, so taking them the other way round
+        // here framed the new wing against the previous body's
+        // positions.
+        if (worker_->takeSnapshot(front_)) {
+            changed = true;
+        }
         if (worker_->takeTopology(topo_)) {
             changed = true;
+            // A grab that straddled the rebuild held a node of the
+            // discarded body.
+            if (grabbing_) {
+                grabbing_ = false;
+                setCursor(flyMode_ ? Qt::CrossCursor : Qt::ArrowCursor);
+            }
             // A fresh build frames itself, exactly as the synchronous
             // rebuild used to.
             fitView();
-        }
-        if (worker_->takeSnapshot(front_)) {
-            changed = true;
+            if (topologyArrived_) {
+                topologyArrived_(topo_.buildError);
+            }
         }
         if (changed) {
             update();
         }
+    }
+
+    // Page hook, invoked on the GUI thread when a build completes (the
+    // error is empty on success): the async build outcome would
+    // otherwise be invisible.
+    void setTopologyCallback(std::function<void(const QString &)> hook)
+    {
+        topologyArrived_ = std::move(hook);
     }
 
     QString buildFromMesh(const SimMesh &mesh)
@@ -732,6 +790,10 @@ public:
                                 static_cast<int>(colorMode_));
         worker_->setPaused(false);
         runningRequested_ = true;
+        // The worker clears its error deterministically on rebuild;
+        // clearing the GUI mirror now keeps isRunning() truthful for
+        // the synchronous callers between here and the next snapshot.
+        front_.simError.clear();
     }
 
     // Frame the wing (and, flying, the whole pendulum): target and
@@ -741,23 +803,34 @@ public:
         if (topo_.renderFaces.empty()) {
             return;
         }
-        const softwing::Vec3 low = topo_.boundsLow;
-        const softwing::Vec3 high = topo_.boundsHigh;
-        softwing::Vec3 focus = 0.5 * (low + high);
-        double extent = length(high - low);
-        if (topo_.freeFlight
-            && topo_.pilotNode < front_.positions.size()) {
-            // Frame the whole pendulum: canopy above, pilot below.
-            const QVector3D p = front_.positions[topo_.pilotNode];
-            const softwing::Vec3 pilot{p.x(), p.y(), p.z()};
-            focus = 0.5 * (focus + pilot);
-            extent = std::max(extent,
-                              1.4 * length(0.5 * (low + high) - pilot));
+        // Frame the WHOLE system — canopy, cascades, carabiners, pilot
+        // — from the live node positions, not the mesh bounds: those
+        // cover the canopy only, and a fit that cropped the lines
+        // framed half the machine. The topology bounds remain the
+        // fallback for the hand-off window before the first snapshot.
+        softwing::Vec3 low = topo_.boundsLow;
+        softwing::Vec3 high = topo_.boundsHigh;
+        if (!front_.positions.empty()) {
+            low = softwing::Vec3{1e9, 1e9, 1e9};
+            high = softwing::Vec3{-1e9, -1e9, -1e9};
+            for (const QVector3D &p : front_.positions) {
+                low.x = std::min<double>(low.x, p.x());
+                low.y = std::min<double>(low.y, p.y());
+                low.z = std::min<double>(low.z, p.z());
+                high.x = std::max<double>(high.x, p.x());
+                high.y = std::max<double>(high.y, p.y());
+                high.z = std::max<double>(high.z, p.z());
+            }
         }
+        const softwing::Vec3 focus = 0.5 * (low + high);
+        const double extent = length(high - low);
         target_ = QVector3D(static_cast<float>(focus.x),
                             static_cast<float>(focus.y),
                             static_cast<float>(focus.z));
-        distance_ = static_cast<float>(2.0 * extent);
+        // extent x 1.15, not the old x 2.0: at a 40° field of view the
+        // full system still fits (the line convergence included), and
+        // the old framing parked the wing in distant empty space.
+        distance_ = static_cast<float>(1.15 * extent);
         update();
     }
 
@@ -953,6 +1026,7 @@ public:
         Stress,
         Deviation,
         Slack,
+        Pressure,
     };
 
     void setColorMode(ColorMode mode)
@@ -1160,6 +1234,19 @@ public:
     // What the legend must show right now: the active face mode's bar
     // and, when on, the line-tension bar. Empty in Plain mode with the
     // tension colouring off — no colours, no legend.
+    // The mode the DELIVERED field belongs to. During a mode switch the
+    // requested mode runs ahead of the worker's recomputation by up to
+    // a solver frame, and interpreting the old field under the new ramp
+    // showed nonsense colours; painting keeps the old calibration until
+    // the matching field lands.
+    ColorMode displayMode() const
+    {
+        if (colorMode_ == ColorMode::Plain || front_.colourField.empty()) {
+            return ColorMode::Plain;
+        }
+        return static_cast<ColorMode>(front_.fieldMode);
+    }
+
     std::vector<LegendBar> legendBars() const
     {
         const auto percent = [](double value) {
@@ -1167,7 +1254,7 @@ public:
                                              value * 100.0 < 1.0 ? 2 : 1);
         };
         std::vector<LegendBar> bars;
-        switch (colorMode_) {
+        switch (displayMode()) {
         case ColorMode::Stress:
             bars.push_back({QStringLiteral("edge stretch"),
                             std::max(stressFullScale_, 1.0e-6),
@@ -1186,6 +1273,14 @@ public:
                             std::max(stressFullScale_, 1.0e-6),
                             peakSlackCompression(), percent});
             break;
+        case ColorMode::Pressure:
+            bars.push_back({QStringLiteral("cell pressure"),
+                            pressureFullScalePascal(), peakStrain(),
+                            [](double value) {
+                                return QStringLiteral("%1 Pa").arg(
+                                    value, 0, 'f', 0);
+                            }});
+            break;
         case ColorMode::Plain:
             break;
         }
@@ -1202,15 +1297,20 @@ public:
 
     void setRunning(bool running)
     {
-        runningRequested_ = running && !topo_.renderFaces.empty();
+        // Intent is stored ungated: unpausing a worker with no body is
+        // harmless (its idle predicate keeps it waiting), and gating on
+        // topology silently dropped a Run pressed during the first
+        // build.
+        runningRequested_ = running;
         if (worker_ != nullptr) {
-            worker_->setPaused(!runningRequested_);
+            worker_->setPaused(!running);
         }
     }
 
     bool isRunning() const
     {
-        return runningRequested_ && front_.simError.isEmpty();
+        return runningRequested_ && hasBody()
+               && front_.simError.isEmpty();
     }
     bool hasBody() const { return !topo_.renderFaces.empty(); }
     QString lastSimError() const { return front_.simError; }
@@ -1326,10 +1426,13 @@ protected:
         const QMatrix4x4 mvp = viewProjection();
 
         const std::vector<QVector3D> &nodes = front_.positions;
+        const ColorMode paintMode = displayMode();
 
         vertexScratch_.clear();
         vertexScratch_.reserve(topo_.renderFaces.size() * 27);
-        for (const RenderFace &face : topo_.renderFaces) {
+        for (std::size_t faceIndex = 0;
+             faceIndex < topo_.renderFaces.size(); ++faceIndex) {
+            const RenderFace &face = topo_.renderFaces[faceIndex];
             if (!surfaceVisible_[static_cast<std::size_t>(face.surface)]) {
                 continue;
             }
@@ -1357,8 +1460,19 @@ protected:
             // skin as facets, the node-scattered same data shades
             // smoothly across them.
             const bool faceColoured =
-                colorMode_ == ColorMode::Deviation
-                || (colorMode_ != ColorMode::Plain && colourable(face));
+                paintMode == ColorMode::Deviation
+                || (paintMode == ColorMode::Pressure
+                        ? faceIndex < topo_.skinTriangleCount
+                        : paintMode != ColorMode::Plain
+                              && colourable(face));
+            // Pressure is a per-FACE quantity — the field is indexed by
+            // face, every corner wears the same tint, and the sharp
+            // steps at cell boundaries are the display's point.
+            const float facePressure =
+                paintMode == ColorMode::Pressure
+                        && faceIndex < front_.colourField.size()
+                    ? front_.colourField[faceIndex]
+                    : 0.0F;
             for (int corner = 0; corner < 3; ++corner) {
                 const std::size_t node = face.nodes[
                     static_cast<std::size_t>(corner)];
@@ -1368,7 +1482,7 @@ protected:
                         ? front_.colourField[node]
                         : 0.0F;
                 if (faceColoured) {
-                    switch (colorMode_) {
+                    switch (paintMode) {
                     case ColorMode::Stress:
                         tint = stressTint(fieldValue);
                         break;
@@ -1380,6 +1494,10 @@ protected:
                     case ColorMode::Deviation:
                         tint = rampTint(fieldValue
                                         / deviationFullScaleMetres());
+                        break;
+                    case ColorMode::Pressure:
+                        tint = rampTint(facePressure
+                                        / pressureFullScalePascal());
                         break;
                     case ColorMode::Plain:
                         break;
@@ -1450,7 +1568,7 @@ protected:
 
         program_->setUniformValue("lit", true);
         program_->setUniformValue("useTint",
-                                  colorMode_ != ColorMode::Plain);
+                                  paintMode != ColorMode::Plain);
         program_->setUniformValue(
             "color", QVector4D(0.72F, 0.78F, 0.88F, 1.0F));
         glDrawArrays(GL_TRIANGLES, 0, skinFloats / 9);
@@ -1469,7 +1587,7 @@ protected:
         // The calibrated legend, painted over the scene it calibrates.
         // This needs the stencil buffer requested in the constructor —
         // without one QPainter's GL engine silently drops filled paths.
-        if (colorMode_ != ColorMode::Plain || lineTensionColoring_) {
+        if (paintMode != ColorMode::Plain || lineTensionColoring_) {
             glDisable(GL_DEPTH_TEST);
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing);
@@ -1741,13 +1859,17 @@ private:
         return rampTint(strain / std::max(stressFullScale_, 1.0e-6));
     }
 
-    // One scale slider serves three ramps. Its integer value is hundredths
-    // of a percent for the strain modes (10..500 -> 0.1%..5% strain) and
-    // read as millimetres for deviation (10..500 mm). stressFullScale_
-    // stores value/10000, so the metre scale is that times ten.
+    // One scale slider serves four ramps. Its integer value is
+    // hundredths of a percent for the strain modes (10..500 -> 0.1%..5%
+    // strain), millimetres for deviation (10..500 mm), and pascals for
+    // cell pressure (10..500 Pa). stressFullScale_ stores value/10000.
     double deviationFullScaleMetres() const
     {
         return std::max(stressFullScale_ * 10.0, 1.0e-4);
+    }
+    double pressureFullScalePascal() const
+    {
+        return std::max(stressFullScale_ * 1.0e4, 1.0);
     }
 
     QMatrix4x4 viewMatrix() const
@@ -1831,6 +1953,7 @@ private:
     SimWorker::Snapshot front_;
     SimWorker::Topology topo_;
     bool runningRequested_ = false;
+    std::function<void(const QString &)> topologyArrived_;
     SimMesh mesh_;
     SimControls controls_;
     SimBuildOptions buildOptions_;
@@ -2038,10 +2161,13 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     colorBy_->addItem(QStringLiteral("Stress"));
     colorBy_->addItem(QStringLiteral("Deviation"));
     colorBy_->addItem(QStringLiteral("Slack"));
+    colorBy_->addItem(QStringLiteral("Pressure"));
     colorBy_->setToolTip(QStringLiteral(
         "Colour the skin by edge stretch (Stress), by distance from the "
-        "designed shape (Deviation), or by compressed — wrinkled — fabric "
-        "(Slack)."));
+        "designed shape (Deviation), by compressed — wrinkled — fabric "
+        "(Slack), or by the pressure difference across each cell's "
+        "fabric (Pressure) — watch the wing inflate, and see how the "
+        "load lands cell by cell."));
     // Full-scale for the ramp. Read as hundredths of a percent strain for
     // Stress and Slack (so the low end, where fabric actually works, still
     // has resolution) and as millimetres for Deviation.
@@ -2498,6 +2624,17 @@ void PlaygroundPage::ensureView()
     }
     view_ = new PlaygroundView(this);
     alphaDial_->setView(view_);
+    // Runs on the GUI thread from the view's poll: the async build's
+    // outcome — the status line stays at "Building…" until here, and a
+    // failed build says so instead of leaving a silent blank viewport.
+    view_->setTopologyCallback([this](const QString &error) {
+        status_->setText(
+            error.isEmpty()
+                ? pendingBuildStatus_
+                : QStringLiteral("Wind tunnel build failed: %1")
+                      .arg(error));
+        updateShapeTimer();
+    });
     // Above the navigation buttons, taking every spare pixel: the wing
     // is the page.
     layout_->insertWidget(0, view_, 1);
@@ -2634,7 +2771,13 @@ void PlaygroundPage::toggleSettle()
         finishSettle(true);
         return;
     }
-    if (view_ == nullptr || !view_->hasBody() || sweepActive_) {
+    if (view_ == nullptr || sweepActive_) {
+        return;
+    }
+    if (!view_->hasBody()) {
+        status_->setText(QStringLiteral(
+            "Still building the wing — Settle will be available in a "
+            "moment."));
         return;
     }
     settleRunning_ = true;
@@ -2795,7 +2938,7 @@ void PlaygroundPage::showEvent(QShowEvent *event)
         // including the QOpenGLWidget's framebuffer, which PrintWindow
         // captures miss whenever native child windows are involved.
         if (qEnvironmentVariableIsSet("LEP_PLAYGROUND_SHOT")) {
-            QTimer::singleShot(4500, this, [this] {
+            QTimer::singleShot(6000, this, [this] {
                 const QString path = QString::fromLocal8Bit(
                     qgetenv("LEP_PLAYGROUND_SHOT"));
                 window()->grab().save(path);
@@ -2834,6 +2977,12 @@ void PlaygroundPage::loadIfPending()
     if (view_ == nullptr || pendingData_.isEmpty()) {
         return;
     }
+    // A rebuild cancels a running settle on the worker; without closing
+    // it here too, the page's settle UI polled for a completion that
+    // could never come.
+    if (settleRunning_) {
+        finishSettle(true);
+    }
     QString error;
     const std::optional<SimMesh> mesh = parseSimMesh(pendingData_, error);
     if (!mesh) {
@@ -2861,7 +3010,9 @@ void PlaygroundPage::loadIfPending()
         resolution = QStringLiteral(" · %1x resolution")
                          .arg(subdivision_ * subdivision_);
     }
-    status_->setText(
+    // The build is asynchronous now; the success line waits for the
+    // topology callback, and until then the truth is "building".
+    pendingBuildStatus_ =
         QStringLiteral("Wind tunnel · %1 nodes, %2 skin quads, %3 line "
                        "segments%4 · drag to orbit, right-drag to pan, "
                        "wheel to zoom, Ctrl-click a line junction to pull "
@@ -2870,7 +3021,8 @@ void PlaygroundPage::loadIfPending()
             .arg(simulated.nodes.size())
             .arg(simulated.quads.size())
             .arg(simulated.lines.size())
-            .arg(resolution));
+            .arg(resolution);
+    status_->setText(QStringLiteral("Building the wind tunnel…"));
     // The fresh body is running whatever the run button said before —
     // unless a sweep owns the machine, in which case the pause is
     // re-asserted over the rebuild's auto-start.
