@@ -1,15 +1,21 @@
-// Headless timing harness for the Playground's XPBD solve.
+// Headless timing harness for the Playground's XPBD solve, and the
+// headless face of its wind-tunnel instruments.
 //
 // Builds the same wing the Playground tab builds — same mesh, same
 // refinement, same constraints, same step settings — and runs it without a
 // window, so the solver can be measured and optimised without a human
 // driving the GUI. Everything it reports comes either from wall clock around
-// SoftBody::step or from the core's own StepPerformanceProfile.
+// SoftBody::step or from the core's own StepPerformanceProfile. The shape
+// modes go through the same settleAndMeasure() the GUI sweep uses, so any
+// number in a GUI report can be reproduced here.
 //
 //   softwing-bench <lep-sim.json> [--subdiv N] [--detailed-ribs]
 //                  [--frames N] [--warmup N] [--threads N]
 //                  [--substeps N] [--iterations N] [--csv]
+//                  [--shape [SECONDS]] [--shape-sweep FROM:TO:STEP]
+//                  [--no-flight-load]
 
+#include "../src/gui/playground_metrics.h"
 #include "../src/gui/playground_sim.h"
 #include "softwing_gpu.h"
 
@@ -17,8 +23,10 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QString>
+#include <QStringList>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -59,6 +67,15 @@ struct Options
     double brakeMetres = 0.0;
     int glideFrames = 0;
     bool freeFlight = false;
+    bool shape = false;
+    // Settle budget for --shape, and for each sweep point when --shape is
+    // given alongside --shape-sweep.
+    double shapeSeconds = 6.0;
+    bool noFlightLoad = false;
+    bool shapeSweep = false;
+    double sweepFromDegrees = 0.0;
+    double sweepToDegrees = 0.0;
+    double sweepStepDegrees = 0.0;
     bool csv = false;
     bool gpu = false;
     pg::GpuSolveMode gpuMode = pg::GpuSolveMode::ColouredGaussSeidel;
@@ -112,6 +129,33 @@ struct Options
             options.freeFlight = true;
         } else if (argument == "--free-flight") {
             options.freeFlight = true;
+        } else if (argument == "--shape") {
+            options.shape = true;
+            if (index + 1 < argc && argv[index + 1][0] != '-') {
+                options.shapeSeconds = std::atof(argv[++index]);
+            }
+        } else if (argument == "--no-flight-load") {
+            options.noFlightLoad = true;
+        } else if (argument == "--shape-sweep") {
+            if (index + 1 >= argc) return false;
+            const QStringList parts =
+                QString::fromUtf8(argv[++index]).split(u':');
+            bool fromOk = false;
+            bool toOk = false;
+            bool stepOk = false;
+            if (parts.size() == 3) {
+                options.sweepFromDegrees = parts[0].toDouble(&fromOk);
+                options.sweepToDegrees = parts[1].toDouble(&toOk);
+                options.sweepStepDegrees = parts[2].toDouble(&stepOk);
+            }
+            if (!fromOk || !toOk || !stepOk
+                || options.sweepStepDegrees <= 0.0) {
+                std::fprintf(stderr,
+                             "--shape-sweep wants FROM:TO:STEP in degrees "
+                             "with a positive step, e.g. -4:24:2\n");
+                return false;
+            }
+            options.shapeSweep = true;
         } else if (argument == "--detailed-ribs") {
             options.detailedRibs = true;
         } else if (argument == "--csv") {
@@ -181,6 +225,92 @@ double spanExtent(const pg::SimBody &sim)
     return high - low;
 }
 
+// The CSV strings come from playground_metrics; own the line framing here
+// regardless of whether they carry a trailing newline.
+void printCsvLine(QString line)
+{
+    while (line.endsWith(u'\n') || line.endsWith(u'\r')) {
+        line.chop(1);
+    }
+    std::printf("%s\n", line.toUtf8().constData());
+}
+
+// The --shape human report. Ratios are shown as signed departures from the
+// design shape — a designer reads "-3%" faster than "0.97" — and lengths in
+// millimetres, the unit sail deviations are discussed in.
+void printShapeReport(const pg::SimControls &controls,
+                      const pg::SettleResult &result,
+                      const std::string &meshPath)
+{
+    const pg::ShapeReport &report = result.report;
+    const auto percent = [](double ratio) { return (ratio - 1.0) * 100.0; };
+    std::printf("mesh            %s\n", meshPath.c_str());
+    std::printf("airflow         q = %.0f Pa (%.0f km/h), alpha %+.1f deg\n",
+                report.dynamicPressurePascal,
+                std::sqrt(2.0 * report.dynamicPressurePascal / 1.225) * 3.6,
+                report.alphaDegrees);
+    std::printf("flight load     %s\n", controls.flightLoad ? "on" : "off");
+    std::printf("settling        %s after %.1f s simulated\n",
+                result.settled ? "settled" : "NOT settled",
+                result.simulatedSeconds);
+    std::printf("\n");
+    std::printf("  span %+.1f%%   area %+.1f%%   volume %+.1f%%\n",
+                percent(report.spanRatio),
+                percent(report.areaRatio),
+                percent(report.volumeRatio));
+    std::printf("  slack fabric %.1f%%   asymmetry %.1f mm   "
+                "agitation %.3f m/s\n",
+                report.slackFraction * 100.0,
+                report.asymmetryMetres * 1000.0,
+                report.agitationMetresPerSecond);
+    if (controls.flightLoad) {
+        std::printf("  imposed polar: %.0f N lift, %.0f N drag, L/D %.2f\n",
+                    report.liftNewtons,
+                    report.dragNewtons,
+                    report.glideRatio);
+    }
+    std::printf("\n");
+    std::printf("  rib    rms mm   max mm   twist deg   LE dent mm"
+                "   chord %%\n");
+    for (std::size_t rib = 0; rib < report.ribs.size(); ++rib) {
+        const pg::RibShape &shape = report.ribs[rib];
+        std::printf("  %3zu   %7.1f  %7.1f     %+7.2f     %8.1f"
+                    "    %+6.1f\n",
+                    rib,
+                    shape.rmsMetres * 1000.0,
+                    shape.maxMetres * 1000.0,
+                    shape.twistDegrees,
+                    shape.leadingEdgeDentMetres * 1000.0,
+                    percent(shape.chordRatio));
+    }
+    std::printf("\n");
+    if (report.rows.empty()) {
+        std::printf("  (no row loads: this mesh predates the line plan "
+                    "tags, so segments cannot be grouped into rows)\n");
+    } else {
+        std::printf("  row     left N    right N   segments   slack\n");
+        for (const pg::RowLoad &row : report.rows) {
+            std::printf("   %c    %8.1f   %8.1f       %4d    %4d%s\n",
+                        row.row.toLatin1(),
+                        row.leftNewtons,
+                        row.rightNewtons,
+                        row.segments,
+                        row.slackSegments,
+                        row.brake ? "   (brake)" : "");
+        }
+    }
+    std::printf("\n");
+    if (report.flags.empty()) {
+        std::printf("  no flags\n");
+    } else {
+        for (const pg::ShapeFlagInfo &flag : report.flags) {
+            std::printf("  %s: %s\n",
+                        pg::shapeFlagName(flag.flag).toUtf8().constData(),
+                        flag.detail.toUtf8().constData());
+        }
+    }
+}
+
 double millisecondsOf(std::uint64_t nanoseconds, int frames)
 {
     return static_cast<double>(nanoseconds) / 1.0e6
@@ -213,7 +343,9 @@ int main(int argc, char **argv)
                      "usage: softwing-bench <lep-sim.json> [--subdiv N] "
                      "[--detailed-ribs] [--frames N] [--warmup N] "
                      "[--threads N] [--substeps N] [--iterations N] "
-                     "[--gpu|--gpu-jacobi] [--csv]\n");
+                     "[--gpu|--gpu-jacobi] [--csv] "
+                     "[--shape [SECONDS]] [--shape-sweep FROM:TO:STEP] "
+                     "[--no-flight-load]\n");
         return 2;
     }
 
@@ -252,6 +384,17 @@ int main(int argc, char **argv)
     controls.pressurePascal = options.pressurePascal;
     controls.angleOfAttackDegrees = options.angleOfAttackDegrees;
     controls.freeFlight = options.freeFlight;
+    // The shape modes load the tunnel like flight by default (a tunnel
+    // carrying only the pressure field's own resultant under-reads every
+    // line load — see docs/playground-shape-analysis.md), and hold any
+    // --brake pull from the first step. Every other mode keeps flightLoad
+    // false, which is what keeps the timing baselines and pose checksums
+    // bit-identical to runs that predate these flags.
+    if (options.shape || options.shapeSweep) {
+        controls.flightLoad = !options.noFlightLoad;
+        controls.brakeLeft = options.brakeMetres;
+        controls.brakeRight = options.brakeMetres;
+    }
 
     const auto buildStart = std::chrono::steady_clock::now();
     const pg::SimMesh refined =
@@ -319,6 +462,68 @@ int main(int argc, char **argv)
                         drag,
                         pressure.z,
                         dot(pressure, sample.windDirection));
+        }
+        return 0;
+    }
+
+    if (options.shape || options.shapeSweep) {
+        // ShapeBaseline compares live sections against rest ones; a mesh
+        // without rib loops has no sections to compare.
+        if (sim.ribChords.empty()) {
+            std::fprintf(stderr,
+                         "This mesh has no rib chords; the shape "
+                         "instruments need sections.\n");
+            return 1;
+        }
+    }
+
+    // The shape sweep: the wind tunnel run across an angle-of-attack range,
+    // a fresh body per point so no point inherits the previous one's
+    // settled pose. Always CSV on stdout — a sweep is data, not prose —
+    // with a per-point progress note on stderr so a long run is watchable
+    // without contaminating the data stream.
+    if (options.shapeSweep) {
+        printCsvLine(pg::shapeReportCsvHeader());
+        for (int point = 0;; ++point) {
+            const double alpha = options.sweepFromDegrees
+                                 + point * options.sweepStepDegrees;
+            // Inclusive endpoint; the epsilon covers representation error
+            // in from + n*step, not a half-step of generosity.
+            if (alpha > options.sweepToDegrees
+                            + options.sweepStepDegrees * 1e-6) {
+                break;
+            }
+            pg::SimControls at = controls;
+            at.angleOfAttackDegrees = alpha;
+            pg::SimBody wing = pg::buildSimBody(refined, build, at);
+            const pg::ShapeBaseline baseline =
+                pg::captureShapeBaseline(wing);
+            const pg::SettleResult result = pg::settleAndMeasure(
+                wing, at, baseline, options.shapeSeconds);
+            printCsvLine(pg::shapeReportCsvRow(result.report));
+            std::fflush(stdout);
+            std::fprintf(stderr,
+                         "alpha %+.1f: %s %.1f s, %zu flag%s\n",
+                         alpha,
+                         result.settled ? "settled" : "unsettled",
+                         result.simulatedSeconds,
+                         result.report.flags.size(),
+                         result.report.flags.size() == 1 ? "" : "s");
+        }
+        return 0;
+    }
+
+    // A single wind-tunnel measurement: settle at the current controls,
+    // then print the full instrument report (or its CSV row, for scripts).
+    if (options.shape) {
+        const pg::ShapeBaseline baseline = pg::captureShapeBaseline(sim);
+        const pg::SettleResult result = pg::settleAndMeasure(
+            sim, controls, baseline, options.shapeSeconds);
+        if (options.csv) {
+            printCsvLine(pg::shapeReportCsvHeader());
+            printCsvLine(pg::shapeReportCsvRow(result.report));
+        } else {
+            printShapeReport(controls, result, options.meshPath);
         }
         return 0;
     }

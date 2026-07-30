@@ -13,8 +13,11 @@ and `aerodynamic_test_access.h` ride along headers-only because the
 vendored .cpp files define (never call) methods of their access
 structs.
 
-The Studio uses this core for the Playground tab's toy live-wing simulation
-(inflation and line pulling); it makes no engineering claims — see
+The Studio uses this core for the Playground tab's live-wing wind tunnel
+(inflation, shape-fidelity instrumentation, line pulling — see
+`docs/playground-shape-analysis.md`). The claim boundary is stated there:
+relative, structural signals of one design and comparisons between design
+revisions, never certified absolute aerodynamics — see
 `wingDesignConfidenceBoundary` in SoftWingLab.
 
 ## No longer a verbatim copy

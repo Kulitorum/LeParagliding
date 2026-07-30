@@ -88,6 +88,12 @@ constexpr double kFlatPlateNormal = 1.2;
 // it. Full pull is taken as the swing test's 35 cm.
 constexpr double kBrakeFullPullMetres = 0.35;
 constexpr double kBrakeDragCoefficient = 0.12;
+// Free travel before a tunnel brake engages (see stepSimulation). Sized
+// to cover the trailing edge's excursion across the sweep's attitude
+// range; real wings rig 10-20 cm for the same reason.
+constexpr double kTunnelBrakeGapMetres = 0.20;
+// Absolute damping of the flight-loaded tunnel (see stepSimulation).
+constexpr double tunnelDampingPerSecond = 8.0;
 
 // Defined in the aerodynamics section further down; buildSimBody needs
 // them for pilot sizing and the glide launch.
@@ -342,10 +348,14 @@ std::optional<SimMesh> parseSimMesh(const QByteArray &data, QString &error)
     }
     for (const QJsonValue &value : root.value(QLatin1String("lines")).toArray()) {
         const QJsonObject line = value.toObject();
+        // Row plan (1..6 = A..F) is a late addition; meshes written before
+        // it default to 0, which the row-load instrumentation treats as
+        // "unknown" rather than a row of its own.
         mesh.lines.push_back(
             {vec(line.value(QLatin1String("a")).toArray()),
              vec(line.value(QLatin1String("b")).toArray()),
-             line.value(QLatin1String("brake")).toInt() != 0});
+             line.value(QLatin1String("brake")).toInt() != 0,
+             line.value(QLatin1String("plan")).toInt(0)});
     }
 
     const int nodeCount = static_cast<int>(mesh.nodes.size());
@@ -758,6 +768,16 @@ SimBody buildSimBody(const SimMesh &mesh,
             chord.restChordLength = length(mesh.nodes[chord.trailingNode]
                                            - mesh.nodes[chord.leadingNode]);
             sim.ribChords.push_back(chord);
+            // The shape instrumentation fits each rest section onto the
+            // live one through this loop, indexed parallel to ribChords —
+            // so it is recorded in the exact scope that records the chord.
+            // A degenerate loop that bailed earlier skips both.
+            std::vector<std::size_t> loopNodes;
+            loopNodes.reserve(loop.size());
+            for (const int node : loop) {
+                loopNodes.push_back(static_cast<std::size_t>(node));
+            }
+            sim.ribLoopNodes.push_back(std::move(loopNodes));
         }
 
         const double axisX =
@@ -1152,7 +1172,8 @@ SimBody buildSimBody(const SimMesh &mesh,
              b,
              line.brake,
              body->addCableConstraint(
-                 a, b, length(line.b - line.a), lineCompliance)});
+                 a, b, length(line.b - line.a), lineCompliance),
+             line.plan});
     }
     std::vector<std::size_t> carabiners;
     for (const auto &[key, node] : junctions) {
@@ -1189,6 +1210,11 @@ SimBody buildSimBody(const SimMesh &mesh,
         std::unique(sim.lineAttachmentNodes.begin(),
                     sim.lineAttachmentNodes.end()),
         sim.lineAttachmentNodes.end());
+
+    // The riser level, published for the row-load instrumentation: the
+    // same set of junctions whether they end up fixed to the world
+    // (pinned) or tied to the pilot (free flight) below.
+    sim.carabinerNodes = carabiners;
 
     // Where the designed lines hang the wing: the mean carabiner position
     // projected onto the mean rest chord. The imposed aerodynamic
@@ -1328,7 +1354,8 @@ SimBody buildSimBody(const SimMesh &mesh,
                 length(body->nodes()[top].position - handlePosition);
             const std::size_t constraint = body->addCableConstraint(
                 handle, top, rest, lineCompliance);
-            sim.lineSegments.push_back({handle, top, true, constraint});
+            // Plan 6: the engine hard-codes brakes to the F row.
+            sim.lineSegments.push_back({handle, top, true, constraint, 6});
             sim.brakeLines.push_back({constraint, rest, side < 0.0});
         }
     }
@@ -1344,6 +1371,7 @@ SimBody buildSimBody(const SimMesh &mesh,
         if (rest.valid) {
             sim.alphaTrimRadians = rest.alphaRadians;
         }
+        sim.builtAngleOfAttackDegrees = controls.angleOfAttackDegrees;
     }
 
     // Trim the pilot to the wing rather than the other way round. The load
@@ -1728,10 +1756,20 @@ WingAeroSample sampleWingAero(const SimBody &sim,
         return sample;
     }
 
+    // The polar must see the canopy's own motion whenever it is the one
+    // applying system-level force — free flight AND the tunnel's flight
+    // load. A tethered canopy still swings on its lines, and a ±2 kN
+    // force that follows the swinging angle of attack through a 0.25 s
+    // lag while ignoring the swing velocity is a pumped oscillator: with
+    // the subtraction missing, the tunnel wing wound itself up to 8 m/s
+    // of agitation and pitched right over. At equilibrium the canopy is
+    // still and the term vanishes, so the tunnel condition itself is
+    // untouched.
     const softwing::Vec3 relative =
         freestreamVelocity(sim, controls)
-        - (controls.freeFlight ? canopyVelocityOf(sim)
-                               : softwing::Vec3{});
+        - (controls.freeFlight || controls.flightLoad
+               ? canopyVelocityOf(sim)
+               : softwing::Vec3{});
     const double speed = length(relative);
     if (speed <= 1.0e-6) {
         return sample;
@@ -1855,7 +1893,28 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     const double aspectRatio = std::max(1.0, sim.aspectRatio);
     const double finiteWing =
         1.0 / (1.0 + 2.0 / (aspectRatio * kSpanEfficiency));
-    sample.alphaRadians = sim.alphaFilteredRadians;
+    // Which angle drives the polar is the deepest difference between the
+    // two modes. Free flight closes the loop: the wing's own measured,
+    // filtered angle feeds CL and CD, and the whole calibrated stability
+    // stack exists to keep that loop from diverging. The tunnel does NOT
+    // close it: the polar is evaluated at the PRESCRIBED angle — the
+    // rigged rest angle shifted degree-for-degree with the slider — so
+    // the load is a dead load along the current airflow. Every
+    // closed-loop tunnel variant tried (fast filter, slow filter, split
+    // anchor) found a way to pump an oscillation or slide off trim onto
+    // slack rows over tens of seconds; open-loop, the bridle geometry
+    // alone is statically stable (a nose-down excursion slackens the C
+    // rows and the still-taut A rows restore it, and vice versa), and a
+    // measurement instrument WANTS the load prescribed: the wing's
+    // actual attitude under it is an output, not an input. The measured
+    // angle still goes to the HUD via lastAlphaDegrees.
+    sample.alphaRadians =
+        controls.freeFlight
+            ? sim.alphaFilteredRadians
+            : sim.alphaTrimRadians
+                  + (controls.angleOfAttackDegrees
+                     - sim.builtAngleOfAttackDegrees)
+                        * kDegreesToRadians;
     const double attachedLift = std::max(
         kMinimumLiftCoefficient,
         finiteWing * wingLiftCoefficient(sample.alphaRadians));
@@ -1924,10 +1983,15 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     // angle the line rigging itself settles at — so the anchor and the
     // lines pull the same way; targeting the rest-pose angle instead
     // put the two in a standing fight.
+    // sample.alphaRadians is the polar's driving angle in both modes
+    // (filtered-measured in free flight, prescribed in the tunnel), so
+    // the anchor travels with the same angle the force was computed at:
+    // in the tunnel that makes the centre-of-pressure travel a static,
+    // prescribed offset per operating point rather than a feedback path.
     const double anchorFraction = std::clamp(
         sim.resultantChordFraction
             + kAnchorTravelPerRadian
-                  * (sim.alphaFilteredRadians - sim.alphaTrimRadians)
+                  * (sample.alphaRadians - sim.alphaTrimRadians)
             + std::clamp(
                   kAnchorRateSeconds * sim.alphaRateRadiansPerSecond,
                   -kAnchorRateLimit,
@@ -2120,7 +2184,10 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         q * area * sample.dragCoefficient + length(pilotDrag);
     sim.lastGlideRatio =
         sim.lastDrag > 1.0e-6 ? sim.lastLift / sim.lastDrag : 0.0;
-    sim.lastAlphaDegrees = sample.alphaRadians / kDegreesToRadians;
+    // The MEASURED attitude, in both modes. In the tunnel the polar ran
+    // at the prescribed angle, but what the HUD should report is where
+    // the rigging actually put the wing under that load.
+    sim.lastAlphaDegrees = sim.alphaFilteredRadians / kDegreesToRadians;
     sim.lastAirspeed = sample.airspeed;
 }
 
@@ -2131,9 +2198,10 @@ AeroSummary aerodynamicSummary(const SimBody &sim,
     if (!sim.body) {
         return summary;
     }
-    if (controls.freeFlight) {
-        // The imposed polar is the whole aerodynamic force in free flight;
-        // the pressure resultant is cancelled against it by construction.
+    if (controls.freeFlight || controls.flightLoad) {
+        // The imposed polar is the whole aerodynamic force whenever its
+        // pass runs — free flight, or pinned with flight load; the
+        // pressure resultant is cancelled against it by construction.
         summary.force = sim.lastAeroForce;
         summary.lift = sim.lastLift;
         summary.drag = sim.lastDrag;
@@ -2215,6 +2283,19 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
     }
     // Braking is a shorter line, not a hand placed somewhere. Cables are
     // one-sided, so letting the brake off simply restores the slack.
+    //
+    // Under flight load the tunnel adds a brake GAP, exactly as real wings
+    // rig one: the cascades are sized to the rest pose, but a loaded
+    // canopy pitches into its tether cone and the trailing edge moves
+    // decimetres relative to the fixed handles. Without the gap the
+    // brakes went spuriously taut at zero input — 80 N on one side —
+    // and the asymmetric snatch wound the wing up over tens of seconds.
+    // Free flight keeps its calibrated zero-gap rigging: there the
+    // handles ride on the pilot, who moves with the canopy.
+    const double brakeGap =
+        !controls.freeFlight && controls.flightLoad
+            ? kTunnelBrakeGapMetres
+            : 0.0;
     auto &constraints = sim.body->constraints();
     for (const BrakeLine &brake : sim.brakeLines) {
         if (brake.constraint >= constraints.size()) {
@@ -2223,13 +2304,19 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
         const double pull =
             brake.left ? controls.brakeLeft : controls.brakeRight;
         constraints[brake.constraint].restLength =
-            std::max(0.05, brake.restLength - pull);
+            std::max(0.05, brake.restLength + brakeGap - pull);
     }
     applyPressure(sim, controls);
-    // The polar force pass is free flight's: pinned, the canopy hangs on
-    // fixed carabiners and a system-level force just leans it against its
-    // lines.
-    if (controls.freeFlight) {
+    // The polar force pass runs in free flight always, and pinned when the
+    // wind tunnel asks for flight load. Pinned without it, the canopy
+    // carries only the pressure field's own resultant, and an inviscid
+    // pressure field under-reads lift badly (d'Alembert: full leading-edge
+    // suction, no viscous loss) — so every line-load number read off the
+    // tethered wing is fiction. With flightLoad the same wing-level polar
+    // is spread over the skin as pressure; the carabiners stay fixed, so
+    // the ~1 kN resultant reacts into the tether exactly as a tunnel
+    // model's load reacts into its balance.
+    if (controls.freeFlight || controls.flightLoad) {
         applyAerodynamicForces(sim, controls);
     }
 
@@ -2249,8 +2336,17 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
     // itself untouched; the reference is a whole-frame constant, so within
     // the step it stays a pure change of frame. Pinned, nothing glides and
     // the old heavy absolute damping keeps the fabric quiet.
+    // Under flight load the tunnel damps harder still. The imposed polar
+    // follows the angle of attack through a deliberate 0.25 s lag, and on
+    // the tether's one-sided cables — which catch and release as rows
+    // load and unload — that lag sustains a limit cycle at ~2 m/s of
+    // agitation that no measurement can be read through. A tunnel mount
+    // is allowed to be heavily damped: the tunnel measures statics, and
+    // the dynamics it would distort are free flight's job.
     settings.velocityDampingPerSecond =
-        controls.freeFlight ? systemDampingPerSecond : 3.0;
+        controls.freeFlight ? systemDampingPerSecond
+        : controls.flightLoad ? tunnelDampingPerSecond
+                              : 3.0;
     if (controls.freeFlight) {
         settings.dampingReferenceVelocity = systemVelocityOf(sim);
     }
@@ -2261,6 +2357,86 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
     if (controls.freeFlight) {
         recentreSystem(sim);
     }
+}
+
+bool beginGrab(SimBody &sim, std::size_t junctionNode)
+{
+    if (!sim.body || junctionNode >= sim.body->nodes().size()) {
+        return false;
+    }
+    const softwing::Vec3 place =
+        sim.body->nodes()[junctionNode].position;
+    // Re-grabbing the junction the existing cable already ends on wakes
+    // that cable instead of adding another: constraints cannot be removed,
+    // so repeated grabs of one node must not accumulate.
+    const bool reuse =
+        sim.grabConstraint != noConstraint
+        && sim.body->constraints()[sim.grabConstraint].b == junctionNode;
+    if (reuse) {
+        sim.body->constraints()[sim.grabConstraint].restLength = 0.01;
+    } else {
+        if (sim.grabAnchorNode == noConstraint) {
+            sim.grabAnchorNode = sim.body->addFixedNode(place);
+        }
+        if (sim.grabConstraint != noConstraint) {
+            sim.body->constraints()[sim.grabConstraint].restLength = 1.0e6;
+        }
+        // Adding a constraint after build is safe: the colouring rebuilds
+        // lazily off the count change.
+        sim.grabConstraint = sim.body->addCableConstraint(
+            sim.grabAnchorNode, junctionNode, 0.01, grabCompliance);
+    }
+    // Both positions, so the anchor arrives with no reconstructed
+    // velocity; constraints never move a fixed node, so this is the only
+    // thing that ever places it.
+    softwing::Node &anchor = sim.body->nodes()[sim.grabAnchorNode];
+    anchor.position = place;
+    anchor.previousPosition = place;
+    sim.grabbedNode = junctionNode;
+    return true;
+}
+
+void moveGrab(SimBody &sim, const softwing::Vec3 &target)
+{
+    if (!sim.body || !grabActive(sim)
+        || sim.grabAnchorNode == noConstraint) {
+        return;
+    }
+    softwing::Node &anchor = sim.body->nodes()[sim.grabAnchorNode];
+    anchor.position = target;
+    anchor.previousPosition = target;
+}
+
+void endGrab(SimBody &sim)
+{
+    if (sim.body && sim.grabConstraint != noConstraint) {
+        // Slack, not gone: a cable longer than any wing is a cable that
+        // never engages, and the constraint stays available for the next
+        // grab of the same junction.
+        sim.body->constraints()[sim.grabConstraint].restLength = 1.0e6;
+    }
+    sim.grabbedNode = noConstraint;
+}
+
+bool grabActive(const SimBody &sim)
+{
+    return sim.grabbedNode != noConstraint;
+}
+
+double grabForceNewtons(const SimBody &sim, const SimControls &controls)
+{
+    if (!sim.body || !grabActive(sim)
+        || sim.grabConstraint == noConstraint
+        || sim.grabConstraint >= sim.body->constraints().size()) {
+        return 0.0;
+    }
+    // λ of the last substep; force = -λ/h². Cable λ is clamped <= 0, so
+    // the floor only guards round-off.
+    const double substepRate = controls.substeps / simulationTimeStep;
+    return std::max(0.0,
+                    -sim.body->constraints()[sim.grabConstraint]
+                            .accumulatedLambda
+                        * substepRate * substepRate);
 }
 
 }  // namespace lep::playground

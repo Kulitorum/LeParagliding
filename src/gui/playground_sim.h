@@ -115,6 +115,9 @@ struct SimLine
     softwing::Vec3 a;
     softwing::Vec3 b;
     bool brake = false;
+    // Row plan from the engine's line labelling, 1..6 = A..F (brakes
+    // report 6). 0 when the mesh predates the field.
+    int plan = 0;
 };
 
 struct SimStrap
@@ -142,6 +145,8 @@ struct LineSegment
     std::size_t b = 0;
     bool brake = false;
     std::size_t constraint = noConstraint;
+    // Row plan carried over from the SimLine, 0 when unknown.
+    int plan = 0;
 };
 
 // A brake line from the pilot to the top of one brake cascade. Pulling the
@@ -228,6 +233,14 @@ struct SimBody
     // uniform one.
     std::vector<FaceAero> faceAero;
     std::vector<RibChord> ribChords;
+    // Each rib's outline loop as body node indices, parallel to ribChords.
+    // The shape instrumentation fits the rest section onto the live one
+    // through these (see playground_metrics.h).
+    std::vector<std::vector<std::size_t>> ribLoopNodes;
+    // The pilot-end junctions: fixed to the world in the wind tunnel, tied
+    // to the pilot in free flight. Line segments with an endpoint here are
+    // the riser level, which is where per-row loads are read.
+    std::vector<std::size_t> carabinerNodes;
     // Skin nodes the suspension lines tie into, deduplicated. The polar
     // correction and the pitch-trim couple are applied here: this is the
     // load path the canopy is built to carry point loads on, and pressing
@@ -257,6 +270,11 @@ struct SimBody
     // The wing-level angle of attack at rest with the build-time controls:
     // the angle the designed line geometry trims the wing to.
     double alphaTrimRadians = 0.1;
+    // The slider angle the body was built at. The tunnel's prescribed
+    // angle of attack is alphaTrimRadians shifted by however far the
+    // slider has moved since — tilting the airflow tilts the rest pose's
+    // angle with it, degree for degree.
+    double builtAngleOfAttackDegrees = defaultAngleOfAttackDegrees;
     // The steady glide-path angle the polar predicts for this wing at its
     // in-flight trim, from the build-time fixed point. Used to launch the
     // system on the glide instead of at a dead stop.
@@ -288,6 +306,13 @@ struct SimBody
     softwing::Vec3 restSpanAxis{1.0, 0.0, 0.0};
     softwing::Vec3 boundsLow;
     softwing::Vec3 boundsHigh;
+    // The interactive grab: a kinematic anchor node tied to one line
+    // junction by a soft cable, so the mouse can pull the cascade and the
+    // pull is a readable force rather than a teleported node. noConstraint
+    // when no grab has ever been made on this body.
+    std::size_t grabAnchorNode = noConstraint;
+    std::size_t grabConstraint = noConstraint;
+    std::size_t grabbedNode = noConstraint;
 };
 
 // Live inputs to a step. Held apart from the body so the benchmark can
@@ -314,6 +339,14 @@ struct SimControls
     // (see docs/xpbd-performance.md). With it off the pilot is pinned, which
     // is the behaviour the tab has always had.
     bool freeFlight = false;
+    // Wind-tunnel loading: impose the wing-level polar force pass in
+    // pinned mode too, so the canopy hangs in its lines against a
+    // realistic ~1 kN resultant instead of the pressure field's badly
+    // under-read lift, and every line-load number means something. Off by
+    // default so the bench's timing baselines and pose checksums are
+    // untouched; the GUI turns it on. Ignored in free flight, which has
+    // its own force pass.
+    bool flightLoad = false;
     double brakeLeft = 0.0;
     double brakeRight = 0.0;
     int substeps = simulationSubsteps;
@@ -408,6 +441,25 @@ struct AeroSummary
 // One frame: brake lengths, load field, the XPBD step, then recentring.
 // Propagates the solver's exception on failure.
 void stepSimulation(SimBody &sim, const SimControls &controls);
+
+// The interactive grab. Soft enough that a pull is a spring the fabric can
+// answer, stiff enough that dragging feels direct; the softness is also
+// what makes the force readout well-conditioned.
+inline constexpr double grabCompliance = 1.0e-7;   // m/N
+// Ties the grab cable to the given junction node (an endpoint of some
+// LineSegment), creating or re-aiming the kinematic anchor at the node's
+// current position. Returns false if the node index is out of range.
+// Re-grabbing a different junction adds a fresh cable and slackens the old
+// one — constraints cannot be removed once added.
+bool beginGrab(SimBody &sim, std::size_t junctionNode);
+// Moves the kinematic anchor; the cable does the pulling.
+void moveGrab(SimBody &sim, const softwing::Vec3 &target);
+// Slackens the cable so it carries nothing; the anchor stays for reuse.
+void endGrab(SimBody &sim);
+[[nodiscard]] bool grabActive(const SimBody &sim);
+// Current pull in newtons, from the grab cable's accumulated multiplier.
+[[nodiscard]] double grabForceNewtons(const SimBody &sim,
+                                      const SimControls &controls);
 
 // Translates the whole system so its centre of mass sits at the origin.
 // Position and previous position move together, so this is a pure change of

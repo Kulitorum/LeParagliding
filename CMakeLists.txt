@@ -197,6 +197,8 @@ endif()
 add_library(playground_sim STATIC
     src/gui/playground_sim.cpp
     src/gui/playground_sim.h
+    src/gui/playground_metrics.cpp
+    src/gui/playground_metrics.h
 )
 target_link_libraries(playground_sim PUBLIC Qt6::Core softwing_core)
 target_include_directories(playground_sim PUBLIC
@@ -338,6 +340,11 @@ target_include_directories(airfoil-file-test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
 )
 
+add_executable(playground-metrics-test
+    tests/playground_metrics_test.cpp
+)
+target_link_libraries(playground-metrics-test PRIVATE playground_sim)
+
 qt_add_executable(LEparagliding WIN32
     src/gui/airfoil_file.cpp
     src/gui/airfoil_file.h
@@ -361,6 +368,8 @@ qt_add_executable(LEparagliding WIN32
     src/gui/panel_undo.h
     src/gui/paraglider_view.cpp
     src/gui/paraglider_view.h
+    src/gui/playground_analysis.cpp
+    src/gui/playground_analysis.h
     src/gui/playground_page.cpp
     src/gui/playground_page.h
     src/gui/preset_catalog.cpp
@@ -425,6 +434,7 @@ set_target_properties(
     spline-fit-test
     section-grid-test
     airfoil-file-test
+    playground-metrics-test
     softwing-bench
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -440,6 +450,7 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         spline-fit-test
         section-grid-test
         airfoil-file-test
+        playground-metrics-test
         softwing-bench
         PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
@@ -536,6 +547,7 @@ add_test(NAME spline_fit COMMAND spline-fit-test)
 add_test(NAME section_grid COMMAND section-grid-test)
 add_test(NAME airfoil_file COMMAND airfoil-file-test
     "${CMAKE_CURRENT_SOURCE_DIR}/Data/gnua.txt")
+add_test(NAME playground_metrics COMMAND playground-metrics-test)
 add_test(NAME engine_rejects_missing_input
     COMMAND leparagliding-engine
         "${CMAKE_BINARY_DIR}/does-not-exist.txt"

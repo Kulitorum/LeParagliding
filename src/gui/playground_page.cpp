@@ -1,5 +1,7 @@
 #include "playground_page.h"
 
+#include "playground_analysis.h"
+#include "playground_metrics.h"
 #include "playground_sim.h"
 
 #include "softwing/soft_body.h"
@@ -31,6 +33,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -68,6 +71,12 @@ constexpr double maximumStressFullScaleStrain = 0.05;   // slider top, 5%
 // multiplier instead, which is a force. Newtons per line.
 constexpr double defaultLineFullScaleNewtons = 100.0;
 constexpr double maximumLineFullScaleNewtons = 500.0;
+// Cadence of the deviation/slack field refresh, in simulation steps. The
+// fields are a measurement pass over the whole body — cheap enough for a
+// few hertz, pointless (and allocating) every frame.
+constexpr int fieldRefreshSteps = 15;
+// How close a Ctrl-click must land to a projected line junction to grab it.
+constexpr double grabPickRadiusPixels = 14.0;
 // Grey for faces that are drawn while stress colouring is on but carry no
 // meaningful stress of their own — the simple rib web.
 const QVector3D uncolouredTint(0.58F, 0.60F, 0.63F);
@@ -89,6 +98,11 @@ public:
         // pre-layout geometry.
         setAttribute(Qt::WA_NativeWindow, true);
         controls_.workerThreads = lep::playground::playgroundWorkerThreads();
+        // The GUI tunnel imposes the wing-level polar load by default so
+        // the line-load numbers mean something (the bench keeps the raw
+        // pressure field for its baselines). Must match the page's
+        // Flight-load checkbox default.
+        controls_.flightLoad = true;
         timer_ = new QTimer(this);
         timer_->setInterval(16);
         connect(timer_, &QTimer::timeout, this, [this] {
@@ -109,7 +123,21 @@ public:
 
     void rebuildBody()
     {
+        // A grab holds a node of the body being discarded; drop it rather
+        // than let a stale index pull on the fresh wing.
+        if (grabbing_) {
+            grabbing_ = false;
+            setCursor(flyMode_ ? Qt::CrossCursor : Qt::ArrowCursor);
+        }
         sim_ = buildSimBody(mesh_, buildOptions_, controls_);
+        // The baseline is the design shape itself: buildSimBody leaves
+        // every node at the mesh's rest pose (the free-flight launch only
+        // stamps velocities), so capturing here reads exactly the designed
+        // geometry the instruments compare against.
+        baseline_ = lep::playground::captureShapeBaseline(sim_);
+        deviationField_.clear();
+        slackField_.clear();
+        refreshColourField();
 
         const softwing::Vec3 low = sim_.boundsLow;
         const softwing::Vec3 high = sim_.boundsHigh;
@@ -286,10 +314,99 @@ public:
         controls_.constraintIterations = chosen.iterations;
     }
 
-    void setStressColoring(bool enabled)
+    // Skin heatmap source. The page's combo items are in this order.
+    enum class ColorMode
     {
-        stressColoring_ = enabled;
+        Plain,
+        Stress,
+        Deviation,
+        Slack,
+    };
+
+    void setColorMode(ColorMode mode)
+    {
+        if (colorMode_ == mode) {
+            return;
+        }
+        colorMode_ = mode;
+        // A paused tunnel must colour immediately too; the step-count
+        // cadence only refreshes while the solver runs.
+        refreshColourField();
         update();
+    }
+
+    // Wind-tunnel loading: impose the wing-level polar pass in pinned mode
+    // so line loads are realistic. A per-step control, no rebuild.
+    void setFlightLoad(bool enabled) { controls_.flightLoad = enabled; }
+
+    // Snapshot for the analysis dialog, which drives its own bodies with
+    // the tunnel's exact settings.
+    SimControls controls() const { return controls_; }
+
+    // One line for the shape HUD: the live wing measured against its
+    // design shape, in the units a designer reads. Empty until a body and
+    // its baseline exist.
+    QString shapeReadout() const
+    {
+        if (!sim_.body || baseline_.restPositions.empty()) {
+            return {};
+        }
+        const lep::playground::ShapeReport report =
+            lep::playground::measureShape(sim_, controls_, baseline_);
+        QStringList parts;
+        // The polar's numbers only exist when a polar pass runs; the raw
+        // pinned pressure field carries no drag model worth quoting.
+        if (controls_.flightLoad || controls_.freeFlight) {
+            parts << QStringLiteral("L/D %1")
+                         .arg(report.glideRatio, 0, 'f', 1)
+                  << QStringLiteral("α %1°")
+                         .arg(sim_.lastAlphaDegrees, 0, 'f', 1);
+        }
+        parts << QStringLiteral("span %1%")
+                     .arg(report.spanRatio * 100.0, 0, 'f', 0);
+        const double volume = (report.volumeRatio - 1.0) * 100.0;
+        parts << QStringLiteral("vol %1%2%")
+                     .arg(volume >= 0.0 ? QStringLiteral("+") : QString())
+                     .arg(volume, 0, 'f', 0);
+        parts << QStringLiteral("dev %1 mm @ rib %2")
+                     .arg(report.worstDeviationMetres * 1000.0, 0, 'f', 0)
+                     .arg(static_cast<qulonglong>(report.worstDeviationRib));
+        parts << QStringLiteral("slack %1%")
+                     .arg(report.slackFraction * 100.0, 0, 'f', 0);
+        parts << QStringLiteral("LE %1 mm")
+                     .arg(report.worstLeadingEdgeDentMetres * 1000.0,
+                          0, 'f', 0);
+        QStringList rows;
+        for (const lep::playground::RowLoad &row : report.rows) {
+            if (row.segments == 0) {
+                continue;
+            }
+            rows << QStringLiteral("%1 %2")
+                        .arg(row.row)
+                        .arg(row.leftNewtons + row.rightNewtons, 0, 'f', 0);
+        }
+        if (!rows.isEmpty()) {
+            parts << rows.join(QLatin1Char(' ')) + QStringLiteral(" N");
+        }
+        for (const lep::playground::ShapeFlagInfo &flag : report.flags) {
+            parts << QStringLiteral("⚠ %1")
+                         .arg(lep::playground::shapeFlagName(flag.flag));
+        }
+        if (lep::playground::grabActive(sim_)) {
+            const auto &nodes = sim_.body->nodes();
+            if (sim_.grabAnchorNode < nodes.size()
+                && sim_.grabbedNode < nodes.size()) {
+                const double pull =
+                    length(nodes[sim_.grabAnchorNode].position
+                           - nodes[sim_.grabbedNode].position);
+                parts << QStringLiteral("pull %1 m %2 N")
+                             .arg(pull, 0, 'f', 2)
+                             .arg(lep::playground::grabForceNewtons(
+                                      sim_, controls_),
+                                  0, 'f', 0);
+            }
+        }
+        return parts.join(QStringLiteral(" · "));
     }
 
     // Stretch at which the ramp saturates, as a fraction of rest length.
@@ -353,6 +470,28 @@ public:
             }
         }
         return peak;
+    }
+
+    // Legend peaks over the cached fields — fresh only while their mode is
+    // active, which is the only time the legend quotes them.
+    double peakDeviation() const
+    {
+        float peak = 0.0F;
+        for (const float deviation : deviationField_) {
+            peak = std::max(peak, deviation);
+        }
+        return peak;
+    }
+
+    // Positive compression fraction; the field stores strain (negative
+    // when compressed, 0 where taut).
+    double peakSlackCompression() const
+    {
+        float worst = 0.0F;
+        for (const float strain : slackField_) {
+            worst = std::min(worst, strain);
+        }
+        return -worst;
     }
 
     void setRunning(bool running)
@@ -468,26 +607,16 @@ protected:
             return;
         }
 
-        QMatrix4x4 projection;
-        projection.perspective(
-            cameraFieldOfViewDegrees,
-            width() > 0 ? float(width()) / float(std::max(height(), 1))
-                        : 1.0F,
-            0.02F,
-            500.0F);
-        QMatrix4x4 view;
-        view.translate(0, 0, -distance_);
-        view.rotate(pitch_, 1, 0, 0);
-        view.rotate(yaw_, 0, 0, 1);
-        view.translate(-target_);
-        const QMatrix4x4 mvp = projection * view;
+        const QMatrix4x4 mvp = viewProjection();
 
         const auto &nodes = sim_.body->nodes();
 
         vertexScratch_.clear();
         vertexScratch_.reserve(sim_.renderFaces.size() * 27);
         const auto &constraints = sim_.body->constraints();
-        for (const RenderFace &face : sim_.renderFaces) {
+        for (std::size_t faceIndex = 0; faceIndex < sim_.renderFaces.size();
+             ++faceIndex) {
+            const RenderFace &face = sim_.renderFaces[faceIndex];
             if (!surfaceVisible_[static_cast<std::size_t>(face.surface)]) {
                 continue;
             }
@@ -498,14 +627,42 @@ protected:
             // useTint is a per-draw uniform while colourability is per
             // face, so an uncoloured face still needs a colour of its own
             // here — leaving it zeroed painted the simple ribs black.
+            // Stress and Slack keep the colourable() gate (a simple rib's
+            // colour would be spoke tension dressed up as rib stress);
+            // Deviation is per node and honest everywhere the baseline
+            // reaches, so it tints ungated.
             QVector3D tint = uncolouredTint;
-            if (stressColoring_ && colourable(face)) {
-                tint = stressTint(faceStrain(face, nodes, constraints));
+            switch (colorMode_) {
+            case ColorMode::Stress:
+                if (colourable(face)) {
+                    tint = stressTint(faceStrain(face, nodes, constraints));
+                }
+                break;
+            case ColorMode::Slack:
+                if (colourable(face) && faceIndex < slackField_.size()
+                    && slackField_[faceIndex] < 0.0F) {
+                    tint = rampTint(-slackField_[faceIndex]
+                                    / std::max(stressFullScale_, 1.0e-6));
+                }
+                break;
+            case ColorMode::Plain:
+            case ColorMode::Deviation:
+                break;
             }
-            for (const softwing::Vec3 *point : {&a, &b, &c}) {
-                vertexScratch_.push_back(static_cast<float>(point->x));
-                vertexScratch_.push_back(static_cast<float>(point->y));
-                vertexScratch_.push_back(static_cast<float>(point->z));
+            for (int corner = 0; corner < 3; ++corner) {
+                const std::size_t node = face.nodes[
+                    static_cast<std::size_t>(corner)];
+                if (colorMode_ == ColorMode::Deviation) {
+                    const double deviation =
+                        node < deviationField_.size()
+                            ? deviationField_[node]
+                            : 0.0;
+                    tint = rampTint(deviation / deviationFullScaleMetres());
+                }
+                const softwing::Vec3 &point = nodes[node].position;
+                vertexScratch_.push_back(static_cast<float>(point.x));
+                vertexScratch_.push_back(static_cast<float>(point.y));
+                vertexScratch_.push_back(static_cast<float>(point.z));
                 vertexScratch_.push_back(static_cast<float>(normal.x));
                 vertexScratch_.push_back(static_cast<float>(normal.y));
                 vertexScratch_.push_back(static_cast<float>(normal.z));
@@ -556,7 +713,8 @@ protected:
             "tint", GL_FLOAT, 6 * sizeof(float), 3, stride);
 
         program_->setUniformValue("lit", true);
-        program_->setUniformValue("useTint", stressColoring_);
+        program_->setUniformValue("useTint",
+                                  colorMode_ != ColorMode::Plain);
         program_->setUniformValue(
             "color", QVector4D(0.72F, 0.78F, 0.88F, 1.0F));
         glDrawArrays(GL_TRIANGLES, 0, skinFloats / 9);
@@ -576,6 +734,25 @@ protected:
     void mousePressEvent(QMouseEvent *event) override
     {
         lastMouse_ = event->position();
+        // The grab tool is a tunnel instrument only: in fly mode the mouse
+        // is the brake input, and in free flight a world-anchored pull on
+        // a flying frame reads as nonsense.
+        if (event->button() == Qt::LeftButton
+            && event->modifiers().testFlag(Qt::ControlModifier)
+            && !flyMode_ && !controls_.freeFlight) {
+            tryBeginGrab(event->position());
+        }
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (grabbing_ && event->button() == Qt::LeftButton) {
+            lep::playground::endGrab(sim_);
+            grabbing_ = false;
+            setCursor(flyMode_ ? Qt::CrossCursor : Qt::ArrowCursor);
+            update();
+        }
+        QOpenGLWidget::mouseReleaseEvent(event);
     }
 
     void keyPressEvent(QKeyEvent *event) override
@@ -592,6 +769,33 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
+        if (grabbing_) {
+            // The cursor drags the grab anchor across the camera's screen
+            // plane at the picked node's depth — the same right/up and
+            // metres-per-pixel construction the pan branch uses, with the
+            // node's depth in place of the orbit distance so the anchor
+            // tracks the cursor exactly wherever the junction sits.
+            const QPointF delta = event->position() - lastMouse_;
+            lastMouse_ = event->position();
+            QMatrix4x4 rotation;
+            rotation.rotate(pitch_, 1, 0, 0);
+            rotation.rotate(yaw_, 0, 0, 1);
+            const QVector3D right = rotation.row(0).toVector3D();
+            const QVector3D up = rotation.row(1).toVector3D();
+            const float metresPerPixel =
+                2.0F * grabDepth_
+                * std::tan(cameraFieldOfViewDegrees * 0.5F
+                           * degreesToRadians)
+                / static_cast<float>(std::max(height(), 1));
+            grabWorld_ +=
+                softwing::Vec3{right.x(), right.y(), right.z()}
+                    * (delta.x() * metresPerPixel)
+                - softwing::Vec3{up.x(), up.y(), up.z()}
+                      * (delta.y() * metresPerPixel);
+            lep::playground::moveGrab(sim_, grabWorld_);
+            update();
+            return;
+        }
         if (flyMode_) {
             // Horizontal position steers, vertical position is the pull:
             // -1 at the left edge, +1 at the right, 0 pull at the top,
@@ -735,6 +939,121 @@ private:
         return rampTint(strain / std::max(stressFullScale_, 1.0e-6));
     }
 
+    // One scale slider serves three ramps. Its integer value is hundredths
+    // of a percent for the strain modes (10..500 -> 0.1%..5% strain) and
+    // read as millimetres for deviation (10..500 mm). stressFullScale_
+    // stores value/10000, so the metre scale is that times ten.
+    double deviationFullScaleMetres() const
+    {
+        return std::max(stressFullScale_ * 10.0, 1.0e-4);
+    }
+
+    QMatrix4x4 viewMatrix() const
+    {
+        QMatrix4x4 view;
+        view.translate(0, 0, -distance_);
+        view.rotate(pitch_, 1, 0, 0);
+        view.rotate(yaw_, 0, 0, 1);
+        view.translate(-target_);
+        return view;
+    }
+
+    // Shared by the draw and the grab pick, so what is clicked is exactly
+    // what is seen.
+    QMatrix4x4 viewProjection() const
+    {
+        QMatrix4x4 projection;
+        projection.perspective(
+            cameraFieldOfViewDegrees,
+            width() > 0 ? float(width()) / float(std::max(height(), 1))
+                        : 1.0F,
+            0.02F,
+            500.0F);
+        return projection * viewMatrix();
+    }
+
+    // Refills the cached colour field for the active mode, reusing the
+    // vector. Called on the step cadence, on mode changes (so a paused
+    // wing colours too) and after a rebuild.
+    void refreshColourField()
+    {
+        if (!sim_.body) {
+            return;
+        }
+        if (colorMode_ == ColorMode::Deviation
+            && !baseline_.restPositions.empty()) {
+            lep::playground::nodeDeviationField(sim_, baseline_,
+                                                deviationField_);
+        } else if (colorMode_ == ColorMode::Slack) {
+            lep::playground::faceSlackField(sim_, slackField_);
+        }
+        fieldSteps_ = 0;
+    }
+
+    // Ctrl-click picking: every unique line-junction endpoint projected to
+    // widget pixels, nearest within grabPickRadiusPixels wins. Carabiners
+    // are fixed nodes, so grabbing one merely parks the anchor on it — not
+    // worth excluding.
+    void tryBeginGrab(const QPointF &cursor)
+    {
+        if (!sim_.body) {
+            return;
+        }
+        const QMatrix4x4 mvp = viewProjection();
+        const auto &nodes = sim_.body->nodes();
+        std::set<std::size_t> junctions;
+        for (const LineSegment &segment : sim_.lineSegments) {
+            junctions.insert(segment.a);
+            junctions.insert(segment.b);
+        }
+        double bestDistance = grabPickRadiusPixels;
+        std::size_t bestNode = noConstraint;
+        for (const std::size_t node : junctions) {
+            if (node >= nodes.size()) {
+                continue;
+            }
+            const softwing::Vec3 &position = nodes[node].position;
+            const QVector4D clip =
+                mvp
+                * QVector4D(static_cast<float>(position.x),
+                            static_cast<float>(position.y),
+                            static_cast<float>(position.z),
+                            1.0F);
+            if (clip.w() <= 0.0F) {
+                continue;
+            }
+            const double px =
+                (clip.x() / clip.w() * 0.5 + 0.5) * width();
+            const double py =
+                (1.0 - (clip.y() / clip.w() * 0.5 + 0.5)) * height();
+            const double distance =
+                std::hypot(px - cursor.x(), py - cursor.y());
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestNode = node;
+            }
+        }
+        if (bestNode == noConstraint) {
+            return;
+        }
+        // Read before beginGrab: creating the anchor node can grow the
+        // node table and move it.
+        const softwing::Vec3 picked = nodes[bestNode].position;
+        if (!lep::playground::beginGrab(sim_, bestNode)) {
+            return;
+        }
+        grabWorld_ = picked;
+        const QVector3D eye = viewMatrix().map(
+            QVector3D(static_cast<float>(picked.x),
+                      static_cast<float>(picked.y),
+                      static_cast<float>(picked.z)));
+        // Camera looks down -z; the depth scales the cursor's
+        // metres-per-pixel during the drag.
+        grabDepth_ = std::max(-eye.z(), 0.05F);
+        grabbing_ = true;
+        setCursor(Qt::ClosedHandCursor);
+    }
+
     void applyPressure()
     {
         lep::playground::applyPressure(sim_, controls_);
@@ -744,6 +1063,11 @@ private:
     {
         try {
             lep::playground::stepSimulation(sim_, controls_);
+            if ((colorMode_ == ColorMode::Deviation
+                 || colorMode_ == ColorMode::Slack)
+                && ++fieldSteps_ >= fieldRefreshSteps) {
+                refreshColourField();
+            }
         } catch (const std::exception &exception) {
             simError_ = QString::fromUtf8(exception.what());
             setRunning(false);
@@ -760,10 +1084,22 @@ private:
     bool flyMode_ = false;
     std::function<void(double, double)> flyBrakesChanged_;
     std::function<void()> flyModeExited_;
-    bool stressColoring_ = false;
+    ColorMode colorMode_ = ColorMode::Plain;
     double stressFullScale_ = defaultStressFullScaleStrain;
     bool lineTensionColoring_ = false;
     double lineFullScaleNewtons_ = defaultLineFullScaleNewtons;
+    // The design shape and the cached heatmap fields measured against it.
+    // Fields are refreshed on the fieldRefreshSteps cadence, never
+    // reallocated per frame.
+    lep::playground::ShapeBaseline baseline_;
+    std::vector<float> deviationField_;
+    std::vector<float> slackField_;
+    int fieldSteps_ = 0;
+    // The interactive grab: anchor position accumulated in doubles so a
+    // long drag does not drift, depth fixed at pick time.
+    bool grabbing_ = false;
+    float grabDepth_ = 1.0F;
+    softwing::Vec3 grabWorld_;
     std::vector<float> vertexScratch_;
     QString simError_;
     QString glError_;
@@ -832,10 +1168,21 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     showRibs_ = makeCheck(QStringLiteral("Ribs"), true);
     showStraps_ = makeCheck(QStringLiteral("V/H ribs"), true);
     showLines_ = makeCheck(QStringLiteral("Lines"), true);
-    showStress_ = makeCheck(QStringLiteral("Colour by stress"), false);
 
-    // Full-scale stretch for the ramp, in hundredths of a percent so the
-    // low end (where fabric actually works) still has resolution.
+    // Skin heatmap source; item order matches PlaygroundView::ColorMode.
+    colorBy_ = new QComboBox(this);
+    colorBy_->addItem(QStringLiteral("Plain"));
+    colorBy_->addItem(QStringLiteral("Stress"));
+    colorBy_->addItem(QStringLiteral("Deviation"));
+    colorBy_->addItem(QStringLiteral("Slack"));
+    colorBy_->setToolTip(QStringLiteral(
+        "Colour the skin by edge stretch (Stress), by distance from the "
+        "designed shape (Deviation), or by compressed — wrinkled — fabric "
+        "(Slack)."));
+
+    // Full-scale for the ramp. Read as hundredths of a percent strain for
+    // Stress and Slack (so the low end, where fabric actually works, still
+    // has resolution) and as millimetres for Deviation.
     stressScale_ = new QSlider(Qt::Horizontal, this);
     stressScale_->setRange(
         10, static_cast<int>(maximumStressFullScaleStrain * 10000.0));
@@ -882,8 +1229,6 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     view->addWidget(showStraps_);
     view->addWidget(showLines_);
     view->addSpacing(16);
-    view->addWidget(showStress_);
-    view->addWidget(stressScale_);
     view->addWidget(showLineTension_);
     view->addWidget(lineScale_);
     view->addWidget(stressLegend_, 1);
@@ -908,6 +1253,26 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     solver->addWidget(flightLabel_, 1);
     solver->addStretch();
 
+    // The shape instruments get a row of their own for the same
+    // row-fullness reason free flight did (see above).
+    shapeLabel_ = new QLabel(this);
+    flightLoad_ = makeCheck(QStringLiteral("Flight load"), true);
+    flightLoad_->setToolTip(QStringLiteral(
+        "Impose the wing-level polar load in the tunnel so line loads are "
+        "realistic"));
+    analyseButton_ = new QPushButton(QStringLiteral("Analyse…"), this);
+    analyseButton_->setToolTip(QStringLiteral(
+        "Sweep the tunnel across an angle-of-attack range on a worker "
+        "thread and report shape integrity vs α."));
+
+    auto *shape = new QHBoxLayout;
+    shape->addWidget(new QLabel(QStringLiteral("Colour"), this));
+    shape->addWidget(colorBy_);
+    shape->addWidget(stressScale_);
+    shape->addWidget(shapeLabel_, 1);
+    shape->addWidget(flightLoad_);
+    shape->addWidget(analyseButton_);
+
     auto *controls = new QHBoxLayout;
     controls->addWidget(new QLabel(QStringLiteral("Pressure"), this));
     controls->addWidget(pressure_, 1);
@@ -925,6 +1290,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     layout_->addWidget(status_);
     layout_->addLayout(view);
     layout_->addLayout(solver);
+    layout_->addLayout(shape);
     layout_->addLayout(controls);
 
     const auto bindSurface = [this](QCheckBox *check, SimSurface surface) {
@@ -968,7 +1334,27 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             flightTimer_->stop();
             flightLabel_->clear();
         }
+        // The toggle rebuilt the body, which leaves the solver running.
+        updateShapeTimer();
     });
+
+    // The shape HUD runs whenever the solver does — tunnel or free flight
+    // alike — so slider changes answer in real time. 500 ms: measureShape
+    // is a full instrumentation pass, cheap at a few hertz, not per frame.
+    shapeTimer_ = new QTimer(this);
+    shapeTimer_->setInterval(500);
+    connect(shapeTimer_, &QTimer::timeout, this, [this] {
+        shapeLabel_->setText(view_ != nullptr ? view_->shapeReadout()
+                                              : QString());
+    });
+
+    connect(flightLoad_, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (view_ != nullptr) {
+            view_->setFlightLoad(enabled);
+        }
+    });
+    connect(analyseButton_, &QPushButton::clicked, this,
+            [this] { openAnalysis(); });
 
     // The legend needs the live peak stretch, which only exists while the
     // solver runs; polling a few times a second keeps it readable instead
@@ -980,10 +1366,28 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             return;
         }
         QStringList parts;
-        if (showStress_->isChecked()) {
+        // Index order matches PlaygroundView::ColorMode; Plain contributes
+        // nothing. The scale slider's integer value is hundredths of a
+        // percent for the strain modes and millimetres for deviation.
+        switch (colorBy_->currentIndex()) {
+        case 1:
             parts << QStringLiteral("fabric slack → %1% stretch (peak %2%)")
                          .arg(stressScale_->value() / 100.0, 0, 'f', 2)
                          .arg(view_->peakStrain() * 100.0, 0, 'f', 2);
+            break;
+        case 2:
+            parts << QStringLiteral("deviation 0 → %1 mm (peak %2 mm)")
+                         .arg(stressScale_->value())
+                         .arg(view_->peakDeviation() * 1000.0, 0, 'f', 0);
+            break;
+        case 3:
+            parts << QStringLiteral("taut → %1% compressed (peak %2%)")
+                         .arg(stressScale_->value() / 100.0, 0, 'f', 2)
+                         .arg(view_->peakSlackCompression() * 100.0,
+                              0, 'f', 2);
+            break;
+        default:
+            break;
         }
         if (showLineTension_->isChecked()) {
             parts << QStringLiteral("lines 0 → %1 N (peak %2 N)")
@@ -997,9 +1401,10 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             view_->setStressFullScale(value / 10000.0);
         }
     });
-    // One legend serves both modes, so it lives as long as either is on.
+    // One legend serves every colour mode plus line tension, so it lives
+    // as long as any of them is on.
     const auto refreshLegendTimer = [this] {
-        const bool wanted = showStress_->isChecked()
+        const bool wanted = colorBy_->currentIndex() != 0
                             || showLineTension_->isChecked();
         stressLegend_->setVisible(wanted);
         if (wanted) {
@@ -1008,12 +1413,13 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             legendTimer_->stop();
         }
     };
-    connect(showStress_, &QCheckBox::toggled, this,
-            [this, refreshLegendTimer](bool enabled) {
+    connect(colorBy_, &QComboBox::currentIndexChanged, this,
+            [this, refreshLegendTimer](int index) {
                 if (view_ != nullptr) {
-                    view_->setStressColoring(enabled);
+                    view_->setColorMode(
+                        static_cast<PlaygroundView::ColorMode>(index));
                 }
-                stressScale_->setVisible(enabled);
+                stressScale_->setVisible(index != 0);
                 refreshLegendTimer();
             });
     connect(lineScale_, &QSlider::valueChanged, this, [this](int value) {
@@ -1055,6 +1461,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         }
         runButton_->setText(paused ? QStringLiteral("Run")
                                    : QStringLiteral("Pause"));
+        updateShapeTimer();
     });
     connect(resetButton_, &QPushButton::clicked, this, [this] {
         if (view_ != nullptr) {
@@ -1062,6 +1469,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         }
         // The rebuilt body is running; the Pause button must say so.
         runButton_->setChecked(false);
+        updateShapeTimer();
     });
     connect(flyButton_, &QPushButton::toggled, this, [this](bool enabled) {
         if (view_ != nullptr) {
@@ -1096,9 +1504,11 @@ void PlaygroundPage::ensureView()
     view_->setSurfaceVisible(SimSurface::Strap, showStraps_->isChecked());
     view_->setLinesVisible(showLines_->isChecked());
     view_->setStressFullScale(stressScale_->value() / 10000.0);
-    view_->setStressColoring(showStress_->isChecked());
+    view_->setColorMode(static_cast<PlaygroundView::ColorMode>(
+        colorBy_->currentIndex()));
     view_->setLineFullScale(static_cast<double>(lineScale_->value()));
     view_->setLineTensionColoring(showLineTension_->isChecked());
+    view_->setFlightLoad(flightLoad_->isChecked());
     view_->setFreeFlight(freeFlight_->isChecked());
     view_->setFlyModeCallbacks(
         // Mirror the live brake input onto the sliders. Signals stay
@@ -1118,6 +1528,50 @@ void PlaygroundPage::ensureView()
     view_->setFlyMode(flyButton_->isChecked());
     view_->show();
     creatingView_ = false;
+}
+
+void PlaygroundPage::updateShapeTimer()
+{
+    if (view_ != nullptr && view_->isRunning()) {
+        shapeTimer_->start();
+    } else {
+        // The last readout stays up: a paused tunnel's numbers still
+        // describe the frozen pose.
+        shapeTimer_->stop();
+    }
+}
+
+void PlaygroundPage::openAnalysis()
+{
+    if (meshData_.isEmpty() || view_ == nullptr) {
+        status_->setText(QStringLiteral(
+            "Run a preview or export first — the α sweep needs the "
+            "calculated wing mesh."));
+        return;
+    }
+    // The sweep builds its own bodies from the same mesh, refinement and
+    // rib options rebuildSimulation would use, driven by the tunnel's
+    // current controls, so its numbers match what the live view shows.
+    SimBuildOptions options;
+    options.detailedRibs = detailedRibs_;
+    options.ribLayers = defaultRibLayers + 2 * (subdivision_ - 1);
+    options.ribStationSplit = defaultRibStationSplit + subdivision_ - 1;
+    auto *dialog = new PlaygroundAnalysisDialog(
+        meshData_, subdivision_, options, view_->controls(), this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    // The sweep worker and the live solver would fight over the same
+    // cores; pause the tunnel for the sweep and restore whatever the run
+    // button says afterwards (a sim the user paused stays paused).
+    connect(dialog, &PlaygroundAnalysisDialog::sweepRunning, this,
+            [this](bool running) {
+                if (view_ == nullptr) {
+                    return;
+                }
+                view_->setRunning(running ? false
+                                          : !runButton_->isChecked());
+                updateShapeTimer();
+            });
+    dialog->show();
 }
 
 void PlaygroundPage::setSimMeshPath(const QString &path)
@@ -1174,6 +1628,7 @@ void PlaygroundPage::showEvent(QShowEvent *event)
     QWidget::showEvent(event);
     ensureView();
     loadIfPending();
+    updateShapeTimer();
     if (qEnvironmentVariableIsSet("LEP_PLAYGROUND_DEBUG")) {
         QTimer::singleShot(4000, this, [this] {
             qWarning() << "PlaygroundPage geometry" << geometry();
@@ -1223,13 +1678,17 @@ void PlaygroundPage::loadIfPending()
                          .arg(subdivision_ * subdivision_);
     }
     status_->setText(
-        QStringLiteral("Toy simulation · %1 nodes, %2 skin quads, %3 line "
+        QStringLiteral("Wind tunnel · %1 nodes, %2 skin quads, %3 line "
                        "segments%4 · drag to orbit, right-drag to pan, "
-                       "wheel to zoom. Not engineering — a sandbox.")
+                       "wheel to zoom, Ctrl-click a line junction to pull "
+                       "it. Relative shape signal, not absolute "
+                       "aerodynamics.")
             .arg(simulated.nodes.size())
             .arg(simulated.quads.size())
             .arg(simulated.lines.size())
             .arg(resolution));
+    // The fresh body is running whatever the run button said before.
+    updateShapeTimer();
     // Shader problems only surface once the first frame renders; a silent
     // black view is undiagnosable, so report them here.
     QTimer::singleShot(500, this, [this] {

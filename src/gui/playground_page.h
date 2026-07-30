@@ -12,12 +12,17 @@ class QVBoxLayout;
 
 class PlaygroundView;
 
-// The Playground tab: a toy live-wing simulation. The engine's companion
-// mesh (lep-sim.json — coarse welded skin quads sampled from the exact
+// The Playground tab: an instrumented wind tunnel for shape fidelity (see
+// docs/playground-shape-analysis.md). The engine's companion mesh
+// (lep-sim.json — coarse welded skin quads sampled from the exact
 // ballooning law, rib loops, labelled suspension lines) is assembled into
-// a softwing XPBD soft body; internal pressure inflates it and the brake
-// anchors can be pulled. Deliberately no engineering claims: this is a
-// visual sandbox, not analysis.
+// a softwing XPBD soft body, loaded by the tunnel's pressure field plus an
+// optional wing-level flight load, and measured against its own rest pose
+// — which IS the design shape. The instruments (the colour-by heatmaps,
+// the live shape HUD, the grab tool, the Analyse α-sweep) report where
+// the loaded wing departs from it: fabric going slack, a row unloading, a
+// nose denting. The claim is relative and structural, never absolute
+// aerodynamics. Free flight survives as an experimental toy mode.
 class PlaygroundPage : public QWidget
 {
     Q_OBJECT
@@ -58,6 +63,11 @@ private:
     // Re-reads the retained mesh so a changed preference takes effect
     // without another engine run. The wing returns to its rest pose.
     void rebuildSimulation();
+    // Starts the shape-HUD poll while the solver runs and stops it when it
+    // does not; called beside every place the run state changes.
+    void updateShapeTimer();
+    // The α-sweep report, non-modal so the tunnel stays usable beside it.
+    void openAnalysis();
 
     QVBoxLayout *layout_ = nullptr;
     PlaygroundView *view_ = nullptr;
@@ -75,7 +85,7 @@ private:
     QCheckBox *showRibs_ = nullptr;
     QCheckBox *showStraps_ = nullptr;
     QCheckBox *showLines_ = nullptr;
-    QCheckBox *showStress_ = nullptr;
+    QComboBox *colorBy_ = nullptr;
     QSlider *stressScale_ = nullptr;
     QCheckBox *showLineTension_ = nullptr;
     QSlider *lineScale_ = nullptr;
@@ -83,6 +93,10 @@ private:
     QCheckBox *freeFlight_ = nullptr;
     QLabel *flightLabel_ = nullptr;
     QTimer *flightTimer_ = nullptr;
+    QLabel *shapeLabel_ = nullptr;
+    QCheckBox *flightLoad_ = nullptr;
+    QPushButton *analyseButton_ = nullptr;
+    QTimer *shapeTimer_ = nullptr;
     QLabel *stressLegend_ = nullptr;
     QTimer *legendTimer_ = nullptr;
     QByteArray pendingData_;
