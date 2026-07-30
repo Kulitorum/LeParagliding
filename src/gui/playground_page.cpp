@@ -1673,22 +1673,37 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
                 }
             });
 
-    connect(pressure_, &QSlider::valueChanged, this, [this](int value) {
-        if (view_ != nullptr) {
-            view_->setPressurePascal(static_cast<double>(value));
+    // The sliders write live controls that only a STEPPING solver reads.
+    // After Settle (or Pause) the sim is deliberately frozen, and a
+    // slider that visibly does nothing reads as broken — say why.
+    const auto notePausedControls = [this] {
+        if (view_ != nullptr && view_->hasBody() && !view_->isRunning()
+            && !settleRunning_ && !sweepActive_) {
+            status_->setText(QStringLiteral(
+                "Paused — press Run to see the new settings act."));
         }
-    });
-    connect(lift_, &QSlider::valueChanged, this, [this](int value) {
-        if (view_ != nullptr) {
-            view_->setAngleOfAttack(static_cast<double>(value));
-        }
-    });
-    const auto pushBrakes = [this] {
+    };
+    connect(pressure_, &QSlider::valueChanged, this,
+            [this, notePausedControls](int value) {
+                if (view_ != nullptr) {
+                    view_->setPressurePascal(static_cast<double>(value));
+                }
+                notePausedControls();
+            });
+    connect(lift_, &QSlider::valueChanged, this,
+            [this, notePausedControls](int value) {
+                if (view_ != nullptr) {
+                    view_->setAngleOfAttack(static_cast<double>(value));
+                }
+                notePausedControls();
+            });
+    const auto pushBrakes = [this, notePausedControls] {
         if (view_ != nullptr) {
             view_->setBrakePull(
                 leftBrake_->value() / 100.0 * maximumBrakeTravelMetres,
                 rightBrake_->value() / 100.0 * maximumBrakeTravelMetres);
         }
+        notePausedControls();
     };
     connect(leftBrake_, &QSlider::valueChanged, this, pushBrakes);
     connect(rightBrake_, &QSlider::valueChanged, this, pushBrakes);
