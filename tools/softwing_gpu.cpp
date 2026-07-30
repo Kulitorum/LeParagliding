@@ -1,5 +1,62 @@
 #include "softwing_gpu.h"
 
+#ifdef __APPLE__
+
+// macOS caps OpenGL at 4.1: compute shaders and shader storage buffers
+// do not exist there, and the 4.3 headers this backend needs stopped
+// compiling on newer SDK/Qt combinations. The backend cannot RUN on the
+// platform either way, so the honest macOS build is a stub whose
+// initialize() says why — the bench itself still builds and every CPU
+// mode works.
+namespace lep::playground {
+
+struct GpuSoftBody::Impl
+{
+};
+
+GpuSoftBody::GpuSoftBody() = default;
+GpuSoftBody::~GpuSoftBody() = default;
+
+bool GpuSoftBody::initialize(const SimBody &, GpuSolveMode, QString &error)
+{
+    error = QStringLiteral(
+        "the GPU backend needs OpenGL 4.3 compute shaders, and macOS "
+        "caps OpenGL at 4.1");
+    return false;
+}
+
+QString GpuSoftBody::rendererDescription() const
+{
+    return {};
+}
+
+std::size_t GpuSoftBody::colourCount() const
+{
+    return 0;
+}
+
+std::size_t GpuSoftBody::dispatchesPerFrame(const SimControls &) const
+{
+    return 0;
+}
+
+void GpuSoftBody::step(SimBody &, const SimControls &)
+{
+}
+
+void GpuSoftBody::readback(SimBody &)
+{
+}
+
+double GpuSoftBody::maximumDeviation(const SimBody &) const
+{
+    return 0.0;
+}
+
+}  // namespace lep::playground
+
+#else
+
 #include <softwing/parallel.h>
 
 #include <QOffscreenSurface>
@@ -793,3 +850,5 @@ double GpuSoftBody::maximumDeviation(const SimBody &sim) const
 }
 
 }  // namespace lep::playground
+
+#endif  // __APPLE__
