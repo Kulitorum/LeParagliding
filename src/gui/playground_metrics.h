@@ -208,6 +208,19 @@ void nodeDeviationField(const SimBody &sim,
 // taut), skin surfaces only. Feeds the "Slack fabric" heatmap.
 void faceSlackField(const SimBody &sim, std::vector<float> &strainOut);
 
+// Per-NODE strain extremes over the constrained edges touching each
+// node: worst tension into tensileOut (>= 0), worst compression into
+// slackOut (<= 0), both sized like the body's node table. A face
+// carries one value in the per-face fields above and renders faceted;
+// scattered to nodes, the same data shades smoothly across the skin.
+// Rib-web faces join in only when detailedRibs built them as real
+// sheets — a hub-and-spoke rib's edge strain is spoke tension dressed
+// up as fabric stress.
+void nodeStrainFields(const SimBody &sim,
+                      bool detailedRibs,
+                      std::vector<float> &tensileOut,
+                      std::vector<float> &slackOut);
+
 // Tension of one constraint in newtons from the XPBD accumulated
 // multiplier of the last substep: F = -accumulatedLambda / h^2, positive
 // when taut, 0 for slack cables. Valid immediately after a step.

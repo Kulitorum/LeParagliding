@@ -1137,6 +1137,50 @@ void faceSlackField(const SimBody &sim, std::vector<float> &strainOut)
     }
 }
 
+void nodeStrainFields(const SimBody &sim,
+                      bool detailedRibs,
+                      std::vector<float> &tensileOut,
+                      std::vector<float> &slackOut)
+{
+    if (!sim.body) {
+        tensileOut.clear();
+        slackOut.clear();
+        return;
+    }
+    const auto &nodes = sim.body->nodes();
+    const auto &constraints = sim.body->constraints();
+    tensileOut.assign(nodes.size(), 0.0F);
+    slackOut.assign(nodes.size(), 0.0F);
+    // Scatter each drawn edge's strain to both of its endpoints.
+    // Max/min make the scatter idempotent, so edges shared by two faces
+    // need no dedup pass.
+    for (const RenderFace &drawn : sim.renderFaces) {
+        if (drawn.surface == SimSurface::Rib && !detailedRibs) {
+            continue;
+        }
+        for (const std::size_t edge : drawn.edges) {
+            if (edge == noConstraint || edge >= constraints.size()) {
+                continue;
+            }
+            const softwing::DistanceConstraint &tie = constraints[edge];
+            if (tie.restLength <= 0.0 || tie.a >= nodes.size()
+                || tie.b >= nodes.size()) {
+                continue;
+            }
+            const auto strain = static_cast<float>(
+                (length(nodes[tie.b].position - nodes[tie.a].position)
+                 - tie.restLength)
+                / tie.restLength);
+            for (const std::size_t node : {tie.a, tie.b}) {
+                tensileOut[node] =
+                    std::max(tensileOut[node], std::max(0.0F, strain));
+                slackOut[node] =
+                    std::min(slackOut[node], std::min(0.0F, strain));
+            }
+        }
+    }
+}
+
 SettleResult settleAndMeasure(SimBody &sim,
                               const SimControls &controls,
                               const ShapeBaseline &baseline,

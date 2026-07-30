@@ -137,9 +137,19 @@ airspeed forever).
 ## Ways of looking
 
 - **Colour by** — the skin heatmap now has three sources: *Stress*
-  (edge strain, as before), *Shape deviation* (per-node distance from the
-  aligned rest shape, mm) and *Slack fabric* (compression strain — the
-  wrinkle map). One combo box, one shared scale slider, legend follows.
+  (edge strain), *Shape deviation* (per-node distance from the aligned
+  rest shape, mm) and *Slack fabric* (compression strain — the wrinkle
+  map). One combo box, one shared scale slider, legend follows. All
+  three tint per VERTEX from per-node fields (edge strains scattered to
+  their endpoints), so the skin shades smoothly instead of rendering as
+  facets.
+- **Settle** — runs a twin of the current wing at the Accurate solver
+  setting (60 substeps × 4 iterations) on a worker thread until the
+  measurement converges, then adopts the settled pose — positions, line
+  tensions, aero state — and pauses for review. Start it, do something
+  else, come back to the answer under any heatmap. The live view is a
+  compromise between frame rate and accuracy; the settled pose is what
+  the wing's numbers should be quoted from.
 - **Live shape HUD** — one line under the solver readout: span %, volume
   %, worst section deviation and where, slack %, LE dent, row loads. On
   while the tunnel runs, so slider changes answer in real time.

@@ -12,6 +12,7 @@ class QVBoxLayout;
 
 class PlaygroundAnalysisDialog;
 class PlaygroundView;
+class SettleWorker;
 
 // The Playground tab: an instrumented wind tunnel for shape fidelity (see
 // docs/playground-shape-analysis.md). The engine's companion mesh
@@ -30,6 +31,9 @@ class PlaygroundPage : public QWidget
 
 public:
     explicit PlaygroundPage(QWidget *parent = nullptr);
+    // Cancels and joins a running settle worker; the per-frame cancel
+    // makes the join a matter of milliseconds.
+    ~PlaygroundPage() override;
 
     // Reads the engine's lep-sim.json immediately (preview output
     // directories are temporary); the mesh is assembled into the
@@ -62,6 +66,10 @@ private:
     void ensureView();
     void loadIfPending();
     void setSweepActive(bool active);
+    // The max-quality converge-and-stop run: Settle starts it, the same
+    // button cancels it, finishSettle() adopts the result and pauses.
+    void toggleSettle();
+    void finishSettle();
     // Re-reads the retained mesh so a changed preference takes effect
     // without another engine run. The wing returns to its rest pose.
     void rebuildSimulation();
@@ -96,6 +104,10 @@ private:
     QLabel *flightLabel_ = nullptr;
     QTimer *flightTimer_ = nullptr;
     QLabel *shapeLabel_ = nullptr;
+    QPushButton *settleButton_ = nullptr;
+    // Non-null exactly while a settle worker runs; parented to the page,
+    // deleteLater'd from finishSettle.
+    SettleWorker *settleWorker_ = nullptr;
     // At most one analysis dialog, so two sweeps can never race each
     // other for the pause on the live solver.
     PlaygroundAnalysisDialog *analysisDialog_ = nullptr;

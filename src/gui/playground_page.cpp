@@ -23,12 +23,14 @@
 #include <QSurfaceFormat>
 #include <QPushButton>
 #include <QSlider>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVector3D>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -136,7 +138,8 @@ public:
         // geometry the instruments compare against.
         baseline_ = lep::playground::captureShapeBaseline(sim_);
         deviationField_.clear();
-        slackField_.clear();
+        nodeTensile_.clear();
+        nodeSlack_.clear();
         refreshColourField();
 
         const softwing::Vec3 low = sim_.boundsLow;
@@ -199,6 +202,71 @@ public:
         if (!mesh_.nodes.empty()) {
             rebuildBody();
         }
+    }
+
+    // The refined mesh the body was built from, for a worker that wants
+    // to build an identical twin without re-refining.
+    const SimMesh &simMesh() const { return mesh_; }
+
+    // Takes over the pose, motion and aerodynamic bookkeeping of a body
+    // settled elsewhere — the max-quality settle worker's result. The
+    // twin was built from the same mesh and options, so its node,
+    // constraint and triangle tables are a prefix of the live ones (a
+    // grab may have appended an anchor node and cables past the prefix;
+    // those stay untouched, and the grab cable is slack when no grab is
+    // held). Copying the constraint multipliers keeps the line-tension
+    // readouts honest while the sim sits paused for review; copying the
+    // alpha filter state keeps the HUD's angle honest too. Returns an
+    // error when the tables do not line up (the live body was rebuilt
+    // to a different mesh while the worker ran).
+    QString adoptSettledState(const SimBody &settled)
+    {
+        if (!sim_.body || !settled.body) {
+            return QStringLiteral("no body to adopt into");
+        }
+        auto &nodes = sim_.body->nodes();
+        const auto &settledNodes = settled.body->nodes();
+        if (settled.canopyNodeCount != sim_.canopyNodeCount
+            || settledNodes.size() > nodes.size()) {
+            return QStringLiteral(
+                "the wing changed while settling — result discarded");
+        }
+        for (std::size_t index = 0; index < settledNodes.size(); ++index) {
+            nodes[index].position = settledNodes[index].position;
+            nodes[index].previousPosition =
+                settledNodes[index].previousPosition;
+            nodes[index].velocity = settledNodes[index].velocity;
+        }
+        auto &constraints = sim_.body->constraints();
+        const auto &settledConstraints = settled.body->constraints();
+        const std::size_t constraintCount =
+            std::min(constraints.size(), settledConstraints.size());
+        for (std::size_t index = 0; index < constraintCount; ++index) {
+            constraints[index].accumulatedLambda =
+                settledConstraints[index].accumulatedLambda;
+        }
+        const auto &settledTriangles = settled.body->triangles();
+        const std::size_t triangleCount = std::min(
+            sim_.skinTriangleCount, settledTriangles.size());
+        for (std::size_t face = 0; face < triangleCount; ++face) {
+            sim_.body->setFacePressureDifference(
+                face, settledTriangles[face].pressureDifference);
+        }
+        sim_.ribLiftCoefficient = settled.ribLiftCoefficient;
+        sim_.alphaFilteredRadians = settled.alphaFilteredRadians;
+        sim_.alphaSlowRadians = settled.alphaSlowRadians;
+        sim_.alphaRateRadiansPerSecond = settled.alphaRateRadiansPerSecond;
+        sim_.lastForceResidual = settled.lastForceResidual;
+        sim_.lastPitchResidual = settled.lastPitchResidual;
+        sim_.lastAeroForce = settled.lastAeroForce;
+        sim_.lastLift = settled.lastLift;
+        sim_.lastDrag = settled.lastDrag;
+        sim_.lastGlideRatio = settled.lastGlideRatio;
+        sim_.lastAlphaDegrees = settled.lastAlphaDegrees;
+        sim_.lastAirspeed = settled.lastAirspeed;
+        refreshColourField();
+        update();
+        return {};
     }
 
     // Fly mode: the cursor's position over the view IS the brake input.
@@ -455,25 +523,17 @@ public:
         return peak;
     }
 
+    // Legend peaks over the cached fields — fresh only while their mode is
+    // active, which is the only time the legend quotes them.
     double peakStrain() const
     {
-        if (!sim_.body) {
-            return 0.0;
-        }
-        const auto &nodes = sim_.body->nodes();
-        const auto &constraints = sim_.body->constraints();
-        double peak = 0.0;
-        for (const RenderFace &face : sim_.renderFaces) {
-            if (surfaceVisible_[static_cast<std::size_t>(face.surface)]
-                && colourable(face)) {
-                peak = std::max(peak, faceStrain(face, nodes, constraints));
-            }
+        float peak = 0.0F;
+        for (const float strain : nodeTensile_) {
+            peak = std::max(peak, strain);
         }
         return peak;
     }
 
-    // Legend peaks over the cached fields — fresh only while their mode is
-    // active, which is the only time the legend quotes them.
     double peakDeviation() const
     {
         float peak = 0.0F;
@@ -488,7 +548,7 @@ public:
     double peakSlackCompression() const
     {
         float worst = 0.0F;
-        for (const float strain : slackField_) {
+        for (const float strain : nodeSlack_) {
             worst = std::min(worst, strain);
         }
         return -worst;
@@ -614,9 +674,7 @@ protected:
         vertexScratch_.clear();
         vertexScratch_.reserve(sim_.renderFaces.size() * 27);
         const auto &constraints = sim_.body->constraints();
-        for (std::size_t faceIndex = 0; faceIndex < sim_.renderFaces.size();
-             ++faceIndex) {
-            const RenderFace &face = sim_.renderFaces[faceIndex];
+        for (const RenderFace &face : sim_.renderFaces) {
             if (!surfaceVisible_[static_cast<std::size_t>(face.surface)]) {
                 continue;
             }
@@ -630,34 +688,39 @@ protected:
             // Stress and Slack keep the colourable() gate (a simple rib's
             // colour would be spoke tension dressed up as rib stress);
             // Deviation is per node and honest everywhere the baseline
-            // reaches, so it tints ungated.
-            QVector3D tint = uncolouredTint;
-            switch (colorMode_) {
-            case ColorMode::Stress:
-                if (colourable(face)) {
-                    tint = stressTint(faceStrain(face, nodes, constraints));
-                }
-                break;
-            case ColorMode::Slack:
-                if (colourable(face) && faceIndex < slackField_.size()
-                    && slackField_[faceIndex] < 0.0F) {
-                    tint = rampTint(-slackField_[faceIndex]
-                                    / std::max(stressFullScale_, 1.0e-6));
-                }
-                break;
-            case ColorMode::Plain:
-            case ColorMode::Deviation:
-                break;
-            }
+            // reaches, so it tints ungated. All three modes tint per
+            // VERTEX from per-node fields: a face-flat colour renders the
+            // skin as facets, the node-scattered same data shades
+            // smoothly across them.
+            const bool faceColoured =
+                colorMode_ == ColorMode::Deviation
+                || (colorMode_ != ColorMode::Plain && colourable(face));
             for (int corner = 0; corner < 3; ++corner) {
                 const std::size_t node = face.nodes[
                     static_cast<std::size_t>(corner)];
-                if (colorMode_ == ColorMode::Deviation) {
-                    const double deviation =
-                        node < deviationField_.size()
-                            ? deviationField_[node]
-                            : 0.0;
-                    tint = rampTint(deviation / deviationFullScaleMetres());
+                QVector3D tint = uncolouredTint;
+                if (faceColoured) {
+                    switch (colorMode_) {
+                    case ColorMode::Stress:
+                        tint = stressTint(node < nodeTensile_.size()
+                                              ? nodeTensile_[node]
+                                              : 0.0F);
+                        break;
+                    case ColorMode::Slack:
+                        tint = rampTint(
+                            (node < nodeSlack_.size() ? -nodeSlack_[node]
+                                                      : 0.0F)
+                            / std::max(stressFullScale_, 1.0e-6));
+                        break;
+                    case ColorMode::Deviation:
+                        tint = rampTint((node < deviationField_.size()
+                                             ? deviationField_[node]
+                                             : 0.0F)
+                                        / deviationFullScaleMetres());
+                        break;
+                    case ColorMode::Plain:
+                        break;
+                    }
                 }
                 const softwing::Vec3 &point = nodes[node].position;
                 vertexScratch_.push_back(static_cast<float>(point.x));
@@ -881,33 +944,6 @@ private:
         return face.surface != SimSurface::Rib || buildOptions_.detailedRibs;
     }
 
-    // Tensile only: slack fabric carries no load, so edges shorter than
-    // their rest length read as zero rather than as compression.
-    static double faceStrain(
-        const RenderFace &face,
-        const std::vector<softwing::Node> &nodes,
-        const std::vector<softwing::DistanceConstraint> &constraints)
-    {
-        double peak = 0.0;
-        for (const std::size_t side : face.edges) {
-            if (side == noConstraint || side >= constraints.size()) {
-                continue;
-            }
-            const softwing::DistanceConstraint &constraint =
-                constraints[side];
-            if (constraint.restLength <= 0.0) {
-                continue;
-            }
-            const double current =
-                length(nodes[constraint.b].position
-                       - nodes[constraint.a].position);
-            peak = std::max(
-                peak,
-                (current - constraint.restLength) / constraint.restLength);
-        }
-        return peak;
-    }
-
     // Cable tension in newtons. XPBD's multiplier is an impulse over the
     // substep, so dividing by the substep squared recovers the force; the
     // sign convention makes a tensile multiplier negative, hence the
@@ -998,8 +1034,12 @@ private:
             && !baseline_.restPositions.empty()) {
             lep::playground::nodeDeviationField(sim_, baseline_,
                                                 deviationField_);
-        } else if (colorMode_ == ColorMode::Slack) {
-            lep::playground::faceSlackField(sim_, slackField_);
+        } else if (colorMode_ == ColorMode::Slack
+                   || colorMode_ == ColorMode::Stress) {
+            lep::playground::nodeStrainFields(sim_,
+                                              buildOptions_.detailedRibs,
+                                              nodeTensile_,
+                                              nodeSlack_);
         }
         fieldSteps_ = 0;
     }
@@ -1077,8 +1117,7 @@ private:
     {
         try {
             lep::playground::stepSimulation(sim_, controls_);
-            if ((colorMode_ == ColorMode::Deviation
-                 || colorMode_ == ColorMode::Slack)
+            if (colorMode_ != ColorMode::Plain
                 && ++fieldSteps_ >= fieldRefreshSteps) {
                 refreshColourField();
             }
@@ -1107,7 +1146,8 @@ private:
     // reallocated per frame.
     lep::playground::ShapeBaseline baseline_;
     std::vector<float> deviationField_;
-    std::vector<float> slackField_;
+    std::vector<float> nodeTensile_;
+    std::vector<float> nodeSlack_;
     int fieldSteps_ = 0;
     // The interactive grab: anchor position accumulated in doubles so a
     // long drag does not drift, depth fixed at pick time.
@@ -1127,6 +1167,71 @@ private:
     float yaw_ = 30.0F;
     float pitch_ = -60.0F;
     QPointF lastMouse_;
+};
+
+// Settles an identical twin of the live wing to convergence at the
+// Accurate solver setting on a worker thread, so the user can start a
+// long computation and review the settled result later. A twin rather
+// than the live body: the live body belongs to the GUI thread and its
+// 16 ms timer, and stealing it would either block the UI or race it.
+// QThread's inherited finished() signal is the only signalling needed,
+// so the class carries no Q_OBJECT.
+class SettleWorker : public QThread
+{
+public:
+    SettleWorker(lep::playground::SimMesh mesh,
+                 const SimBuildOptions &options,
+                 const SimControls &controls,
+                 QObject *parent)
+        : QThread(parent),
+          mesh_(std::move(mesh)),
+          options_(options),
+          controls_(controls)
+    {
+    }
+
+    // Polled every settle frame, so a cancel lands in milliseconds.
+    void requestCancel() { cancelled_.store(true, std::memory_order_relaxed); }
+    [[nodiscard]] bool wasCancelled() const
+    {
+        return cancelled_.load(std::memory_order_relaxed);
+    }
+
+    // GUI thread, after finished() only.
+    [[nodiscard]] const SimBody &settledBody() const { return sim_; }
+    [[nodiscard]] const lep::playground::SettleResult &result() const
+    {
+        return result_;
+    }
+    [[nodiscard]] const QString &error() const { return error_; }
+
+    void run() override
+    {
+        try {
+            sim_ = buildSimBody(mesh_, options_, controls_);
+            const lep::playground::ShapeBaseline baseline =
+                lep::playground::captureShapeBaseline(sim_);
+            result_ = lep::playground::settleAndMeasure(
+                sim_, controls_, baseline, settleBudgetSeconds,
+                &cancelled_);
+        } catch (const std::exception &failure) {
+            error_ = QString::fromUtf8(failure.what());
+        }
+    }
+
+    // Generous: convergence stops the run long before this on a healthy
+    // wing (gnuC2 settles in ~3 s simulated); the budget only bounds a
+    // wing that never converges.
+    static constexpr double settleBudgetSeconds = 30.0;
+
+private:
+    lep::playground::SimMesh mesh_;
+    SimBuildOptions options_;
+    SimControls controls_;
+    std::atomic<bool> cancelled_{false};
+    SimBody sim_;
+    lep::playground::SettleResult result_;
+    QString error_;
 };
 
 PlaygroundPage::PlaygroundPage(QWidget *parent)
@@ -1259,9 +1364,17 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "brakes; a little symmetric brake steadies it."));
     flightLabel_ = new QLabel(this);
 
+    settleButton_ = new QPushButton(QStringLiteral("Settle"), this);
+    settleButton_->setToolTip(QStringLiteral(
+        "Run a twin of this wing at the Accurate solver setting (60×"
+        "4) on a worker thread until it converges, then adopt the "
+        "settled pose and pause for review. Start it, do something "
+        "else, come back to the answer."));
+
     auto *solver = new QHBoxLayout;
     solver->addWidget(new QLabel(QStringLiteral("Solver"), this));
     solver->addWidget(quality_);
+    solver->addWidget(settleButton_);
     solver->addSpacing(16);
     solver->addWidget(freeFlight_);
     solver->addWidget(flightLabel_, 1);
@@ -1354,9 +1467,14 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             flightTimer_->stop();
             flightLabel_->clear();
         }
+        // Settling to convergence is a tunnel idea; a free-flying wing
+        // glides, it does not converge.
+        settleButton_->setEnabled(!enabled && !sweepActive_);
         // The toggle rebuilt the body, which leaves the solver running.
         updateShapeTimer();
     });
+    connect(settleButton_, &QPushButton::clicked, this,
+            [this] { toggleSettle(); });
 
     // The shape HUD runs whenever the solver does — tunnel or free flight
     // alike — so slider changes answer in real time. 500 ms: measureShape
@@ -1624,10 +1742,116 @@ void PlaygroundPage::setSweepActive(bool active)
     sweepActive_ = active;
     runButton_->setEnabled(!active);
     resetButton_->setEnabled(!active);
+    // One background job at a time: the Analyse and Settle entries close
+    // while either kind runs — except the Settle button itself when the
+    // settle job is the owner, because that button is also its Cancel.
+    analyseButton_->setEnabled(!active);
+    settleButton_->setEnabled(
+        (!active && !freeFlight_->isChecked()) || settleWorker_ != nullptr);
+    // A free-flight toggle rebuilds the live body into a different
+    // structure; adopting a tunnel twin's pose into it would be nonsense,
+    // so the toggle waits the job out.
+    freeFlight_->setEnabled(!active);
     if (view_ != nullptr) {
         view_->setRunning(!active && !runButton_->isChecked());
     }
     updateShapeTimer();
+}
+
+PlaygroundPage::~PlaygroundPage()
+{
+    if (settleWorker_ != nullptr) {
+        settleWorker_->requestCancel();
+        settleWorker_->wait();
+    }
+}
+
+void PlaygroundPage::toggleSettle()
+{
+    if (settleWorker_ != nullptr) {
+        settleWorker_->requestCancel();
+        return;
+    }
+    if (view_ == nullptr || !view_->hasBody() || sweepActive_) {
+        return;
+    }
+    // The twin gets the live controls with the solver budget forced to
+    // the Accurate setting — the whole point of settling offline is to
+    // afford the quality the interactive frame rate cannot.
+    SimControls controls = view_->controls();
+    controls.substeps = lep::playground::solverQualities[2].substeps;
+    controls.constraintIterations =
+        lep::playground::solverQualities[2].iterations;
+    controls.workerThreads = lep::playground::playgroundWorkerThreads();
+    controls.performanceProfile = nullptr;
+    SimBuildOptions options;
+    options.detailedRibs = detailedRibs_;
+    options.ribLayers = defaultRibLayers + 2 * (subdivision_ - 1);
+    options.ribStationSplit = defaultRibStationSplit + subdivision_ - 1;
+    settleWorker_ =
+        new SettleWorker(view_->simMesh(), options, controls, this);
+    connect(settleWorker_, &QThread::finished, this,
+            [this] { finishSettle(); });
+    setSweepActive(true);
+    settleButton_->setText(QStringLiteral("Cancel"));
+    status_->setText(QStringLiteral(
+        "Settling at 60×4 on a worker thread — the view resumes with "
+        "the converged pose…"));
+    settleWorker_->start();
+}
+
+void PlaygroundPage::finishSettle()
+{
+    SettleWorker *worker = settleWorker_;
+    settleWorker_ = nullptr;
+    settleButton_->setText(QStringLiteral("Settle"));
+    if (worker == nullptr) {
+        return;
+    }
+    QString outcome;
+    if (worker->wasCancelled()) {
+        outcome = QStringLiteral("Settle cancelled.");
+    } else if (!worker->error().isEmpty()) {
+        outcome = QStringLiteral("Settle failed: %1").arg(worker->error());
+    } else if (view_ != nullptr) {
+        const QString adoptError =
+            view_->adoptSettledState(worker->settledBody());
+        if (!adoptError.isEmpty()) {
+            outcome = QStringLiteral("Settle: %1").arg(adoptError);
+        } else {
+            const lep::playground::SettleResult &result = worker->result();
+            outcome =
+                result.settled
+                    ? QStringLiteral(
+                          "Settled at 60×4 in %1 s simulated — paused "
+                          "for review (%2 flag%3).")
+                          .arg(result.simulatedSeconds, 0, 'f', 1)
+                          .arg(result.report.flags.size())
+                          .arg(result.report.flags.size() == 1
+                                   ? QString()
+                                   : QStringLiteral("s"))
+                    : QStringLiteral(
+                          "Did not converge within %1 s simulated — "
+                          "adopted the final pose anyway, paused for "
+                          "review.")
+                          .arg(SettleWorker::settleBudgetSeconds, 0, 'f',
+                               0);
+            // Paused ON PURPOSE: the settled pose is the deliverable.
+            // Checked == paused, so the run button reads "Run" and one
+            // click resumes.
+            runButton_->setChecked(true);
+        }
+    }
+    worker->deleteLater();
+    setSweepActive(false);
+    status_->setText(outcome);
+    // The HUD timer is stopped while paused; one explicit refresh shows
+    // the settled numbers immediately.
+    if (view_ != nullptr) {
+        const QString readout = view_->shapeReadout();
+        shapeLabel_->setText(readout);
+        shapeLabel_->setToolTip(readout);
+    }
 }
 
 void PlaygroundPage::setSimMeshPath(const QString &path)
