@@ -26,6 +26,14 @@ constexpr double kAirDensity = 1.225;   // kg/m^3, for the CSV airspeed
 constexpr double kSlackRiserNewtons = 0.5;
 // Nose nodes for the leading-edge dent: everything forward of 10% chord.
 constexpr double kNoseChordFraction = 0.10;
+// Strain is only meaningful on fabric-scale edges. The rib webs pin
+// interpolated nodes onto the skin with ties whose rest length can be
+// sub-micron (a station landing a hair away from an outline node), and
+// (length - rest)/rest on those reads astronomically — a peak of 6e15%
+// reached a legend before this floor existed. Mesh-welded fabric edges
+// are at least half a millimetre by construction, so anything shorter
+// is a pin, not cloth.
+constexpr double kMinimumStrainRestLength = 5.0e-4;
 
 using softwing::Vec3;
 
@@ -719,8 +727,8 @@ ShapeReport measureShape(const SimBody &sim,
                 counted[edge] = 1;
                 const softwing::DistanceConstraint &tie =
                     constraints[edge];
-                if (tie.restLength <= 0.0 || tie.a >= nodes.size()
-                    || tie.b >= nodes.size()) {
+                if (tie.restLength < kMinimumStrainRestLength
+                    || tie.a >= nodes.size() || tie.b >= nodes.size()) {
                     continue;
                 }
                 const double strain =
@@ -1123,8 +1131,8 @@ void faceSlackField(const SimBody &sim, std::vector<float> &strainOut)
                 continue;
             }
             const softwing::DistanceConstraint &tie = constraints[edge];
-            if (tie.restLength <= 0.0 || tie.a >= nodes.size()
-                || tie.b >= nodes.size()) {
+            if (tie.restLength < kMinimumStrainRestLength
+                || tie.a >= nodes.size() || tie.b >= nodes.size()) {
                 continue;
             }
             const double strain =
@@ -1163,8 +1171,8 @@ void nodeStrainFields(const SimBody &sim,
                 continue;
             }
             const softwing::DistanceConstraint &tie = constraints[edge];
-            if (tie.restLength <= 0.0 || tie.a >= nodes.size()
-                || tie.b >= nodes.size()) {
+            if (tie.restLength < kMinimumStrainRestLength
+                || tie.a >= nodes.size() || tie.b >= nodes.size()) {
                 continue;
             }
             const auto strain = static_cast<float>(
@@ -1179,6 +1187,54 @@ void nodeStrainFields(const SimBody &sim,
             }
         }
     }
+}
+
+SettleMonitor::SettleMonitor(double maxSeconds) : maxSeconds_(maxSeconds)
+{
+}
+
+bool SettleMonitor::frameStepped(const SimBody &sim,
+                                 double pressurePascal)
+{
+    seconds_ += simulationTimeStep;
+    ++frame_;
+    if (frame_ % 15 != 0) {
+        return seconds_ >= maxSeconds_;
+    }
+    agitation_ = agitationOf(sim);
+    // A wing that reads quiet in the first moments has not yet answered
+    // the tighter solve the settle exists for; give the higher quality
+    // two simulated seconds of authority before any verdict.
+    if (seconds_ < 2.0) {
+        return false;
+    }
+    if (agitation_ < settleQuiescenceTarget(pressurePascal)) {
+        settled_ = true;
+        return true;
+    }
+    constexpr std::size_t probeWindow = 8;
+    agitationProbes_.push_back(agitation_);
+    forceProbes_.push_back(length(sim.lastAeroForce));
+    if (agitationProbes_.size() > probeWindow) {
+        agitationProbes_.erase(agitationProbes_.begin());
+        forceProbes_.erase(forceProbes_.begin());
+    }
+    if (agitationProbes_.size() == probeWindow) {
+        const auto spreadOf = [](const std::vector<double> &probes) {
+            const auto [low, high] =
+                std::minmax_element(probes.begin(), probes.end());
+            const double mean =
+                std::accumulate(probes.begin(), probes.end(), 0.0)
+                / static_cast<double>(probes.size());
+            return mean > 0.0 ? (*high - *low) / mean : 0.0;
+        };
+        if (spreadOf(agitationProbes_) < settleStationarySpread
+            && spreadOf(forceProbes_) < settleStationaryForceSpread) {
+            settled_ = true;
+            return true;
+        }
+    }
+    return seconds_ >= maxSeconds_;
 }
 
 double settleQuiescenceTarget(double pressurePascal)

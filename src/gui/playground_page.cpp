@@ -24,7 +24,7 @@
 #include <QSurfaceFormat>
 #include <QPushButton>
 #include <QSlider>
-#include <QThread>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVector3D>
@@ -80,6 +80,9 @@ constexpr double maximumLineFullScaleNewtons = 500.0;
 constexpr int fieldRefreshSteps = 15;
 // How close a Ctrl-click must land to a projected line junction to grab it.
 constexpr double grabPickRadiusPixels = 14.0;
+// Simulated-time bound on the foreground settle; convergence normally
+// stops it far earlier.
+constexpr double kSettleBudgetSeconds = 30.0;
 // Grey for faces that are drawn while stress colouring is on but carry no
 // meaningful stress of their own — the simple rib web.
 const QVector3D uncolouredTint(0.58F, 0.60F, 0.63F);
@@ -224,71 +227,6 @@ public:
         }
     }
 
-    // The refined mesh the body was built from, for a worker that wants
-    // to build an identical twin without re-refining.
-    const SimMesh &simMesh() const { return mesh_; }
-
-    // Takes over the pose, motion and aerodynamic bookkeeping of a body
-    // settled elsewhere — the max-quality settle worker's result. The
-    // twin was built from the same mesh and options, so its node,
-    // constraint and triangle tables are a prefix of the live ones (a
-    // grab may have appended an anchor node and cables past the prefix;
-    // those stay untouched, and the grab cable is slack when no grab is
-    // held). Copying the constraint multipliers keeps the line-tension
-    // readouts honest while the sim sits paused for review; copying the
-    // alpha filter state keeps the HUD's angle honest too. Returns an
-    // error when the tables do not line up (the live body was rebuilt
-    // to a different mesh while the worker ran).
-    QString adoptSettledState(const SimBody &settled)
-    {
-        if (!sim_.body || !settled.body) {
-            return QStringLiteral("no body to adopt into");
-        }
-        auto &nodes = sim_.body->nodes();
-        const auto &settledNodes = settled.body->nodes();
-        if (settled.canopyNodeCount != sim_.canopyNodeCount
-            || settledNodes.size() > nodes.size()) {
-            return QStringLiteral(
-                "the wing changed while settling — result discarded");
-        }
-        for (std::size_t index = 0; index < settledNodes.size(); ++index) {
-            nodes[index].position = settledNodes[index].position;
-            nodes[index].previousPosition =
-                settledNodes[index].previousPosition;
-            nodes[index].velocity = settledNodes[index].velocity;
-        }
-        auto &constraints = sim_.body->constraints();
-        const auto &settledConstraints = settled.body->constraints();
-        const std::size_t constraintCount =
-            std::min(constraints.size(), settledConstraints.size());
-        for (std::size_t index = 0; index < constraintCount; ++index) {
-            constraints[index].accumulatedLambda =
-                settledConstraints[index].accumulatedLambda;
-        }
-        const auto &settledTriangles = settled.body->triangles();
-        const std::size_t triangleCount = std::min(
-            sim_.skinTriangleCount, settledTriangles.size());
-        for (std::size_t face = 0; face < triangleCount; ++face) {
-            sim_.body->setFacePressureDifference(
-                face, settledTriangles[face].pressureDifference);
-        }
-        sim_.ribLiftCoefficient = settled.ribLiftCoefficient;
-        sim_.alphaFilteredRadians = settled.alphaFilteredRadians;
-        sim_.alphaSlowRadians = settled.alphaSlowRadians;
-        sim_.alphaRateRadiansPerSecond = settled.alphaRateRadiansPerSecond;
-        sim_.lastForceResidual = settled.lastForceResidual;
-        sim_.lastPitchResidual = settled.lastPitchResidual;
-        sim_.lastAeroForce = settled.lastAeroForce;
-        sim_.lastLift = settled.lastLift;
-        sim_.lastDrag = settled.lastDrag;
-        sim_.lastGlideRatio = settled.lastGlideRatio;
-        sim_.lastAlphaDegrees = settled.lastAlphaDegrees;
-        sim_.lastAirspeed = settled.lastAirspeed;
-        refreshColourField();
-        update();
-        return {};
-    }
-
     // Fly mode: the cursor's position over the view IS the brake input.
     // Top centre is hands-up; straight down pulls both brakes; moving
     // toward a side releases the opposite brake, so the pair gives full
@@ -430,6 +368,29 @@ public:
     // Snapshot for the analysis dialog, which drives its own bodies with
     // the tunnel's exact settings.
     SimControls controls() const { return controls_; }
+
+    // For the page's foreground settle: one simulation frame, outside
+    // the 16 ms timer's pacing. False when the solver threw (the error
+    // is in lastSimError and the run must stop).
+    bool stepOnce()
+    {
+        stepSimulation();
+        return simError_.isEmpty();
+    }
+
+    // The live body against sim state for the settle verdict: the
+    // monitor reads agitation and the resultant off the body itself.
+    const SimBody &simBody() const { return sim_; }
+
+    // A full instrument pass on the current pose, for the settle's Done
+    // line. Empty-report when no body or baseline exists.
+    lep::playground::ShapeReport currentShapeReport() const
+    {
+        if (!sim_.body || baseline_.restPositions.empty()) {
+            return {};
+        }
+        return lep::playground::measureShape(sim_, controls_, baseline_);
+    }
 
     // One line for the shape HUD: the live wing measured against its
     // design shape, in the units a designer reads. Empty until a body and
@@ -1355,96 +1316,6 @@ private:
     const PlaygroundView *view_;
 };
 
-// Settles an identical twin of the live wing to convergence at the
-// Accurate solver setting on a worker thread, so the user can start a
-// long computation and review the settled result later. A twin rather
-// than the live body: the live body belongs to the GUI thread and its
-// 16 ms timer, and stealing it would either block the UI or race it.
-// QThread's inherited finished() signal is the only signalling needed,
-// so the class carries no Q_OBJECT.
-class SettleWorker : public QThread
-{
-public:
-    SettleWorker(lep::playground::SimMesh mesh,
-                 const SimBuildOptions &options,
-                 const SimControls &controls,
-                 QObject *parent)
-        : QThread(parent),
-          mesh_(std::move(mesh)),
-          options_(options),
-          controls_(controls)
-    {
-    }
-
-    // Polled every settle frame, so a cancel lands in milliseconds.
-    void requestCancel() { cancelled_.store(true, std::memory_order_relaxed); }
-    [[nodiscard]] bool wasCancelled() const
-    {
-        return cancelled_.load(std::memory_order_relaxed);
-    }
-
-    // Live progress for the status ticker, written from the worker at
-    // every quiescence probe.
-    [[nodiscard]] double progressSimSeconds() const
-    {
-        return progressSimSeconds_.load(std::memory_order_relaxed);
-    }
-    [[nodiscard]] double progressAgitation() const
-    {
-        return progressAgitation_.load(std::memory_order_relaxed);
-    }
-    [[nodiscard]] double quiescenceTarget() const
-    {
-        return lep::playground::settleQuiescenceTarget(
-            controls_.pressurePascal);
-    }
-
-    // GUI thread, after finished() only.
-    [[nodiscard]] const SimBody &settledBody() const { return sim_; }
-    [[nodiscard]] const lep::playground::SettleResult &result() const
-    {
-        return result_;
-    }
-    [[nodiscard]] const QString &error() const { return error_; }
-
-    void run() override
-    {
-        try {
-            sim_ = buildSimBody(mesh_, options_, controls_);
-            const lep::playground::ShapeBaseline baseline =
-                lep::playground::captureShapeBaseline(sim_);
-            const std::function<void(double, double)> progress =
-                [this](double seconds, double agitation) {
-                    progressSimSeconds_.store(seconds,
-                                              std::memory_order_relaxed);
-                    progressAgitation_.store(agitation,
-                                             std::memory_order_relaxed);
-                };
-            result_ = lep::playground::settleAndMeasure(
-                sim_, controls_, baseline, settleBudgetSeconds,
-                &cancelled_, &progress);
-        } catch (const std::exception &failure) {
-            error_ = QString::fromUtf8(failure.what());
-        }
-    }
-
-    // Generous: convergence stops the run long before this on a healthy
-    // wing (gnuC2 settles in ~3 s simulated); the budget only bounds a
-    // wing that never converges.
-    static constexpr double settleBudgetSeconds = 30.0;
-
-private:
-    lep::playground::SimMesh mesh_;
-    SimBuildOptions options_;
-    SimControls controls_;
-    std::atomic<bool> cancelled_{false};
-    std::atomic<double> progressSimSeconds_{0.0};
-    std::atomic<double> progressAgitation_{0.0};
-    SimBody sim_;
-    lep::playground::SettleResult result_;
-    QString error_;
-};
-
 PlaygroundPage::PlaygroundPage(QWidget *parent)
     : QWidget(parent)
 {
@@ -1704,6 +1575,58 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         shapeLabel_->setToolTip(readout);
     });
 
+    // The foreground settle's driver. Interval 0 = run whenever the
+    // event loop is idle; each tick steps the live sim for at most ~40
+    // ms then repaints, so the wing visibly converges while Cancel, the
+    // camera and the rest of the UI stay responsive.
+    settleTimer_ = new QTimer(this);
+    settleTimer_->setInterval(0);
+    connect(settleTimer_, &QTimer::timeout, this, [this] {
+        if (!settleRunning_ || view_ == nullptr
+            || settleMonitor_ == nullptr) {
+            settleTimer_->stop();
+            return;
+        }
+        QElapsedTimer chunk;
+        chunk.start();
+        bool done = false;
+        bool failed = false;
+        while (chunk.elapsed() < 40 && !done && !failed) {
+            if (!view_->stepOnce()) {
+                failed = true;
+                break;
+            }
+            done = settleMonitor_->frameStepped(
+                view_->simBody(), view_->controls().pressurePascal);
+        }
+        view_->update();
+        ++settleStatusTick_;
+        if (settleStatusTick_ % 6 == 0) {
+            status_->setText(
+                QStringLiteral("Settling at 60×4… %1 of max %2 s "
+                               "simulated · agitation %3 mm/s (quiet "
+                               "below %4)")
+                    .arg(settleMonitor_->simulatedSeconds(), 0, 'f', 1)
+                    .arg(kSettleBudgetSeconds, 0, 'f', 0)
+                    .arg(settleMonitor_->lastAgitation() * 1000.0, 0,
+                         'f', 0)
+                    .arg(lep::playground::settleQuiescenceTarget(
+                             view_->controls().pressurePascal)
+                             * 1000.0,
+                         0, 'f', 0));
+        }
+        // The shape HUD keeps measuring during the show — the data is
+        // the point of watching.
+        if (settleStatusTick_ % 12 == 0) {
+            const QString readout = view_->shapeReadout();
+            shapeLabel_->setText(readout);
+            shapeLabel_->setToolTip(readout);
+        }
+        if (failed || done) {
+            finishSettle(false);
+        }
+    });
+
     connect(flightLoad_, &QCheckBox::toggled, this, [this](bool enabled) {
         if (view_ != nullptr) {
             view_->setFlightLoad(enabled);
@@ -1921,15 +1844,14 @@ void PlaygroundPage::setSweepActive(bool active)
     sweepActive_ = active;
     runButton_->setEnabled(!active);
     resetButton_->setEnabled(!active);
-    // One background job at a time: the Analyse and Settle entries close
-    // while either kind runs — except the Settle button itself when the
-    // settle job is the owner, because that button is also its Cancel.
+    // One job at a time: the Analyse and Settle entries close while
+    // either kind runs — except the Settle button itself when the
+    // settle is the owner, because that button is also its Cancel.
     analyseButton_->setEnabled(!active);
     settleButton_->setEnabled(
-        (!active && !freeFlight_->isChecked()) || settleWorker_ != nullptr);
+        (!active && !freeFlight_->isChecked()) || settleRunning_);
     // A free-flight toggle rebuilds the live body into a different
-    // structure; adopting a tunnel twin's pose into it would be nonsense,
-    // so the toggle waits the job out.
+    // structure mid-run; the toggle waits the job out.
     freeFlight_->setEnabled(!active);
     if (view_ != nullptr) {
         view_->setRunning(!active && !runButton_->isChecked());
@@ -1937,135 +1859,98 @@ void PlaygroundPage::setSweepActive(bool active)
     updateShapeTimer();
 }
 
-PlaygroundPage::~PlaygroundPage()
-{
-    if (settleWorker_ != nullptr) {
-        settleWorker_->requestCancel();
-        settleWorker_->wait();
-    }
-}
+PlaygroundPage::~PlaygroundPage() = default;
 
 void PlaygroundPage::toggleSettle()
 {
-    if (settleWorker_ != nullptr) {
-        settleWorker_->requestCancel();
+    if (settleRunning_) {
+        finishSettle(true);
         return;
     }
     if (view_ == nullptr || !view_->hasBody() || sweepActive_) {
         return;
     }
-    // The twin gets the live controls with the solver budget forced to
-    // the Accurate setting — the whole point of settling offline is to
-    // afford the quality the interactive frame rate cannot.
-    SimControls controls = view_->controls();
-    controls.substeps = lep::playground::solverQualities[2].substeps;
-    controls.constraintIterations =
-        lep::playground::solverQualities[2].iterations;
-    controls.workerThreads = lep::playground::playgroundWorkerThreads();
-    controls.performanceProfile = nullptr;
-    SimBuildOptions options;
-    options.detailedRibs = detailedRibs_;
-    options.ribLayers = defaultRibLayers + 2 * (subdivision_ - 1);
-    options.ribStationSplit = defaultRibStationSplit + subdivision_ - 1;
-    settleWorker_ =
-        new SettleWorker(view_->simMesh(), options, controls, this);
-    connect(settleWorker_, &QThread::finished, this,
-            [this] { finishSettle(); });
+    settleRunning_ = true;
+    settleStatusTick_ = 0;
+    settleMonitor_ = std::make_unique<lep::playground::SettleMonitor>(
+        kSettleBudgetSeconds);
+    // The Accurate solver budget, visibly: the combo itself moves (and
+    // is restored on finish) — settling exists to afford the quality
+    // the interactive frame rate cannot.
+    settleRestoreQuality_ = quality_->currentIndex();
+    quality_->setCurrentIndex(2);
+    // setSweepActive stops the 16 ms pacing timer; the settle timer
+    // then steps flat out on this thread in bounded chunks, so the user
+    // WATCHES the wing converge under whatever heatmap is active
+    // instead of staring at a progress line.
     setSweepActive(true);
     settleButton_->setText(QStringLiteral("Cancel"));
-    status_->setText(QStringLiteral(
-        "Settling in the background at 60×4…"));
-    // Live progress in the status line. The convergence-relevant number
-    // is the agitation falling toward its target, so that is the
-    // "progress bar"; the simulated clock against the budget bounds it.
-    // The ticker is parented to the worker and dies with it.
-    auto *ticker = new QTimer(settleWorker_);
-    ticker->setInterval(500);
-    connect(ticker, &QTimer::timeout, this, [this] {
-        if (settleWorker_ == nullptr) {
-            return;
-        }
-        const double seconds = settleWorker_->progressSimSeconds();
-        if (seconds <= 0.0) {
-            return;   // still building the twin
-        }
-        status_->setText(
-            QStringLiteral("Settling in the background at 60×4… %1 of "
-                           "max %2 s simulated · agitation %3 mm/s "
-                           "(quiet below %4)")
-                .arg(seconds, 0, 'f', 1)
-                .arg(SettleWorker::settleBudgetSeconds, 0, 'f', 0)
-                .arg(settleWorker_->progressAgitation() * 1000.0, 0, 'f',
-                     0)
-                .arg(settleWorker_->quiescenceTarget() * 1000.0, 0, 'f',
-                     0));
-    });
-    ticker->start();
-    settleWorker_->start();
+    status_->setText(QStringLiteral("Settling at 60×4…"));
+    settleTimer_->start();
 }
 
-void PlaygroundPage::finishSettle()
+void PlaygroundPage::finishSettle(bool cancelled)
 {
-    SettleWorker *worker = settleWorker_;
-    settleWorker_ = nullptr;
-    settleButton_->setText(QStringLiteral("Settle"));
-    if (worker == nullptr) {
+    settleTimer_->stop();
+    if (!settleRunning_) {
         return;
     }
-    QString outcome;
-    if (worker->wasCancelled()) {
-        outcome = QStringLiteral("Settle cancelled.");
-    } else if (!worker->error().isEmpty()) {
-        outcome = QStringLiteral("Settle failed: %1").arg(worker->error());
-    } else if (view_ != nullptr) {
-        const QString adoptError =
-            view_->adoptSettledState(worker->settledBody());
-        if (!adoptError.isEmpty()) {
-            outcome = QStringLiteral("Settle: %1").arg(adoptError);
-        } else {
-            // The Done message earns its place with the numbers a
-            // designer would ask for first; the HUD below carries the
-            // full instrument line.
-            const lep::playground::SettleResult &result = worker->result();
-            const lep::playground::ShapeReport &report = result.report;
-            QString flagText;
-            if (report.flags.empty()) {
-                flagText = QStringLiteral("no flags");
-            } else {
-                QStringList names;
-                for (const auto &flag : report.flags) {
-                    names << lep::playground::shapeFlagName(flag.flag);
-                }
-                flagText = QStringLiteral("⚠ ") + names.join(
-                               QStringLiteral(", "));
-            }
-            const QString headline =
-                result.settled
-                    ? QStringLiteral("Done: settled at 60×4 in %1 s "
-                                     "simulated")
-                          .arg(result.simulatedSeconds, 0, 'f', 1)
-                    : QStringLiteral("Done: did not converge within %1 s "
-                                     "simulated (final pose adopted)")
-                          .arg(SettleWorker::settleBudgetSeconds, 0, 'f',
-                               0);
-            outcome =
-                QStringLiteral(
-                    "%1 · L/D %2 · lift %3 N · worst deviation %4 mm @ "
-                    "rib %5 · %6 — paused for review, Run resumes.")
-                    .arg(headline)
-                    .arg(report.glideRatio, 0, 'f', 2)
-                    .arg(report.liftNewtons, 0, 'f', 0)
-                    .arg(report.worstDeviationMetres * 1000.0, 0, 'f', 0)
-                    .arg(static_cast<qulonglong>(
-                        report.worstDeviationRib))
-                    .arg(flagText);
-            // Paused ON PURPOSE: the settled pose is the deliverable.
-            // Checked == paused, so the run button reads "Run" and one
-            // click resumes.
-            runButton_->setChecked(true);
-        }
+    settleRunning_ = false;
+    settleButton_->setText(QStringLiteral("Settle"));
+    // The solver budget returns to the user's choice; the converged
+    // pose keeps its quality — that is state, not a setting.
+    if (settleRestoreQuality_ >= 0) {
+        quality_->setCurrentIndex(settleRestoreQuality_);
+        settleRestoreQuality_ = -1;
     }
-    worker->deleteLater();
+    QString outcome;
+    const QString solverError =
+        view_ != nullptr ? view_->lastSimError() : QString();
+    if (cancelled) {
+        outcome = QStringLiteral("Settle cancelled.");
+    } else if (!solverError.isEmpty()) {
+        outcome = QStringLiteral("Settle failed: %1").arg(solverError);
+    } else if (view_ != nullptr && settleMonitor_ != nullptr) {
+        // The Done message earns its place with the numbers a designer
+        // would ask for first; the HUD below carries the full
+        // instrument line.
+        const lep::playground::ShapeReport report =
+            view_->currentShapeReport();
+        QString flagText;
+        if (report.flags.empty()) {
+            flagText = QStringLiteral("no flags");
+        } else {
+            QStringList names;
+            for (const auto &flag : report.flags) {
+                names << lep::playground::shapeFlagName(flag.flag);
+            }
+            flagText =
+                QStringLiteral("⚠ ") + names.join(QStringLiteral(", "));
+        }
+        const QString headline =
+            settleMonitor_->settled()
+                ? QStringLiteral("Done: settled at 60×4 in %1 s "
+                                 "simulated")
+                      .arg(settleMonitor_->simulatedSeconds(), 0, 'f', 1)
+                : QStringLiteral("Done: did not converge within %1 s "
+                                 "simulated (final pose kept)")
+                      .arg(kSettleBudgetSeconds, 0, 'f', 0);
+        outcome =
+            QStringLiteral(
+                "%1 · L/D %2 · lift %3 N · worst deviation %4 mm @ "
+                "rib %5 · %6 — paused for review, Run resumes.")
+                .arg(headline)
+                .arg(report.glideRatio, 0, 'f', 2)
+                .arg(report.liftNewtons, 0, 'f', 0)
+                .arg(report.worstDeviationMetres * 1000.0, 0, 'f', 0)
+                .arg(static_cast<qulonglong>(report.worstDeviationRib))
+                .arg(flagText);
+        // Paused ON PURPOSE: the settled pose is the deliverable.
+        // Checked == paused, so the run button reads "Run" and one
+        // click resumes.
+        runButton_->setChecked(true);
+    }
+    settleMonitor_.reset();
     setSweepActive(false);
     status_->setText(outcome);
     // The HUD timer is stopped while paused; one explicit refresh shows

@@ -260,6 +260,36 @@ struct SettleResult
 // pressure, for callers displaying progress against it.
 [[nodiscard]] double settleQuiescenceTarget(double pressurePascal);
 
+// Convergence detector for a settle run driven elsewhere: the page's
+// foreground settle steps the LIVE body itself — chunked on the GUI
+// thread, so the user watches the wing converge under the heatmaps —
+// and feeds every stepped frame in here. Same verdict rules as
+// settleAndMeasure (quiescence scaled to tunnel airspeed, or
+// stationarity of agitation and resultant over a two-second window,
+// bounded by a simulated-time budget), minus the soft-start ramp: the
+// live body is already loaded, not fresh from rest.
+class SettleMonitor
+{
+public:
+    explicit SettleMonitor(double maxSeconds = 30.0);
+    // Feed after each stepped frame. Returns true once the run is over
+    // — converged, or out of budget (settled() distinguishes).
+    bool frameStepped(const SimBody &sim, double pressurePascal);
+    [[nodiscard]] bool settled() const { return settled_; }
+    [[nodiscard]] double simulatedSeconds() const { return seconds_; }
+    // The most recent probe, for a progress readout; 0 until the first.
+    [[nodiscard]] double lastAgitation() const { return agitation_; }
+
+private:
+    double maxSeconds_;
+    double seconds_ = 0.0;
+    int frame_ = 0;
+    bool settled_ = false;
+    double agitation_ = 0.0;
+    std::vector<double> agitationProbes_;
+    std::vector<double> forceProbes_;
+};
+
 // CSV serialisation for the sweep exports; header first, then one row per
 // report. Row-load columns are emitted for rows A..F unconditionally so
 // every row of the file has the same shape.

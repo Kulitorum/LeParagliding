@@ -148,13 +148,15 @@ airspeed forever).
   past full scale parks at the top of the bar with its true value
   printed, so a saturated display reads as saturated rather than
   lying. Line-tension colouring gets its own bar below.
-- **Settle** — runs a twin of the current wing at the Accurate solver
-  setting (60 substeps × 4 iterations) on a worker thread until the
-  measurement converges, then adopts the settled pose — positions, line
-  tensions, aero state — and pauses for review. Start it, do something
-  else, come back to the answer under any heatmap. The live view is a
-  compromise between frame rate and accuracy; the settled pose is what
-  the wing's numbers should be quoted from.
+- **Settle** — steps the live wing at the Accurate solver setting (60
+  substeps × 4 iterations) as fast as the machine allows, unpaced by
+  the 16 ms frame clock, until the measurement converges — IN the
+  view, so the convergence is watched happening under whatever heatmap
+  is active, with the status line counting simulated seconds and the
+  agitation falling toward its quiet target. On convergence it pauses
+  for review. The live view is a compromise between frame rate and
+  accuracy; the settled pose is what the wing's numbers should be
+  quoted from.
 - **Live shape HUD** — one line under the solver readout: span %, volume
   %, worst section deviation and where, slack %, LE dent, row loads. On
   while the tunnel runs, so slider changes answer in real time.

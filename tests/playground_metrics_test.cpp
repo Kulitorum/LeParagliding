@@ -423,6 +423,30 @@ void testCsv(const pg::SimMesh &mesh)
           "csv: flag names non-empty");
 }
 
+// A pinning tie with a near-zero rest length must never reach the
+// strain fields: (length - rest)/rest on it is astronomical however
+// healthy the wing, and one such tie once put a 6e15% peak on the
+// stress legend.
+void testTinyRestEdgeIgnored(const pg::SimMesh &mesh)
+{
+    const pg::SimControls controls = pinnedControls();
+    pg::SimBody sim = pg::buildSimBody(mesh, {}, controls);
+    // Turn a real skin edge into a degenerate pin: rest collapses to a
+    // picometre while the live geometry stays put.
+    const std::size_t edge = sim.renderFaces.front().edges[0];
+    check(edge != pg::noConstraint, "tinyrest: probe edge exists");
+    sim.body->constraints()[edge].restLength = 1.0e-12;
+    std::vector<float> tensile;
+    std::vector<float> slack;
+    pg::nodeStrainFields(sim, false, tensile, slack);
+    float worst = 0.0F;
+    for (const float strain : tensile) {
+        worst = std::max(worst, strain);
+    }
+    // Without the rest-length floor this reads ~1e9.
+    check(worst < 1.0F, "tinyrest: degenerate edge excluded from strain");
+}
+
 }  // namespace
 
 int main()
@@ -436,6 +460,7 @@ int main()
     testTensionReadout();
     testGrab(mesh);
     testCsv(mesh);
+    testTinyRestEdgeIgnored(mesh);
     if (failures > 0) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

@@ -2,6 +2,12 @@
 
 #include <QWidget>
 
+#include <memory>
+
+namespace lep::playground {
+class SettleMonitor;
+}
+
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -13,7 +19,6 @@ class QVBoxLayout;
 class LegendStrip;
 class PlaygroundAnalysisDialog;
 class PlaygroundView;
-class SettleWorker;
 
 // The Playground tab: an instrumented wind tunnel for shape fidelity (see
 // docs/playground-shape-analysis.md). The engine's companion mesh
@@ -32,8 +37,6 @@ class PlaygroundPage : public QWidget
 
 public:
     explicit PlaygroundPage(QWidget *parent = nullptr);
-    // Cancels and joins a running settle worker; the per-frame cancel
-    // makes the join a matter of milliseconds.
     ~PlaygroundPage() override;
 
     // Reads the engine's lep-sim.json immediately (preview output
@@ -67,10 +70,11 @@ private:
     void ensureView();
     void loadIfPending();
     void setSweepActive(bool active);
-    // The max-quality converge-and-stop run: Settle starts it, the same
-    // button cancels it, finishSettle() adopts the result and pauses.
+    // The max-quality converge-and-stop run, IN the live view so the
+    // user watches the wing converge: Settle starts it, the same button
+    // cancels it, finishSettle() reports and pauses for review.
     void toggleSettle();
-    void finishSettle();
+    void finishSettle(bool cancelled);
     // Re-reads the retained mesh so a changed preference takes effect
     // without another engine run. The wing returns to its rest pose.
     void rebuildSimulation();
@@ -109,9 +113,14 @@ private:
     QTimer *flightTimer_ = nullptr;
     QLabel *shapeLabel_ = nullptr;
     QPushButton *settleButton_ = nullptr;
-    // Non-null exactly while a settle worker runs; parented to the page,
-    // deleteLater'd from finishSettle.
-    SettleWorker *settleWorker_ = nullptr;
+    // The foreground settle: a zero-interval timer steps the live sim in
+    // ~40 ms chunks (the event loop breathes between chunks, so Cancel
+    // and the camera stay responsive), the monitor calls convergence.
+    QTimer *settleTimer_ = nullptr;
+    std::unique_ptr<lep::playground::SettleMonitor> settleMonitor_;
+    bool settleRunning_ = false;
+    int settleRestoreQuality_ = -1;
+    int settleStatusTick_ = 0;
     // At most one analysis dialog, so two sweeps can never race each
     // other for the pause on the live solver.
     PlaygroundAnalysisDialog *analysisDialog_ = nullptr;
