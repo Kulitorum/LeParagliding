@@ -850,6 +850,20 @@ protected:
     {
         distance_ *=
             event->angleDelta().y() > 0 ? 1.0F / 1.15F : 1.15F;
+        // Zooming changes the camera the grab depth was measured in;
+        // re-read it from the anchor's current place or the next drag
+        // step scales its cursor motion with a stale metres-per-pixel
+        // and the pulled node runs away from the cursor.
+        if (grabbing_ && sim_.body != nullptr
+            && sim_.grabAnchorNode < sim_.body->nodes().size()) {
+            const softwing::Vec3 &anchor =
+                sim_.body->nodes()[sim_.grabAnchorNode].position;
+            const QVector3D eye = viewMatrix().map(
+                QVector3D(static_cast<float>(anchor.x),
+                          static_cast<float>(anchor.y),
+                          static_cast<float>(anchor.z)));
+            grabDepth_ = std::max(-eye.z(), 0.05F);
+        }
         update();
     }
 
@@ -1256,6 +1270,12 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     // The shape instruments get a row of their own for the same
     // row-fullness reason free flight did (see above).
     shapeLabel_ = new QLabel(this);
+    // The HUD line can outgrow the window (row loads, flags, a grab
+    // readout); Ignored lets the layout clip it rather than push the
+    // Flight load and Analyse controls off the right edge. The full
+    // text rides in the tooltip.
+    shapeLabel_->setSizePolicy(QSizePolicy::Ignored,
+                               QSizePolicy::Preferred);
     flightLoad_ = makeCheck(QStringLiteral("Flight load"), true);
     flightLoad_->setToolTip(QStringLiteral(
         "Impose the wing-level polar load in the tunnel so line loads are "
@@ -1344,8 +1364,12 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     shapeTimer_ = new QTimer(this);
     shapeTimer_->setInterval(500);
     connect(shapeTimer_, &QTimer::timeout, this, [this] {
-        shapeLabel_->setText(view_ != nullptr ? view_->shapeReadout()
-                                              : QString());
+        const QString readout =
+            view_ != nullptr ? view_->shapeReadout() : QString();
+        shapeLabel_->setText(readout);
+        // The label clips (see its size policy); the tooltip carries
+        // whatever fell off the edge.
+        shapeLabel_->setToolTip(readout);
     });
 
     connect(flightLoad_, &QCheckBox::toggled, this, [this](bool enabled) {
@@ -1556,22 +1580,54 @@ void PlaygroundPage::openAnalysis()
     options.detailedRibs = detailedRibs_;
     options.ribLayers = defaultRibLayers + 2 * (subdivision_ - 1);
     options.ribStationSplit = defaultRibStationSplit + subdivision_ - 1;
+    // One dialog only: a second Analyse click raises the existing one.
+    // Two dialogs meant two sweeps racing each other for the pause on
+    // the live solver — whichever finished first resumed the tunnel
+    // under the other's still-running sweep.
+    if (analysisDialog_ != nullptr) {
+        analysisDialog_->raise();
+        analysisDialog_->activateWindow();
+        return;
+    }
     auto *dialog = new PlaygroundAnalysisDialog(
         meshData_, subdivision_, options, view_->controls(), this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
+    analysisDialog_ = dialog;
+    connect(dialog, &QObject::destroyed, this, [this] {
+        analysisDialog_ = nullptr;
+        if (sweepActive_) {
+            // A dialog killed mid-sweep still ends the sweep; its
+            // sweepRunning(false) may arrive during teardown when this
+            // connection is already severed, so the release lives here
+            // too.
+            setSweepActive(false);
+        }
+    });
     // The sweep worker and the live solver would fight over the same
     // cores; pause the tunnel for the sweep and restore whatever the run
     // button says afterwards (a sim the user paused stays paused).
     connect(dialog, &PlaygroundAnalysisDialog::sweepRunning, this,
-            [this](bool running) {
-                if (view_ == nullptr) {
-                    return;
-                }
-                view_->setRunning(running ? false
-                                          : !runButton_->isChecked());
-                updateShapeTimer();
-            });
+            [this](bool running) { setSweepActive(running); });
     dialog->show();
+}
+
+// The single gate for "a sweep owns the machine". While active the Run
+// and Reset buttons are disabled — not merely ignored, so the user can
+// see why — and every rebuild path re-asserts the pause; on release the
+// run button's own state decides, so a sim the user had paused stays
+// paused.
+void PlaygroundPage::setSweepActive(bool active)
+{
+    if (sweepActive_ == active) {
+        return;
+    }
+    sweepActive_ = active;
+    runButton_->setEnabled(!active);
+    resetButton_->setEnabled(!active);
+    if (view_ != nullptr) {
+        view_->setRunning(!active && !runButton_->isChecked());
+    }
+    updateShapeTimer();
 }
 
 void PlaygroundPage::setSimMeshPath(const QString &path)
@@ -1687,7 +1743,12 @@ void PlaygroundPage::loadIfPending()
             .arg(simulated.quads.size())
             .arg(simulated.lines.size())
             .arg(resolution));
-    // The fresh body is running whatever the run button said before.
+    // The fresh body is running whatever the run button said before —
+    // unless a sweep owns the machine, in which case the pause is
+    // re-asserted over the rebuild's auto-start.
+    if (sweepActive_) {
+        view_->setRunning(false);
+    }
     updateShapeTimer();
     // Shader problems only surface once the first frame renders; a silent
     // black view is undiagnosable, so report them here.

@@ -10,6 +10,7 @@ class QSlider;
 class QTimer;
 class QVBoxLayout;
 
+class PlaygroundAnalysisDialog;
 class PlaygroundView;
 
 // The Playground tab: an instrumented wind tunnel for shape fidelity (see
@@ -60,6 +61,7 @@ private:
     // composited GL tab (XFLR5's lazy views avoid this the same way).
     void ensureView();
     void loadIfPending();
+    void setSweepActive(bool active);
     // Re-reads the retained mesh so a changed preference takes effect
     // without another engine run. The wing returns to its rest pose.
     void rebuildSimulation();
@@ -94,6 +96,12 @@ private:
     QLabel *flightLabel_ = nullptr;
     QTimer *flightTimer_ = nullptr;
     QLabel *shapeLabel_ = nullptr;
+    // At most one analysis dialog, so two sweeps can never race each
+    // other for the pause on the live solver.
+    PlaygroundAnalysisDialog *analysisDialog_ = nullptr;
+    // While a sweep runs, the live solver stays paused whatever else
+    // happens (Run button, Reset, rebuilds): the worker owns the cores.
+    bool sweepActive_ = false;
     QCheckBox *flightLoad_ = nullptr;
     QPushButton *analyseButton_ = nullptr;
     QTimer *shapeTimer_ = nullptr;

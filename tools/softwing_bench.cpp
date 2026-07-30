@@ -391,6 +391,15 @@ int main(int argc, char **argv)
     // false, which is what keeps the timing baselines and pose checksums
     // bit-identical to runs that predate these flags.
     if (options.shape || options.shapeSweep) {
+        if (options.freeFlight) {
+            // A free-flying wing chooses its own angle of attack, so a
+            // sweep prescribing alpha would label its rows with angles
+            // the wing never flew at. Refuse rather than mislabel.
+            std::fprintf(stderr,
+                         "--shape/--shape-sweep are tunnel modes; "
+                         "--free-flight does not combine with them.\n");
+            return 2;
+        }
         controls.flightLoad = !options.noFlightLoad;
         controls.brakeLeft = options.brakeMetres;
         controls.brakeRight = options.brakeMetres;

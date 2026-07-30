@@ -2366,20 +2366,35 @@ bool beginGrab(SimBody &sim, std::size_t junctionNode)
     }
     const softwing::Vec3 place =
         sim.body->nodes()[junctionNode].position;
-    // Re-grabbing the junction the existing cable already ends on wakes
-    // that cable instead of adding another: constraints cannot be removed,
-    // so repeated grabs of one node must not accumulate.
-    const bool reuse =
-        sim.grabConstraint != noConstraint
-        && sim.body->constraints()[sim.grabConstraint].b == junctionNode;
-    if (reuse) {
-        sim.body->constraints()[sim.grabConstraint].restLength = 0.01;
+    // Re-grabbing a junction that already has a cable wakes that cable
+    // instead of adding another: constraints cannot be removed, so
+    // repeated grabs must not accumulate. The scan covers EVERY previous
+    // grab cable, not just the latest — alternating between two
+    // junctions with a last-cable-only check grew the constraint table
+    // by one dead cable per switch, and each grew colouring rebuild.
+    // Grab cables are the only constraints whose endpoint a is the
+    // anchor, so the scan cannot confuse anything else.
+    std::size_t existing = noConstraint;
+    if (sim.grabAnchorNode != noConstraint) {
+        const auto &constraints = sim.body->constraints();
+        for (std::size_t index = 0; index < constraints.size(); ++index) {
+            if (constraints[index].a == sim.grabAnchorNode
+                && constraints[index].b == junctionNode) {
+                existing = index;
+                break;
+            }
+        }
+    }
+    if (sim.grabConstraint != noConstraint
+        && sim.grabConstraint != existing) {
+        sim.body->constraints()[sim.grabConstraint].restLength = 1.0e6;
+    }
+    if (existing != noConstraint) {
+        sim.body->constraints()[existing].restLength = 0.01;
+        sim.grabConstraint = existing;
     } else {
         if (sim.grabAnchorNode == noConstraint) {
             sim.grabAnchorNode = sim.body->addFixedNode(place);
-        }
-        if (sim.grabConstraint != noConstraint) {
-            sim.body->constraints()[sim.grabConstraint].restLength = 1.0e6;
         }
         // Adding a constraint after build is safe: the colouring rebuilds
         // lazily off the count change.

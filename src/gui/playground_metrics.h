@@ -6,6 +6,7 @@
 #include <QChar>
 #include <QString>
 
+#include <atomic>
 #include <cstddef>
 #include <vector>
 
@@ -214,20 +215,25 @@ void faceSlackField(const SimBody &sim, std::vector<float> &strainOut);
                                               const SimControls &controls,
                                               std::size_t constraint);
 
-// Step until the canopy is quiescent (agitation below
-// settleAgitationMetresPerSecond) or maxSeconds of simulated time has
-// passed, then measure. Shared by the GUI sweep and the bench so any
-// reported number is reproducible headless.
+// Step until the measurement converges (quiescent, or stationary in
+// agitation and resultant) or maxSeconds of simulated time has passed,
+// then measure. Shared by the GUI sweep and the bench so any reported
+// number is reproducible headless. A caller running this on a worker
+// thread passes `cancelled`; it is polled every frame so a cancel (a
+// closing dialog, an exiting application) returns within milliseconds
+// instead of blocking a full settle.
 struct SettleResult
 {
     ShapeReport report;
     double simulatedSeconds = 0.0;
     bool settled = false;
 };
-[[nodiscard]] SettleResult settleAndMeasure(SimBody &sim,
-                                            const SimControls &controls,
-                                            const ShapeBaseline &baseline,
-                                            double maxSeconds = 6.0);
+[[nodiscard]] SettleResult settleAndMeasure(
+    SimBody &sim,
+    const SimControls &controls,
+    const ShapeBaseline &baseline,
+    double maxSeconds = 6.0,
+    const std::atomic<bool> *cancelled = nullptr);
 
 // CSV serialisation for the sweep exports; header first, then one row per
 // report. Row-load columns are emitted for rows A..F unconditionally so

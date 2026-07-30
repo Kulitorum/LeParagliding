@@ -103,8 +103,10 @@ Lines:
 - **Per-segment tension** read from the XPBD accumulated multiplier
   (force = λ/h², exact for the solved state), summed into **row loads**
   (A/B/C/D…, left/right separately), with slack-segment counts. Row
-  grouping uses the engine's own line metadata where the mesh carries it,
-  else clustering by attachment chord fraction.
+  grouping uses the engine's own per-line row plans; a mesh exported
+  before those tags existed reports no row table at all — an empty table
+  is honest, a mis-grouped one is not. Re-run the engine to regenerate
+  the mesh with tags.
 
 ## The verdicts
 

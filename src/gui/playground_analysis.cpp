@@ -433,8 +433,9 @@ public:
     {
     }
 
-    // Honoured between alpha points, so a cancel returns within one
-    // settle; the points already measured stay valid.
+    // Honoured every settle frame (the flag rides into settleAndMeasure),
+    // so a cancel returns within milliseconds; the points already
+    // measured stay valid.
     void requestCancel() { cancel_.store(true, std::memory_order_relaxed); }
     [[nodiscard]] bool cancelled() const
     {
@@ -481,10 +482,15 @@ protected:
             try {
                 SimBody sim = buildSimBody(mesh, options_, controls);
                 const ShapeBaseline baseline = captureShapeBaseline(sim);
-                results_.push_back(settleAndMeasure(sim,
-                                                    controls,
-                                                    baseline,
-                                                    settleSeconds_));
+                // The cancel flag goes all the way into the settle loop:
+                // a closing dialog waits milliseconds, not a full settle
+                // point.
+                SettleResult settled = settleAndMeasure(
+                    sim, controls, baseline, settleSeconds_, &cancel_);
+                if (cancelled()) {
+                    return;
+                }
+                results_.push_back(std::move(settled));
             } catch (const std::exception &failure) {
                 error_ = QStringLiteral(
                              "Solver failed at \u03b1=%1\u00b0: %2")

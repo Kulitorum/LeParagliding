@@ -807,7 +807,20 @@ ShapeReport measureShape(const SimBody &sim,
         bool present = false;
     };
     std::array<RowTally, 6> tallies{};
-    {
+    // Row loads only when the mesh carries authored plan tags (plans 1-5;
+    // plan 6 alone is the engine's own brake synthesis and proves
+    // nothing). On an old mesh every A-E segment reads plan 0 and would
+    // be skipped, so the tally would present ~1 kN of unmeasured riser
+    // load as a measured near-zero brake row — an empty rows table is
+    // the honest report, and it is what lets the bench print its
+    // mesh-predates-the-tags notice.
+    const bool meshHasPlans = std::any_of(
+        sim.lineSegments.begin(),
+        sim.lineSegments.end(),
+        [](const LineSegment &segment) {
+            return segment.plan >= 1 && segment.plan <= 5;
+        });
+    if (meshHasPlans) {
         const Vec3 spanAxis = normalized(sim.restSpanAxis);
         const auto isCarabiner = [&sim](std::size_t node) {
             return std::find(sim.carabinerNodes.begin(),
@@ -867,7 +880,10 @@ ShapeReport measureShape(const SimBody &sim,
                 tally.rightSlack += slack ? 1 : 0;
             }
             report.lineLoadNewtons += tension;
-            report.slackRiserSegments += slack ? 1 : 0;
+            // Brake cables sit outside the slack count: the tunnel rigs
+            // them with a deliberate gap, so their slackness is the
+            // rigging working, not a row shedding load.
+            report.slackRiserSegments += (slack && !brake) ? 1 : 0;
         }
         for (std::size_t row = 0; row < tallies.size(); ++row) {
             const RowTally &tally = tallies[row];
@@ -1124,7 +1140,8 @@ void faceSlackField(const SimBody &sim, std::vector<float> &strainOut)
 SettleResult settleAndMeasure(SimBody &sim,
                               const SimControls &controls,
                               const ShapeBaseline &baseline,
-                              double maxSeconds)
+                              double maxSeconds,
+                              const std::atomic<bool> *cancelled)
 {
     SettleResult result;
     int frame = 0;
@@ -1156,6 +1173,10 @@ SettleResult settleAndMeasure(SimBody &sim,
     std::vector<double> forceProbes;
     while (result.simulatedSeconds + 0.5 * simulationTimeStep
            < maxSeconds) {
+        if (cancelled != nullptr
+            && cancelled->load(std::memory_order_relaxed)) {
+            break;
+        }
         const double rise =
             std::min(1.0, result.simulatedSeconds / rampSeconds);
         // Smoothstep: no q-rate jump at either end of the ramp.
@@ -1202,7 +1223,10 @@ SettleResult settleAndMeasure(SimBody &sim,
             }
         }
     }
-    result.report = measureShape(sim, controls, baseline);
+    // Measured under `ramped`, not `controls`: if the budget (or a
+    // cancel) ended inside the soft start, the honest q to echo is the
+    // one actually applied, not the nominal one the wing never saw.
+    result.report = measureShape(sim, ramped, baseline);
     if (!result.settled) {
         result.report.flags.push_back(
             {ShapeFlag::Unsettled,
