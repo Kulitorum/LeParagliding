@@ -10,6 +10,7 @@ class QSlider;
 class QTimer;
 class QVBoxLayout;
 
+class LegendStrip;
 class PlaygroundAnalysisDialog;
 class PlaygroundView;
 class SettleWorker;
@@ -81,6 +82,9 @@ private:
 
     QVBoxLayout *layout_ = nullptr;
     PlaygroundView *view_ = nullptr;
+    // The colour-bar legend beside the view; visible while any coloured
+    // mode is.
+    LegendStrip *legendStrip_ = nullptr;
     QLabel *status_ = nullptr;
     QSlider *pressure_ = nullptr;
     QSlider *lift_ = nullptr;
@@ -117,8 +121,6 @@ private:
     QCheckBox *flightLoad_ = nullptr;
     QPushButton *analyseButton_ = nullptr;
     QTimer *shapeTimer_ = nullptr;
-    QLabel *stressLegend_ = nullptr;
-    QTimer *legendTimer_ = nullptr;
     QByteArray pendingData_;
     // Retained so a resolution change can rebuild the body without
     // re-running the engine (whose output directory is long gone).

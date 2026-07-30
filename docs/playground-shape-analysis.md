@@ -139,10 +139,15 @@ airspeed forever).
 - **Colour by** — the skin heatmap now has three sources: *Stress*
   (edge strain), *Shape deviation* (per-node distance from the aligned
   rest shape, mm) and *Slack fabric* (compression strain — the wrinkle
-  map). One combo box, one shared scale slider, legend follows. All
-  three tint per VERTEX from per-node fields (edge strains scattered to
-  their endpoints), so the skin shades smoothly instead of rendering as
-  facets.
+  map). One combo box, one shared scale slider. All three tint per
+  VERTEX from per-node fields (edge strains scattered to their
+  endpoints), so the skin shades smoothly instead of rendering as
+  facets. A calibrated legend strip appears beside the view whenever a
+  colouring is active: the exact ramp the skin is tinted with, the
+  quantity and unit, numeric ticks, and a live peak marker — a peak
+  past full scale parks at the top of the bar with its true value
+  printed, so a saturated display reads as saturated rather than
+  lying. Line-tension colouring gets its own bar below.
 - **Settle** — runs a twin of the current wing at the Accurate solver
   setting (60 substeps × 4 iterations) on a worker thread until the
   measurement converges, then adopts the settled pose — positions, line

@@ -31,7 +31,13 @@ Gotchas learned the hard way:
   the surrounding chrome captures fine. Verify the Playground from its status
   line (it carries the node/quad counts, and any solver exception replaces it
   with the error) plus process metrics, and say plainly that the wing itself
-  was not photographed.
+  was not photographed. Per-launch it is FLAKY, not consistent: some launches
+  capture the GL content and miss a custom-painted sibling (the legend strip)
+  instead, and one launch in several comes back as a white page with widget
+  islands (the GL-composition flip; relaunch and recapture). Never conclude a
+  widget does not render from a PrintWindow capture alone — prove widget
+  painting with `widget->grab()` in the offscreen harness (works for plain
+  widgets, needs no GL), and treat the capture as corroboration only.
 - **Prefer a command-line entry point over driving the UI.** `--playground
   <lep-sim.json>` opens straight onto the tab with a mesh loaded, `--xflr5`
   onto the aerodynamics tab; no preview run or clicking needed.

@@ -20,6 +20,7 @@
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
+#include <QPainter>
 #include <QSurfaceFormat>
 #include <QPushButton>
 #include <QSlider>
@@ -82,6 +83,25 @@ constexpr double grabPickRadiusPixels = 14.0;
 // Grey for faces that are drawn while stress colouring is on but carry no
 // meaningful stress of their own — the simple rib web.
 const QVector3D uncolouredTint(0.58F, 0.60F, 0.63F);
+// The one heat ramp every coloured mode uses: unloaded blue -> teal ->
+// green -> amber -> red at full scale. Shared by the per-vertex tints
+// and the legend's colour bar, so the bar IS the calibration of the
+// picture rather than an approximation of it.
+const std::array<QVector3D, 5> kRampStops{
+    QVector3D(0.16F, 0.29F, 0.62F), QVector3D(0.16F, 0.60F, 0.62F),
+    QVector3D(0.30F, 0.68F, 0.33F), QVector3D(0.90F, 0.68F, 0.20F),
+    QVector3D(0.83F, 0.24F, 0.20F)};
+
+// One calibrated colour bar of the legend: what is plotted, the ramp's
+// full-scale value, the live peak, and how to print a value in the
+// bar's own unit.
+struct LegendBar
+{
+    QString title;
+    double fullScale = 1.0;
+    double peak = 0.0;
+    std::function<QString(double)> format;
+};
 } // namespace
 
 // A minimal orbit-camera OpenGL view running the XPBD body on a timer.
@@ -554,6 +574,49 @@ public:
         return -worst;
     }
 
+    // What the legend must show right now: the active face mode's bar
+    // and, when on, the line-tension bar. Empty in Plain mode with the
+    // tension colouring off — no colours, no legend.
+    std::vector<LegendBar> legendBars() const
+    {
+        const auto percent = [](double value) {
+            return QStringLiteral("%1%").arg(value * 100.0, 0, 'f',
+                                             value * 100.0 < 1.0 ? 2 : 1);
+        };
+        std::vector<LegendBar> bars;
+        switch (colorMode_) {
+        case ColorMode::Stress:
+            bars.push_back({QStringLiteral("edge stretch"),
+                            std::max(stressFullScale_, 1.0e-6),
+                            peakStrain(), percent});
+            break;
+        case ColorMode::Deviation:
+            bars.push_back(
+                {QStringLiteral("deviation"), deviationFullScaleMetres(),
+                 peakDeviation(), [](double value) {
+                     return QStringLiteral("%1 mm").arg(value * 1000.0, 0,
+                                                        'f', 0);
+                 }});
+            break;
+        case ColorMode::Slack:
+            bars.push_back({QStringLiteral("compression"),
+                            std::max(stressFullScale_, 1.0e-6),
+                            peakSlackCompression(), percent});
+            break;
+        case ColorMode::Plain:
+            break;
+        }
+        if (lineTensionColoring_) {
+            bars.push_back({QStringLiteral("line tension"),
+                            std::max(lineFullScaleNewtons_, 1.0e-6),
+                            peakLineTension(), [](double value) {
+                                return QStringLiteral("%1 N").arg(
+                                    value, 0, 'f', 0);
+                            }});
+        }
+        return bars;
+    }
+
     void setRunning(bool running)
     {
         if (running && sim_.body) {
@@ -966,22 +1029,16 @@ private:
                / (substep * substep);
     }
 
-    // Unloaded blue -> teal -> green -> amber -> red at full scale.
     static QVector3D rampTint(double loadFraction)
     {
-        static const std::array<QVector3D, 5> ramp{
-            QVector3D(0.16F, 0.29F, 0.62F),
-            QVector3D(0.16F, 0.60F, 0.62F),
-            QVector3D(0.30F, 0.68F, 0.33F),
-            QVector3D(0.90F, 0.68F, 0.20F),
-            QVector3D(0.83F, 0.24F, 0.20F)};
         const double position =
-            std::clamp(loadFraction, 0.0, 1.0) * (ramp.size() - 1);
-        const auto stop =
-            std::min(static_cast<std::size_t>(position), ramp.size() - 2);
+            std::clamp(loadFraction, 0.0, 1.0) * (kRampStops.size() - 1);
+        const auto stop = std::min(static_cast<std::size_t>(position),
+                                   kRampStops.size() - 2);
         const float blend =
             static_cast<float>(position - static_cast<double>(stop));
-        return ramp[stop] * (1.0F - blend) + ramp[stop + 1] * blend;
+        return kRampStops[stop] * (1.0F - blend)
+               + kRampStops[stop + 1] * blend;
     }
 
     QVector3D stressTint(double strain) const
@@ -1169,6 +1226,135 @@ private:
     QPointF lastMouse_;
 };
 
+// The legend beside the 3D view: one calibrated colour bar per active
+// colouring, each with its quantity, unit, ticks and a live peak marker
+// — a picture coloured by numbers is only a measurement when the
+// numbers are printed next to it. A sibling widget rather than a
+// QPainter overlay inside paintGL: the app's shared GL surface format
+// carries no stencil buffer, and the painter's GL engine silently loses
+// its filled paths without one. Plain widget painting has no such
+// dependency.
+class LegendStrip : public QWidget
+{
+public:
+    explicit LegendStrip(const PlaygroundView *view, QWidget *parent)
+        : QWidget(parent), view_(view)
+    {
+        setFixedWidth(150);
+        // Peaks move while the solver runs; a few refreshes a second
+        // keep the marker honest without repainting per frame. Runs
+        // only while shown.
+        auto *refresh = new QTimer(this);
+        refresh->setInterval(250);
+        connect(refresh, &QTimer::timeout, this,
+                QOverload<>::of(&QWidget::update));
+        refresh->start();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        const std::vector<LegendBar> bars = view_->legendBars();
+        if (bars.empty()) {
+            return;
+        }
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setRenderHint(QPainter::TextAntialiasing);
+        const QFont titleFont(painter.font().family(), 8,
+                              QFont::DemiBold);
+        const QFont tickFont(painter.font().family(), 8);
+        constexpr int barWidth = 14;
+        constexpr int pad = 10;
+        const int panelWidth = width() - 4;
+        // Split the height between the bars; the gradient gets what the
+        // chrome leaves over.
+        const int panelHeight =
+            (height() - 8) / static_cast<int>(bars.size()) - 8;
+        const int barHeight =
+            std::clamp(panelHeight - 3 * pad - 16, 80, 300);
+        int top = 4;
+        for (const LegendBar &bar : bars) {
+            const QRectF panel(2, top, panelWidth,
+                               barHeight + 3 * pad + 16);
+            painter.setPen(QColor(0x26, 0x35, 0x4a));
+            painter.setBrush(QColor(0x11, 0x1b, 0x2a));
+            painter.drawRoundedRect(panel, 7.0, 7.0);
+
+            painter.setFont(titleFont);
+            painter.setPen(QColor(0xb9, 0xc6, 0xd8));
+            painter.drawText(
+                QRectF(panel.left() + pad, panel.top() + pad,
+                       panelWidth - 2 * pad, 14),
+                Qt::AlignLeft | Qt::AlignVCenter, bar.title);
+
+            const QRectF gradient(panel.left() + pad + 8,
+                                  panel.top() + 2 * pad + 14, barWidth,
+                                  barHeight);
+            QLinearGradient ramp(gradient.bottomLeft(),
+                                 gradient.topLeft());
+            for (std::size_t stop = 0; stop < kRampStops.size();
+                 ++stop) {
+                const QVector3D &colour = kRampStops[stop];
+                ramp.setColorAt(
+                    static_cast<double>(stop) / (kRampStops.size() - 1),
+                    QColor::fromRgbF(colour.x(), colour.y(),
+                                     colour.z()));
+            }
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(ramp);
+            painter.drawRect(gradient);
+
+            painter.setFont(tickFont);
+            for (int tick = 0; tick <= 4; ++tick) {
+                const double fraction = tick / 4.0;
+                const double tickY = gradient.bottom()
+                                     - fraction * gradient.height();
+                painter.setPen(QColor(0x93, 0xa4, 0xba));
+                painter.drawLine(QPointF(gradient.right(), tickY),
+                                 QPointF(gradient.right() + 4, tickY));
+                if (tick % 2 == 0) {
+                    painter.drawText(
+                        QRectF(gradient.right() + 7, tickY - 8,
+                               panel.right() - gradient.right() - 9, 16),
+                        Qt::AlignLeft | Qt::AlignVCenter,
+                        bar.format(fraction * bar.fullScale));
+                }
+            }
+
+            // The live peak: marker on the bar, true value beside it. A
+            // peak past full scale parks at the top with its real value
+            // printed — the display's way of saying "saturated" instead
+            // of lying.
+            const double peakFraction =
+                std::clamp(bar.peak / bar.fullScale, 0.0, 1.0);
+            const double peakY =
+                gradient.bottom() - peakFraction * gradient.height();
+            QPolygonF marker;
+            marker << QPointF(gradient.left() - 2, peakY)
+                   << QPointF(gradient.left() - 8, peakY - 4)
+                   << QPointF(gradient.left() - 8, peakY + 4);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(0xf7, 0xfb, 0xff));
+            painter.drawPolygon(marker);
+            painter.setPen(QColor(0xf7, 0xfb, 0xff));
+            const double labelY =
+                std::clamp(peakY + 10.0, gradient.top(),
+                           gradient.bottom() - 16.0);
+            painter.drawText(
+                QRectF(gradient.right() + 7, labelY,
+                       panel.right() - gradient.right() - 9, 16),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("◂ %1").arg(bar.format(bar.peak)));
+
+            top += static_cast<int>(panel.height()) + 8;
+        }
+    }
+
+private:
+    const PlaygroundView *view_;
+};
+
 // Settles an identical twin of the live wing to convergence at the
 // Accurate solver setting on a worker thread, so the user can start a
 // long computation and review the settled result later. A twin rather
@@ -1323,6 +1509,13 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "Colour the skin by edge stretch (Stress), by distance from the "
         "designed shape (Deviation), or by compressed — wrinkled — fabric "
         "(Slack)."));
+    // Start-up preset for scripted runs and screenshots, the same idea
+    // as LEP_PLAYGROUND_DEBUG.
+    if (qEnvironmentVariableIsSet("LEP_PLAYGROUND_COLOR")) {
+        colorBy_->setCurrentIndex(
+            std::clamp(qEnvironmentVariableIntValue("LEP_PLAYGROUND_COLOR"),
+                       0, colorBy_->count() - 1));
+    }
 
     // Full-scale for the ramp. Read as hundredths of a percent strain for
     // Stress and Slack (so the low end, where fabric actually works, still
@@ -1342,9 +1535,6 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     lineScale_->setValue(static_cast<int>(defaultLineFullScaleNewtons));
     lineScale_->setMaximumWidth(140);
     lineScale_->setVisible(false);
-
-    stressLegend_ = new QLabel(this);
-    stressLegend_->setVisible(false);
 
     // How much solving each frame gets. This is a sandbox, so the default
     // is the setting that keeps a mid-sized wing interactive; the higher
@@ -1375,7 +1565,6 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     view->addSpacing(16);
     view->addWidget(showLineTension_);
     view->addWidget(lineScale_);
-    view->addWidget(stressLegend_, 1);
     view->addStretch();
 
     // Its own row. The other two are already full edge to edge — the filter
@@ -1523,71 +1712,26 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     connect(analyseButton_, &QPushButton::clicked, this,
             [this] { openAnalysis(); });
 
-    // The legend needs the live peak stretch, which only exists while the
-    // solver runs; polling a few times a second keeps it readable instead
-    // of flickering with every frame.
-    legendTimer_ = new QTimer(this);
-    legendTimer_->setInterval(250);
-    connect(legendTimer_, &QTimer::timeout, this, [this] {
-        if (view_ == nullptr) {
-            return;
-        }
-        QStringList parts;
-        // Index order matches PlaygroundView::ColorMode; Plain contributes
-        // nothing. The scale slider's integer value is hundredths of a
-        // percent for the strain modes and millimetres for deviation.
-        switch (colorBy_->currentIndex()) {
-        case 1:
-            parts << QStringLiteral("fabric slack → %1% stretch (peak %2%)")
-                         .arg(stressScale_->value() / 100.0, 0, 'f', 2)
-                         .arg(view_->peakStrain() * 100.0, 0, 'f', 2);
-            break;
-        case 2:
-            parts << QStringLiteral("deviation 0 → %1 mm (peak %2 mm)")
-                         .arg(stressScale_->value())
-                         .arg(view_->peakDeviation() * 1000.0, 0, 'f', 0);
-            break;
-        case 3:
-            parts << QStringLiteral("taut → %1% compressed (peak %2%)")
-                         .arg(stressScale_->value() / 100.0, 0, 'f', 2)
-                         .arg(view_->peakSlackCompression() * 100.0,
-                              0, 'f', 2);
-            break;
-        default:
-            break;
-        }
-        if (showLineTension_->isChecked()) {
-            parts << QStringLiteral("lines 0 → %1 N (peak %2 N)")
-                         .arg(lineScale_->value())
-                         .arg(view_->peakLineTension(), 0, 'f', 1);
-        }
-        stressLegend_->setText(parts.join(QStringLiteral("  ·  ")));
-    });
+    // The legend is a calibrated colour bar drawn inside the view itself
+    // (see PlaygroundView::drawLegendOverlay) — units, ticks and a live
+    // peak marker next to the picture they explain, not a prose line in
+    // the toolbar.
     connect(stressScale_, &QSlider::valueChanged, this, [this](int value) {
         if (view_ != nullptr) {
             view_->setStressFullScale(value / 10000.0);
         }
     });
-    // One legend serves every colour mode plus line tension, so it lives
-    // as long as any of them is on.
-    const auto refreshLegendTimer = [this] {
-        const bool wanted = colorBy_->currentIndex() != 0
-                            || showLineTension_->isChecked();
-        stressLegend_->setVisible(wanted);
-        if (wanted) {
-            legendTimer_->start();
-        } else {
-            legendTimer_->stop();
-        }
-    };
     connect(colorBy_, &QComboBox::currentIndexChanged, this,
-            [this, refreshLegendTimer](int index) {
+            [this](int index) {
                 if (view_ != nullptr) {
                     view_->setColorMode(
                         static_cast<PlaygroundView::ColorMode>(index));
                 }
                 stressScale_->setVisible(index != 0);
-                refreshLegendTimer();
+                if (legendStrip_ != nullptr) {
+                    legendStrip_->setVisible(
+                        index != 0 || showLineTension_->isChecked());
+                }
             });
     connect(lineScale_, &QSlider::valueChanged, this, [this](int value) {
         if (view_ != nullptr) {
@@ -1595,12 +1739,15 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         }
     });
     connect(showLineTension_, &QCheckBox::toggled, this,
-            [this, refreshLegendTimer](bool enabled) {
+            [this](bool enabled) {
                 if (view_ != nullptr) {
                     view_->setLineTensionColoring(enabled);
                 }
                 lineScale_->setVisible(enabled);
-                refreshLegendTimer();
+                if (legendStrip_ != nullptr) {
+                    legendStrip_->setVisible(
+                        enabled || colorBy_->currentIndex() != 0);
+                }
             });
 
     connect(pressure_, &QSlider::valueChanged, this, [this](int value) {
@@ -1656,7 +1803,14 @@ void PlaygroundPage::ensureView()
                    << static_cast<void *>(this);
     }
     view_ = new PlaygroundView(this);
-    layout_->addWidget(view_, 1);
+    legendStrip_ = new LegendStrip(view_, this);
+    auto *viewRow = new QHBoxLayout;
+    viewRow->setSpacing(4);
+    viewRow->addWidget(view_, 1);
+    viewRow->addWidget(legendStrip_);
+    layout_->addLayout(viewRow, 1);
+    legendStrip_->setVisible(colorBy_->currentIndex() != 0
+                             || showLineTension_->isChecked());
     view_->setPressurePascal(static_cast<double>(pressure_->value()));
     view_->setAngleOfAttack(static_cast<double>(lift_->value()));
     view_->setBrakePull(
