@@ -350,6 +350,11 @@ add_executable(playground-cells-test
 )
 target_link_libraries(playground-cells-test PRIVATE playground_sim)
 
+add_executable(playground-contact-test
+    tests/playground_contact_test.cpp
+)
+target_link_libraries(playground-contact-test PRIVATE playground_sim)
+
 qt_add_executable(LEparagliding WIN32
     src/gui/airfoil_file.cpp
     src/gui/airfoil_file.h
@@ -441,6 +446,7 @@ set_target_properties(
     airfoil-file-test
     playground-metrics-test
     playground-cells-test
+    playground-contact-test
     softwing-bench
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -458,6 +464,7 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         airfoil-file-test
         playground-metrics-test
         playground-cells-test
+        playground-contact-test
         softwing-bench
         PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
@@ -556,6 +563,7 @@ add_test(NAME airfoil_file COMMAND airfoil-file-test
     "${CMAKE_CURRENT_SOURCE_DIR}/Data/gnua.txt")
 add_test(NAME playground_metrics COMMAND playground-metrics-test)
 add_test(NAME playground_cells COMMAND playground-cells-test)
+add_test(NAME playground_contact COMMAND playground-contact-test)
 add_test(NAME engine_rejects_missing_input
     COMMAND leparagliding-engine
         "${CMAKE_BINARY_DIR}/does-not-exist.txt"

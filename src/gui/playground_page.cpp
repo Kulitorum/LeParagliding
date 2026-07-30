@@ -964,6 +964,17 @@ public:
         pushInputs();
     }
 
+    // Fabric/line self-contact is a pure runtime option — the pass lives
+    // in stepSimulation, nothing in the body changes — so unlike free
+    // flight it needs no rebuild, just the next frame's controls.
+    void setFabricContact(bool enabled)
+    {
+        controls_.fabricContact = enabled;
+        pushInputs();
+    }
+
+    bool fabricContact() const { return controls_.fabricContact; }
+
     // Degrees between the airflow and the wing's rest chord. The load falls
     // out of the pressure field now, so this is the only handle the
     // aerodynamics needs — it replaces a slider that dialled in a fake force.
@@ -2218,6 +2229,13 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "Unpin the wing: gravity on, a pilot slung under the risers, the "
         "whole system flying and re-centred each frame. Steer with the "
         "brakes; a little symmetric brake steadies it."));
+    fabricContact_ = makeCheck(QStringLiteral("Fabric contact"), false);
+    fabricContact_->setToolTip(QStringLiteral(
+        "Stop folded fabric passing through itself and through the "
+        "lines. Costs a few milliseconds a frame; what it buys is "
+        "collapses that fold and clear like cloth instead of ghosting "
+        "through the wing. Takes effect on the next frame — no "
+        "rebuild."));
     flightLabel_ = new QLabel(this);
     flightLabel_->setWordWrap(true);
 
@@ -2304,6 +2322,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     solverRow->addWidget(settleButton_);
     panelLayout->addLayout(solverRow);
     panelLayout->addWidget(freeFlight_);
+    panelLayout->addWidget(fabricContact_);
     panelLayout->addWidget(flightLabel_);
 
     panelLayout->addSpacing(8);
@@ -2445,6 +2464,12 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         flightLabel_->setText(view_ != nullptr ? view_->flightReadout()
                                                : QString());
     });
+    connect(fabricContact_, &QCheckBox::toggled, this,
+            [this](bool enabled) {
+                if (view_ != nullptr) {
+                    view_->setFabricContact(enabled);
+                }
+            });
     connect(freeFlight_, &QCheckBox::toggled, this, [this](bool enabled) {
         if (view_ != nullptr) {
             view_->setFreeFlight(enabled);
@@ -2660,6 +2685,7 @@ void PlaygroundPage::ensureView()
     view_->setLineFullScale(static_cast<double>(lineScale_->value()));
     view_->setLineTensionColoring(showLineTension_->isChecked());
     view_->setFlightLoad(flightLoad_->isChecked());
+    view_->setFabricContact(fabricContact_->isChecked());
     view_->setFreeFlight(freeFlight_->isChecked());
     view_->setFlyModeCallbacks(
         // Mirror the live brake input onto the sliders. Signals stay

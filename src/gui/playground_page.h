@@ -111,6 +111,7 @@ private:
     QSlider *lineScale_ = nullptr;
     QComboBox *quality_ = nullptr;
     QCheckBox *freeFlight_ = nullptr;
+    QCheckBox *fabricContact_ = nullptr;
     QLabel *flightLabel_ = nullptr;
     QTimer *flightTimer_ = nullptr;
     QLabel *shapeLabel_ = nullptr;

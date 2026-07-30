@@ -525,6 +525,11 @@ SimMesh refineSimMesh(const SimMesh &mesh, int factor)
     return refined;
 }
 
+// Defined next to the contact pass further down; the build calls it while
+// the pose is still the designed one, because the rest-pose exclusion set
+// must be captured before any pressure has acted on the fabric.
+void prepareContact(SimBody &sim);
+
 SimBody buildSimBody(const SimMesh &mesh,
                      const SimBuildOptions &options,
                      const SimControls &controls)
@@ -1517,6 +1522,7 @@ SimBody buildSimBody(const SimMesh &mesh,
     }
 
     sim.body = std::move(body);
+    prepareContact(sim);
     applyPressure(sim, controls);
 
     // The angle the designed line geometry rigs the wing to fly at: the
@@ -2609,6 +2615,621 @@ void recentreSystem(SimBody &sim)
     }
 }
 
+namespace {
+
+// --- Fabric/line contact -------------------------------------------------
+//
+// The Playground's own thin-cloth contact: candidates found once per
+// FRAME by a spatial-hash proximity pass, then re-projected after every
+// substep as plain PBD position corrections with an inelastic normal
+// velocity fix. Deliberately NOT the engine's certified contact pipeline:
+// that one re-enumerates every vertex-triangle and edge-edge combination
+// serially in every constraint iteration (O(V·T + E²), ~90 times a
+// frame), throws and rolls back the substep on any indeterminate sweep,
+// and cannot be switched off once a pair is registered — each of which
+// disqualifies it for an interactive toy that folds fabric on purpose.
+//
+// Correctness envelope: per-substep travel at collapse speeds is well
+// under the contact separation, so discrete projection cannot tunnel
+// WITHIN a frame; crossings BETWEEN detection passes are covered by the
+// velocity-inflated capture margins plus the recorded approach side,
+// which lets the projection push a node back through a face it crossed
+// since detection.
+
+// Separation held between fabric mid-surfaces, and between fabric and a
+// suspension line's axis. Two constraints pin it: well under the
+// shortest skin edge (~10 mm at the deepest subdivision) so
+// mesh-adjacent nodes never read as contact, and small enough that the
+// WRINKLE fields of a healthy loaded wing (fabric legitimately doubled
+// at sub-millimetre spacing over ~23% of the skin) do not light up as
+// thousands of false contacts — at 2 mm they did, stiffening the whole
+// surface and snagging collapse recovery.
+constexpr double kContactSeparation = 0.001;       // m
+constexpr double kContactLineSeparation = 0.0015;  // m
+// Capture-radius safety on the per-frame velocity margin, and the cap
+// that keeps a violent transient from smearing every primitive across
+// the whole grid (measured: uncapped margins during the inflation
+// transient cost ~90 ms a frame in detection alone). With both sides
+// capped at 5 cm, closing speeds up to ~6 m/s are still fully captured
+// within a frame; anything faster can slip a frame, which the per-
+// substep projection then catches on the next detection pass.
+constexpr double kContactMarginSafety = 1.5;
+constexpr double kContactMarginCap = 0.025;   // m
+// Candidate cap per node, a per-cell pair-product cap, and a global
+// candidate cap: together they make a crumpled-ball pileup degrade to
+// partial contact coverage instead of an unbounded pair enumeration
+// (measured: an uncapped gather cost a full second per frame on an
+// exploded wing).
+constexpr std::size_t kContactMaxPerNode = 32;
+constexpr std::size_t kContactMaxPairsPerCell = 512;
+constexpr std::size_t kContactMaxCandidates = 20000;
+// Per-substep correction cap: deep overlaps (a settled stack the side
+// memory wants to push a node through) resolve over many substeps
+// instead of in one energy-injecting jolt.
+constexpr double kContactMaxCorrection = 0.001;   // m per substep
+// Cell-span cap per inserted item, so one fast triangle cannot smear
+// itself across the whole grid.
+constexpr int kContactMaxCellSpan = 4;
+
+std::uint64_t contactCellKey(int x, int y, int z)
+{
+    const auto pack = [](int value) {
+        return static_cast<std::uint64_t>(value + (1 << 20)) & 0x1FFFFFULL;
+    };
+    return pack(x) | (pack(y) << 21) | (pack(z) << 42);
+}
+
+std::uint64_t contactPairKey(std::uint32_t node,
+                             std::uint32_t item,
+                             bool line)
+{
+    return (static_cast<std::uint64_t>(node) << 33)
+           | (static_cast<std::uint64_t>(item) << 1) | (line ? 1U : 0U);
+}
+
+// Closest point on triangle abc to p, with barycentric weights (Ericson,
+// Real-Time Collision Detection §5.1.5).
+softwing::Vec3 closestOnTriangle(const softwing::Vec3 &p,
+                                 const softwing::Vec3 &a,
+                                 const softwing::Vec3 &b,
+                                 const softwing::Vec3 &c,
+                                 double &u,
+                                 double &v,
+                                 double &w)
+{
+    const softwing::Vec3 ab = b - a;
+    const softwing::Vec3 ac = c - a;
+    const softwing::Vec3 ap = p - a;
+    const double d1 = dot(ab, ap);
+    const double d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) {
+        u = 1.0; v = 0.0; w = 0.0;
+        return a;
+    }
+    const softwing::Vec3 bp = p - b;
+    const double d3 = dot(ab, bp);
+    const double d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) {
+        u = 0.0; v = 1.0; w = 0.0;
+        return b;
+    }
+    const double vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+        const double t = d1 / (d1 - d3);
+        u = 1.0 - t; v = t; w = 0.0;
+        return a + t * ab;
+    }
+    const softwing::Vec3 cp = p - c;
+    const double d5 = dot(ab, cp);
+    const double d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) {
+        u = 0.0; v = 0.0; w = 1.0;
+        return c;
+    }
+    const double vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        const double t = d2 / (d2 - d6);
+        u = 1.0 - t; v = 0.0; w = t;
+        return a + t * ac;
+    }
+    const double va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+        const double t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        u = 0.0; v = 1.0 - t; w = t;
+        return b + t * (c - b);
+    }
+    const double denominator = 1.0 / (va + vb + vc);
+    v = vb * denominator;
+    w = vc * denominator;
+    u = 1.0 - v - w;
+    return a + v * ab + w * ac;
+}
+
+void contactInsertCells(
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> &cells,
+    const softwing::Vec3 &low,
+    const softwing::Vec3 &high,
+    double cellSize,
+    std::uint32_t item)
+{
+    const auto cellOf = [cellSize](double value) {
+        return static_cast<int>(std::floor(value / cellSize));
+    };
+    const auto clampSpan = [](int begin, int end) {
+        return std::min(end, begin + kContactMaxCellSpan - 1);
+    };
+    const int x0 = cellOf(low.x);
+    const int y0 = cellOf(low.y);
+    const int z0 = cellOf(low.z);
+    const int x1 = clampSpan(x0, cellOf(high.x));
+    const int y1 = clampSpan(y0, cellOf(high.y));
+    const int z1 = clampSpan(z0, cellOf(high.z));
+    for (int x = x0; x <= x1; ++x) {
+        for (int y = y0; y <= y1; ++y) {
+            for (int z = z0; z <= z1; ++z) {
+                cells.emplace_back(contactCellKey(x, y, z), item);
+            }
+        }
+    }
+}
+
+// Lockstep walk over two sorted (cell, index) lists: every co-located
+// (node, item) pair is emitted, deduplicated by one sort at the end.
+// A cell whose pair product exceeds the cap is skipped outright — that
+// is a pileup, and partial coverage beats an unbounded enumeration.
+void contactMergeCells(
+    const std::vector<std::pair<std::uint64_t, std::uint32_t>> &nodeCells,
+    const std::vector<std::pair<std::uint64_t, std::uint32_t>> &itemCells,
+    std::vector<std::uint64_t> &pairs)
+{
+    pairs.clear();
+    std::size_t nodeIndex = 0;
+    std::size_t itemIndex = 0;
+    while (nodeIndex < nodeCells.size() && itemIndex < itemCells.size()) {
+        const std::uint64_t nodeKey = nodeCells[nodeIndex].first;
+        const std::uint64_t itemKey = itemCells[itemIndex].first;
+        if (nodeKey < itemKey) {
+            ++nodeIndex;
+            continue;
+        }
+        if (itemKey < nodeKey) {
+            ++itemIndex;
+            continue;
+        }
+        std::size_t nodeEnd = nodeIndex;
+        while (nodeEnd < nodeCells.size()
+               && nodeCells[nodeEnd].first == nodeKey) {
+            ++nodeEnd;
+        }
+        std::size_t itemEnd = itemIndex;
+        while (itemEnd < itemCells.size()
+               && itemCells[itemEnd].first == itemKey) {
+            ++itemEnd;
+        }
+        if ((nodeEnd - nodeIndex) * (itemEnd - itemIndex)
+            <= kContactMaxPairsPerCell) {
+            for (std::size_t n = nodeIndex; n < nodeEnd; ++n) {
+                const std::uint64_t high =
+                    static_cast<std::uint64_t>(nodeCells[n].second) << 32;
+                for (std::size_t i = itemIndex; i < itemEnd; ++i) {
+                    pairs.push_back(high | itemCells[i].second);
+                }
+            }
+        }
+        nodeIndex = nodeEnd;
+        itemIndex = itemEnd;
+    }
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+}
+
+// The once-per-frame detection pass. With frameDt zero (the build-time
+// exclusion capture) the velocity margins vanish and the capture radius
+// is exactly the contact separation.
+void detectContacts(SimBody &sim, double frameDt)
+{
+    ContactScratch &scratch = sim.contact;
+    const auto &nodes = sim.body->nodes();
+    const auto &triangles = sim.body->triangles();
+    scratch.candidates.clear();
+    scratch.triangleCells.clear();
+    scratch.segmentCells.clear();
+    // itemSpeed holds each item's CAPPED capture margin in metres.
+    scratch.itemSpeed.assign(
+        sim.skinTriangleCount + sim.lineSegments.size(), 0.0F);
+    scratch.itemBounds.assign(
+        sim.skinTriangleCount + sim.lineSegments.size(),
+        std::array<float, 6>{});
+    const double cell = scratch.cellSize;
+    // Margins from motion RELATIVE to the canopy's mean velocity: bulk
+    // translation closes no gaps, and using absolute speeds made the
+    // whole upper and lower skin candidates of each other whenever the
+    // wing moved fast as a body.
+    softwing::Vec3 meanVelocity;
+    if (!scratch.skinNodes.empty()) {
+        for (const std::uint32_t node : scratch.skinNodes) {
+            meanVelocity += nodes[node].velocity;
+        }
+        meanVelocity =
+            meanVelocity / static_cast<double>(scratch.skinNodes.size());
+    }
+    const auto marginOf = [frameDt,
+                           &meanVelocity](const softwing::Vec3 &velocity) {
+        return std::min(length(velocity - meanVelocity) * frameDt
+                            * kContactMarginSafety,
+                        kContactMarginCap);
+    };
+    const auto storeBounds = [&scratch](std::size_t slot,
+                                        const softwing::Vec3 &low,
+                                        const softwing::Vec3 &high) {
+        scratch.itemBounds[slot] = {
+            static_cast<float>(low.x),  static_cast<float>(low.y),
+            static_cast<float>(low.z),  static_cast<float>(high.x),
+            static_cast<float>(high.y), static_cast<float>(high.z)};
+    };
+
+    for (std::uint32_t face = 0;
+         face < static_cast<std::uint32_t>(sim.skinTriangleCount);
+         ++face) {
+        const auto &tri = triangles[face];
+        const softwing::Vec3 &a = nodes[tri.a].position;
+        const softwing::Vec3 &b = nodes[tri.b].position;
+        const softwing::Vec3 &c = nodes[tri.c].position;
+        const double margin = std::max({marginOf(nodes[tri.a].velocity),
+                                        marginOf(nodes[tri.b].velocity),
+                                        marginOf(nodes[tri.c].velocity)});
+        scratch.itemSpeed[face] = static_cast<float>(margin);
+        const double inflate = 0.5 * kContactSeparation + margin;
+        const softwing::Vec3 low{
+            std::min({a.x, b.x, c.x}) - inflate,
+            std::min({a.y, b.y, c.y}) - inflate,
+            std::min({a.z, b.z, c.z}) - inflate};
+        const softwing::Vec3 high{
+            std::max({a.x, b.x, c.x}) + inflate,
+            std::max({a.y, b.y, c.y}) + inflate,
+            std::max({a.z, b.z, c.z}) + inflate};
+        storeBounds(face, low, high);
+        contactInsertCells(scratch.triangleCells, low, high, cell, face);
+    }
+    std::sort(scratch.triangleCells.begin(), scratch.triangleCells.end());
+
+    for (std::uint32_t segment = 0;
+         segment < static_cast<std::uint32_t>(sim.lineSegments.size());
+         ++segment) {
+        const LineSegment &line = sim.lineSegments[segment];
+        const softwing::Vec3 &a = nodes[line.a].position;
+        const softwing::Vec3 &b = nodes[line.b].position;
+        const double margin = std::max(marginOf(nodes[line.a].velocity),
+                                       marginOf(nodes[line.b].velocity));
+        scratch.itemSpeed[sim.skinTriangleCount + segment] =
+            static_cast<float>(margin);
+        const double inflate = kContactLineSeparation + margin;
+        const softwing::Vec3 low{std::min(a.x, b.x) - inflate,
+                                 std::min(a.y, b.y) - inflate,
+                                 std::min(a.z, b.z) - inflate};
+        const softwing::Vec3 high{std::max(a.x, b.x) + inflate,
+                                  std::max(a.y, b.y) + inflate,
+                                  std::max(a.z, b.z) + inflate};
+        storeBounds(sim.skinTriangleCount + segment, low, high);
+        contactInsertCells(scratch.segmentCells, low, high, cell, segment);
+    }
+    std::sort(scratch.segmentCells.begin(), scratch.segmentCells.end());
+
+    // Node cells: each skin node into every cell its reach-ball touches.
+    scratch.nodeCells.clear();
+    for (const std::uint32_t node : scratch.skinNodes) {
+        const softwing::Vec3 &position = nodes[node].position;
+        const double reach = 0.5 * kContactSeparation
+                             + marginOf(nodes[node].velocity);
+        const softwing::Vec3 low{position.x - reach, position.y - reach,
+                                 position.z - reach};
+        const softwing::Vec3 high{position.x + reach, position.y + reach,
+                                  position.z + reach};
+        contactInsertCells(scratch.nodeCells, low, high, cell, node);
+    }
+    std::sort(scratch.nodeCells.begin(), scratch.nodeCells.end());
+
+    // Cheap point-vs-stored-AABB reject before any closest-point math;
+    // the stored bounds already carry the item's own margin, the node's
+    // margin rides in via its reach having placed it in the cell.
+    const auto outsideBounds = [&scratch](const softwing::Vec3 &position,
+                                          double reach,
+                                          std::size_t slot) {
+        const std::array<float, 6> &bounds = scratch.itemBounds[slot];
+        return position.x < bounds[0] - reach
+               || position.y < bounds[1] - reach
+               || position.z < bounds[2] - reach
+               || position.x > bounds[3] + reach
+               || position.y > bounds[4] + reach
+               || position.z > bounds[5] + reach;
+    };
+
+    // Fabric-vs-fabric pairs. The pair list is sorted by node, so the
+    // per-node cap is a pair of running counters.
+    contactMergeCells(scratch.nodeCells, scratch.triangleCells,
+                      scratch.pairScratch);
+    std::uint32_t currentNode = 0xFFFFFFFFU;
+    std::size_t taken = 0;
+    for (const std::uint64_t pair : scratch.pairScratch) {
+        if (scratch.candidates.size() >= kContactMaxCandidates) {
+            break;
+        }
+        const auto node = static_cast<std::uint32_t>(pair >> 32);
+        const auto face = static_cast<std::uint32_t>(pair);
+        if (node != currentNode) {
+            currentNode = node;
+            taken = 0;
+        }
+        if (taken >= kContactMaxPerNode) {
+            continue;
+        }
+        const softwing::Vec3 &position = nodes[node].position;
+        const double nodeMargin = marginOf(nodes[node].velocity);
+        if (outsideBounds(position,
+                          0.5 * kContactSeparation + nodeMargin, face)) {
+            continue;
+        }
+        const auto &tri = triangles[face];
+        if (tri.a == node || tri.b == node || tri.c == node) {
+            continue;
+        }
+        const double capture = kContactSeparation + nodeMargin
+                               + scratch.itemSpeed[face];
+        double u = 0.0;
+        double v = 0.0;
+        double w = 0.0;
+        const softwing::Vec3 closest = closestOnTriangle(
+            position, nodes[tri.a].position, nodes[tri.b].position,
+            nodes[tri.c].position, u, v, w);
+        const softwing::Vec3 delta = position - closest;
+        if (lengthSquared(delta) >= capture * capture) {
+            continue;
+        }
+        if (std::binary_search(scratch.restExclusions.begin(),
+                               scratch.restExclusions.end(),
+                               contactPairKey(node, face, false))) {
+            continue;
+        }
+        const softwing::Vec3 normal =
+            cross(nodes[tri.b].position - nodes[tri.a].position,
+                  nodes[tri.c].position - nodes[tri.a].position);
+        ContactCandidate candidate;
+        candidate.node = node;
+        candidate.item = face;
+        candidate.line = false;
+        candidate.side = dot(delta, normal) >= 0.0 ? 1.0F : -1.0F;
+        scratch.candidates.push_back(candidate);
+        ++taken;
+    }
+
+    // Fabric-vs-line pairs.
+    contactMergeCells(scratch.nodeCells, scratch.segmentCells,
+                      scratch.pairScratch);
+    currentNode = 0xFFFFFFFFU;
+    taken = 0;
+    for (const std::uint64_t pair : scratch.pairScratch) {
+        if (scratch.candidates.size() >= kContactMaxCandidates) {
+            break;
+        }
+        const auto node = static_cast<std::uint32_t>(pair >> 32);
+        const auto segment = static_cast<std::uint32_t>(pair);
+        if (node != currentNode) {
+            currentNode = node;
+            taken = 0;
+        }
+        if (taken >= kContactMaxPerNode) {
+            continue;
+        }
+        const softwing::Vec3 &position = nodes[node].position;
+        const double nodeMargin = marginOf(nodes[node].velocity);
+        if (outsideBounds(position,
+                          0.5 * kContactSeparation + nodeMargin,
+                          sim.skinTriangleCount + segment)) {
+            continue;
+        }
+        const LineSegment &line = sim.lineSegments[segment];
+        if (line.a == node || line.b == node) {
+            continue;
+        }
+        const double capture =
+            kContactLineSeparation + nodeMargin
+            + scratch.itemSpeed[sim.skinTriangleCount + segment];
+        const softwing::Vec3 &a = nodes[line.a].position;
+        const softwing::Vec3 ab = nodes[line.b].position - a;
+        const double lengthSq = lengthSquared(ab);
+        const double t =
+            lengthSq > 0.0
+                ? std::clamp(dot(position - a, ab) / lengthSq, 0.0, 1.0)
+                : 0.0;
+        const softwing::Vec3 delta = position - (a + t * ab);
+        if (lengthSquared(delta) >= capture * capture) {
+            continue;
+        }
+        if (std::binary_search(scratch.restExclusions.begin(),
+                               scratch.restExclusions.end(),
+                               contactPairKey(node, segment, true))) {
+            continue;
+        }
+        ContactCandidate candidate;
+        candidate.node = node;
+        candidate.item = segment;
+        candidate.line = true;
+        scratch.candidates.push_back(candidate);
+        ++taken;
+    }
+
+}
+
+// The per-substep projection over the frame's candidates: plain PBD
+// position corrections weighted by inverse mass, plus an inelastic fix
+// that removes the approaching component of the relative normal velocity
+// so resolved contacts do not buzz.
+void projectContacts(SimBody &sim)
+{
+    auto &nodes = sim.body->nodes();
+    const auto &triangles = sim.body->triangles();
+    for (const ContactCandidate &candidate : sim.contact.candidates) {
+        softwing::Node &node = nodes[candidate.node];
+        if (candidate.line) {
+            const LineSegment &line = sim.lineSegments[candidate.item];
+            softwing::Node &a = nodes[line.a];
+            softwing::Node &b = nodes[line.b];
+            const softwing::Vec3 ab = b.position - a.position;
+            const double lengthSq = lengthSquared(ab);
+            const double t =
+                lengthSq > 0.0
+                    ? std::clamp(
+                          dot(node.position - a.position, ab) / lengthSq,
+                          0.0, 1.0)
+                    : 0.0;
+            const softwing::Vec3 delta =
+                node.position - (a.position + t * ab);
+            const double distance = length(delta);
+            if (distance >= kContactLineSeparation || distance <= 1e-9) {
+                continue;
+            }
+            const softwing::Vec3 direction = delta / distance;
+            const double depth = std::min(
+                kContactLineSeparation - distance, kContactMaxCorrection);
+            const double weightNode = node.inverseMass;
+            const double weightA = a.inverseMass;
+            const double weightB = b.inverseMass;
+            const double denominator = weightNode
+                                       + (1.0 - t) * (1.0 - t) * weightA
+                                       + t * t * weightB;
+            if (denominator <= 0.0) {
+                continue;
+            }
+            const double scale = depth / denominator;
+            node.position += (scale * weightNode) * direction;
+            a.position -= (scale * (1.0 - t) * weightA) * direction;
+            b.position -= (scale * t * weightB) * direction;
+            const softwing::Vec3 relative =
+                node.velocity
+                - ((1.0 - t) * a.velocity + t * b.velocity);
+            const double approach = dot(relative, direction);
+            if (approach < 0.0) {
+                const double impulse = -approach / denominator;
+                node.velocity += (impulse * weightNode) * direction;
+                a.velocity -= (impulse * (1.0 - t) * weightA) * direction;
+                b.velocity -= (impulse * t * weightB) * direction;
+            }
+            continue;
+        }
+
+        const auto &tri = triangles[candidate.item];
+        softwing::Node &a = nodes[tri.a];
+        softwing::Node &b = nodes[tri.b];
+        softwing::Node &c = nodes[tri.c];
+        double u = 0.0;
+        double v = 0.0;
+        double w = 0.0;
+        const softwing::Vec3 closest = closestOnTriangle(
+            node.position, a.position, b.position, c.position, u, v, w);
+        const softwing::Vec3 delta = node.position - closest;
+        const softwing::Vec3 areaNormal =
+            cross(b.position - a.position, c.position - a.position);
+        const double areaLength = length(areaNormal);
+
+        softwing::Vec3 direction;
+        double depth = 0.0;
+        const bool interior = u > 0.01 && v > 0.01 && w > 0.01;
+        if (interior && areaLength > 1e-12) {
+            // Face contact: enforce the separation on the side the node
+            // approached from, so a node that crossed the face since
+            // detection is pushed BACK through rather than popped out
+            // the far side.
+            const softwing::Vec3 normal = areaNormal / areaLength;
+            const double sideDistance =
+                candidate.side * dot(delta, normal);
+            if (sideDistance >= kContactSeparation) {
+                continue;
+            }
+            direction = candidate.side * normal;
+            depth = std::min(kContactSeparation - sideDistance,
+                             kContactMaxCorrection);
+        } else {
+            const double distance = length(delta);
+            if (distance >= kContactSeparation || distance <= 1e-9) {
+                continue;
+            }
+            direction = delta / distance;
+            depth = std::min(kContactSeparation - distance,
+                             kContactMaxCorrection);
+        }
+
+        const double weightNode = node.inverseMass;
+        const double denominator = weightNode
+                                   + u * u * a.inverseMass
+                                   + v * v * b.inverseMass
+                                   + w * w * c.inverseMass;
+        if (denominator <= 0.0) {
+            continue;
+        }
+        const double scale = depth / denominator;
+        node.position += (scale * weightNode) * direction;
+        a.position -= (scale * u * a.inverseMass) * direction;
+        b.position -= (scale * v * b.inverseMass) * direction;
+        c.position -= (scale * w * c.inverseMass) * direction;
+        const softwing::Vec3 relative =
+            node.velocity
+            - (u * a.velocity + v * b.velocity + w * c.velocity);
+        const double approach = dot(relative, direction);
+        if (approach < 0.0) {
+            const double impulse = -approach / denominator;
+            node.velocity += (impulse * weightNode) * direction;
+            a.velocity -= (impulse * u * a.inverseMass) * direction;
+            b.velocity -= (impulse * v * b.inverseMass) * direction;
+            c.velocity -= (impulse * w * c.inverseMass) * direction;
+        }
+    }
+}
+
+}  // namespace
+
+void prepareContact(SimBody &sim)
+{
+    ContactScratch &scratch = sim.contact;
+    const auto &triangles = sim.body->triangles();
+    scratch.skinNodes.clear();
+    double edgeTotal = 0.0;
+    std::size_t edgeCount = 0;
+    const auto &nodes = sim.body->nodes();
+    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+        const auto &tri = triangles[face];
+        scratch.skinNodes.push_back(static_cast<std::uint32_t>(tri.a));
+        scratch.skinNodes.push_back(static_cast<std::uint32_t>(tri.b));
+        scratch.skinNodes.push_back(static_cast<std::uint32_t>(tri.c));
+        edgeTotal += length(nodes[tri.b].position - nodes[tri.a].position)
+                     + length(nodes[tri.c].position - nodes[tri.b].position)
+                     + length(nodes[tri.a].position - nodes[tri.c].position);
+        edgeCount += 3;
+    }
+    std::sort(scratch.skinNodes.begin(), scratch.skinNodes.end());
+    scratch.skinNodes.erase(
+        std::unique(scratch.skinNodes.begin(), scratch.skinNodes.end()),
+        scratch.skinNodes.end());
+    const double meanEdge =
+        edgeCount > 0 ? edgeTotal / static_cast<double>(edgeCount) : 0.05;
+    scratch.cellSize = std::clamp(2.0 * meanEdge, 0.02, 0.5);
+
+    // Everything already inside the contact thickness in the REST pose is
+    // designed that way — the vent lip, the fabric around each line
+    // attachment — and must never be pushed apart. Captured as permanent
+    // exclusions with a zero-velocity detection pass.
+    scratch.restExclusions.clear();
+    detectContacts(sim, 0.0);
+    scratch.restExclusions.reserve(scratch.candidates.size());
+    for (const ContactCandidate &candidate : scratch.candidates) {
+        scratch.restExclusions.push_back(contactPairKey(
+            candidate.node, candidate.item, candidate.line));
+    }
+    std::sort(scratch.restExclusions.begin(),
+              scratch.restExclusions.end());
+    scratch.candidates.clear();
+    scratch.prepared = true;
+}
+
 void stepSimulation(SimBody &sim, const SimControls &controls)
 {
     if (!sim.body) {
@@ -2685,7 +3306,43 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
     }
     settings.workerThreads = controls.workerThreads;
     settings.performanceProfile = controls.performanceProfile;
-    sim.body->step(settings);
+    if (controls.fabricContact && sim.contact.prepared
+        && sim.skinTriangleCount > 0) {
+        // Contact projection has to interleave with the solve — at
+        // collapse speeds the fabric crosses its own thickness many
+        // times inside one frame, so a single end-of-frame fix would
+        // resolve against the wrong side. The frame is stepped as N
+        // single-substep calls with the projection after each one; the
+        // arithmetic (dt/N per substep, damping per substep) is the same
+        // as the engine's own internal loop. With the option off this
+        // branch is never taken and the step is exactly the old one.
+        detectContacts(sim, simulationTimeStep);
+        const int substeps = std::max(1, controls.substeps);
+        softwing::StepSettings sub = settings;
+        sub.timeStep = simulationTimeStep / substeps;
+        sub.substeps = 1;
+        // step() consumes the external-force channel at the end of every
+        // call (it snapshots node.force, replays it per substep, then
+        // clears it), so the frame's forces — the whole polar flight
+        // load — must be re-seeded before each single-substep call or
+        // they would act for one thirtieth of the frame.
+        std::vector<softwing::Vec3> externalForces;
+        externalForces.reserve(sim.body->nodes().size());
+        for (const softwing::Node &node : sim.body->nodes()) {
+            externalForces.push_back(node.force);
+        }
+        for (int substep = 0; substep < substeps; ++substep) {
+            auto &liveNodes = sim.body->nodes();
+            for (std::size_t index = 0; index < liveNodes.size();
+                 ++index) {
+                liveNodes[index].force = externalForces[index];
+            }
+            sim.body->step(sub);
+            projectContacts(sim);
+        }
+    } else {
+        sim.body->step(settings);
+    }
 
     if (controls.freeFlight) {
         recentreSystem(sim);

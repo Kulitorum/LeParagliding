@@ -102,11 +102,41 @@ false` reproduces the old stamp bit for bit; the bench takes
 `--tuck` experiments: moderate collapses (−4° excursion, grab yanks to
 ~3 m) now recover cleanly where recovery is expected; after a violent
 −6° excursion the old model parks permanently deflated while the cell
-model re-pressurises every section back to rest volume but the wing can
-stay span-folded — an inflated cravat, which is also what a real wing
-does, because clearing a cravat needs fabric-on-fabric contact the
-playground does not model (the engine's contact machinery exists but is
-not wired in; that is the known next step if tangle-clearing matters).
+model re-pressurises every section back to rest volume.
+
+### Fabric contact
+
+Without contact, folded fabric passes freely through itself and through
+the lines — which cuts both ways: impossible geometry, but also an
+unphysical escape hatch that lets a tangle "un-knot" by ghosting. The
+**Fabric contact** checkbox (Solver section; `SimControls::
+fabricContact`, bench `--contact`) adds the Playground's own thin-cloth
+pass: candidates found once per frame by a spatial-hash sweep (skin
+nodes vs skin triangles and vs suspension-line segments, with rest-pose
+pairs excluded so designed-adjacent fabric never fights), then plain
+PBD position projections after every substep with an inelastic normal
+velocity fix, a remembered approach side so a fast crossing is pushed
+BACK through, and a 1 mm/substep correction cap so deep stacks resolve
+gently. It is deliberately NOT the engine's certified contact pipeline,
+which enumerates O(V·T + E²) feature pairs serially ninety times a
+frame — five orders of magnitude over budget — and cannot be switched
+off once registered.
+
+Two calibration lessons, both measured on gnuC2: the separation must
+stay at 1 mm — at 2 mm the wrinkle fields of a healthy loaded wing
+(~23% slack fabric at sub-millimetre spacing) light up as thousands of
+false contacts that stiffen the skin and snag collapse recovery — and
+capture margins must be taken relative to the canopy-mean velocity,
+or bulk motion makes the whole upper and lower skin candidates of each
+other. Cost with the box ticked: ~12 ms/frame on gnuC2 at native
+resolution (detection once per frame, thirty projection passes), about
+32 fps against 52 without. Off is the identical old code path.
+
+With contact on, a −4° excursion recovers to a clean wing (32 mm
+residual asymmetry); a −6° one recovers to ~81% span with a genuine
+tip cravat still working itself out — physically locked fabric now, not
+geometry that ghosted apart. Line-line contact (riser twists) is not
+modelled.
 
 ## The instruments
 

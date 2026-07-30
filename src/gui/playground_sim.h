@@ -234,6 +234,42 @@ struct SimBuildOptions
     int ribStationSplit = defaultRibStationSplit;
 };
 
+// One fabric-contact candidate: a skin node against a skin triangle or a
+// suspension-line segment, found by the once-per-frame detection pass and
+// re-projected every substep (see applyFabricContact in the .cpp).
+struct ContactCandidate
+{
+    std::uint32_t node = 0;
+    // Skin triangle index, or an index into SimBody::lineSegments.
+    std::uint32_t item = 0;
+    bool line = false;
+    // Which side of the triangle the node approached from at detection,
+    // so a fast crossing inside one frame cannot flip the push direction.
+    float side = 1.0F;
+};
+
+// Scratch for the fabric/line contact pass: sorted cell grids rebuilt per
+// frame, the frame's candidate list, and the build-time preparations —
+// the skin's unique node set, the grid cell size, and the pairs that sit
+// inside the contact thickness in the REST pose (designed-adjacent
+// fabric, e.g. around line attachments, which contact must never fight).
+struct ContactScratch
+{
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> triangleCells;
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> segmentCells;
+    std::vector<ContactCandidate> candidates;
+    std::vector<std::uint64_t> restExclusions;   // sorted pair keys
+    std::vector<std::uint32_t> skinNodes;
+    std::vector<float> itemSpeed;   // per-item scratch, m/s
+    // Capture-inflated item AABBs (xyz min, xyz max), triangles first,
+    // then segments — the cheap reject before any closest-point math.
+    std::vector<std::array<float, 6>> itemBounds;
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> nodeCells;
+    std::vector<std::uint64_t> pairScratch;
+    double cellSize = 0.05;
+    bool prepared = false;
+};
+
 // A built wing: the solver body plus everything the view and the controls
 // index into it by.
 struct SimBody
@@ -300,6 +336,8 @@ struct SimBody
     // ram target, so a fresh build behaves exactly like the old model).
     std::vector<SimCell> cells;
     std::vector<double> cellPressure;
+    // Fabric/line contact working set; inert until the option is on.
+    ContactScratch contact;
     // Chord fraction of the designed hang line: the chord station the
     // carabiners sit under at rest. The imposed aerodynamic resultant
     // acts here at trim and travels aft/forward of it as the angle of
@@ -395,6 +433,17 @@ struct SimControls
     // its own intake, a collapsed side is re-fed by its neighbours). Off
     // reproduces the old blanket ram-pressure stamp bit for bit.
     bool cellPressureModel = true;
+    // Fabric self-contact plus fabric-versus-line contact, as a runtime
+    // option: folded fabric stops passing through itself and through the
+    // suspension lines, which is what lets a cravat clear. This is the
+    // Playground's own thin-cloth pass (once-per-frame detection, per-
+    // substep projection), NOT the engine's certified contact machinery —
+    // that pipeline re-enumerates every vertex-triangle and edge-edge
+    // combination serially in every constraint iteration, which is five
+    // orders of magnitude over the frame budget on a real wing, and once
+    // a pair is registered it cannot be turned off. Off skips the pass
+    // entirely and steps exactly as before.
+    bool fabricContact = false;
     double brakeLeft = 0.0;
     double brakeRight = 0.0;
     int substeps = simulationSubsteps;

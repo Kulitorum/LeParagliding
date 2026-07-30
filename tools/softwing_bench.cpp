@@ -14,7 +14,7 @@
 //                  [--substeps N] [--iterations N] [--csv]
 //                  [--shape [SECONDS]] [--shape-sweep FROM:TO:STEP]
 //                  [--tuck [PULL_CM]] [--dive [DEGREES]] [--no-cells]
-//                  [--no-flight-load]
+//                  [--contact] [--no-flight-load]
 
 #include "../src/gui/playground_metrics.h"
 #include "../src/gui/playground_sim.h"
@@ -77,6 +77,8 @@ struct Options
     // The per-cell air model, on by default like the GUI; --no-cells is
     // the A/B switch for comparing against the old blanket-ram stamp.
     bool noCells = false;
+    // Fabric/line self-contact, off by default like the GUI.
+    bool contact = false;
     // The collapse-recovery experiment: settle, yank one side's A cascade
     // down until it folds, release, and watch whether the wing recovers.
     bool tuck = false;
@@ -152,6 +154,8 @@ struct Options
             options.noFlightLoad = true;
         } else if (argument == "--no-cells") {
             options.noCells = true;
+        } else if (argument == "--contact") {
+            options.contact = true;
         } else if (argument == "--tuck") {
             options.tuck = true;
             // Full-string numeric parse, so a following mesh path is not
@@ -472,7 +476,7 @@ int main(int argc, char **argv)
                      "[--gpu|--gpu-jacobi] [--csv] "
                      "[--shape [SECONDS]] [--shape-sweep FROM:TO:STEP] "
                      "[--tuck [PULL_CM]] [--dive [DEGREES]] [--no-cells] "
-                     "[--no-flight-load]\n");
+                     "[--contact] [--no-flight-load]\n");
         return 2;
     }
 
@@ -518,6 +522,7 @@ int main(int argc, char **argv)
     // false, which is what keeps the timing baselines and pose checksums
     // bit-identical to runs that predate these flags.
     controls.cellPressureModel = !options.noCells;
+    controls.fabricContact = options.contact;
     if (options.shape || options.shapeSweep || options.tuck
         || options.dive) {
         if (options.freeFlight) {
