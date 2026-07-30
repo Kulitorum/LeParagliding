@@ -2,12 +2,6 @@
 
 #include <QWidget>
 
-#include <memory>
-
-namespace lep::playground {
-class SettleMonitor;
-}
-
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -121,14 +115,11 @@ private:
     QTimer *flightTimer_ = nullptr;
     QLabel *shapeLabel_ = nullptr;
     QPushButton *settleButton_ = nullptr;
-    // The foreground settle: a zero-interval timer steps the live sim in
-    // ~40 ms chunks (the event loop breathes between chunks, so Cancel
-    // and the camera stay responsive), the monitor calls convergence.
+    // The settle runs on the simulation worker; this timer only polls
+    // its progress into the status line and detects completion.
     QTimer *settleTimer_ = nullptr;
-    std::unique_ptr<lep::playground::SettleMonitor> settleMonitor_;
     bool settleRunning_ = false;
     int settleRestoreQuality_ = -1;
-    int settleStatusTick_ = 0;
     // At most one analysis dialog, so two sweeps can never race each
     // other for the pause on the live solver.
     PlaygroundAnalysisDialog *analysisDialog_ = nullptr;

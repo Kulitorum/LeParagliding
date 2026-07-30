@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QMatrix4x4>
 #include <QMouseEvent>
+#include <QMutex>
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
@@ -27,7 +28,9 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
+#include <QThread>
 #include <QToolButton>
+#include <QWaitCondition>
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -114,6 +117,547 @@ struct LegendBar
 } // namespace
 
 // A minimal orbit-camera OpenGL view running the XPBD body on a timer.
+// Steps the wing on its own thread so the GUI stays fluid at any mesh
+// density: at 4x subdivision one solver frame costs hundreds of
+// milliseconds, and no amount of GUI-thread chunking survives that.
+// Ownership is strict — the SimBody, the baseline and every metrics
+// call live on this thread only. The GUI sees the simulation solely
+// through SNAPSHOTS (positions, the active colour field, line
+// tensions, the instrument report) exchanged through a triple-buffered
+// slot: the worker fills its back buffer and swaps it in; the GUI
+// swaps it out and paints at its own pace. Inputs flow the other way —
+// live controls under the same mutex, structural changes (rebuild,
+// grab, settle) as queued commands handled between frames.
+class SimWorker : public QThread
+{
+public:
+    struct Snapshot
+    {
+        // Everything paintGL needs, in render precision.
+        std::vector<QVector3D> positions;
+        // Per NODE, for the active colour mode (metres for deviation,
+        // strain otherwise); empty in Plain mode.
+        std::vector<float> colourField;
+        std::vector<float> lineTension;   // parallel to the segments
+        // The instrument pass, refreshed on its own slower cadence.
+        lep::playground::ShapeReport report;
+        // Fast per-frame readouts for the dial and free-flight HUD.
+        double liftNewtons = 0.0;
+        double alphaDegrees = 0.0;
+        double airspeed = 0.0;
+        double glideRatio = 0.0;
+        double forwardSpeed = 0.0;
+        double sinkSpeed = 0.0;
+        double pilotBelowMetres = 0.0;
+        double pilotMassKg = 0.0;
+        bool polarActive = false;
+        bool grabActive = false;
+        double grabForceNewtons = 0.0;
+        double grabPullMetres = 0.0;
+        // Settle progress; done latches until the GUI acknowledges by
+        // cancelling the settle.
+        bool settleRunning = false;
+        bool settleDone = false;
+        bool settleConverged = false;
+        double settleSimSeconds = 0.0;
+        double settleAgitation = 0.0;
+        QString simError;
+    };
+
+    // Static per-build data the renderer keys the positions by.
+    struct Topology
+    {
+        std::vector<RenderFace> renderFaces;
+        std::vector<LineSegment> lineSegments;
+        std::size_t skinTriangleCount = 0;
+        std::vector<std::size_t> junctions;   // for grab picking
+        softwing::Vec3 boundsLow;
+        softwing::Vec3 boundsHigh;
+        std::size_t pilotNode = noConstraint;
+        bool freeFlight = false;
+        QString buildError;
+    };
+
+    SimWorker() { start(); }
+
+    ~SimWorker() override
+    {
+        {
+            QMutexLocker lock(&mutex_);
+            quit_ = true;
+        }
+        wake_.wakeAll();
+        wait();
+    }
+
+    // A full rebuild: mesh, options and controls are copied; the wing
+    // returns to its rest pose. Supersedes any queued rebuild.
+    void requestRebuild(SimMesh mesh,
+                        const SimBuildOptions &options,
+                        const SimControls &controls,
+                        int colorMode)
+    {
+        QMutexLocker lock(&mutex_);
+        pendingMesh_ = std::move(mesh);
+        pendingOptions_ = options;
+        rebuildRequested_ = true;
+        controls_ = controls;
+        colorMode_ = colorMode;
+        settleRequested_ = false;
+        settleCancel_ = true;
+        wake_.wakeAll();
+    }
+
+    // Live inputs: cheap, applied before the next frame. displayDirty
+    // makes a paused worker refresh its snapshot so a colour-mode
+    // change recolours a frozen wing.
+    void updateInputs(const SimControls &controls, int colorMode)
+    {
+        QMutexLocker lock(&mutex_);
+        controls_ = controls;
+        if (colorMode != colorMode_) {
+            colorMode_ = colorMode;
+            displayDirty_ = true;
+        }
+        wake_.wakeAll();
+    }
+
+    void setPaused(bool paused)
+    {
+        QMutexLocker lock(&mutex_);
+        paused_ = paused;
+        wake_.wakeAll();
+    }
+
+    void beginGrab(std::size_t junction)
+    {
+        QMutexLocker lock(&mutex_);
+        grabBegin_ = junction;
+        wake_.wakeAll();
+    }
+
+    void moveGrab(const softwing::Vec3 &target)
+    {
+        QMutexLocker lock(&mutex_);
+        grabTarget_ = target;
+        grabMove_ = true;
+        wake_.wakeAll();
+    }
+
+    void endGrab()
+    {
+        QMutexLocker lock(&mutex_);
+        grabEnd_ = true;
+        wake_.wakeAll();
+    }
+
+    void startSettle(double budgetSeconds)
+    {
+        QMutexLocker lock(&mutex_);
+        settleBudget_ = budgetSeconds;
+        settleRequested_ = true;
+        settleCancel_ = false;
+        paused_ = false;
+        wake_.wakeAll();
+    }
+
+    void cancelSettle()
+    {
+        QMutexLocker lock(&mutex_);
+        settleCancel_ = true;
+        // So the cleared settle state reaches the GUI even while paused.
+        displayDirty_ = true;
+        wake_.wakeAll();
+    }
+
+    // Swap the freshest snapshot/topology out, surrendering the
+    // previous front buffer for reuse. False when nothing new arrived.
+    bool takeSnapshot(Snapshot &front)
+    {
+        QMutexLocker lock(&mutex_);
+        if (!snapshotFresh_) {
+            return false;
+        }
+        std::swap(front, sharedSnapshot_);
+        snapshotFresh_ = false;
+        return true;
+    }
+
+    bool takeTopology(Topology &front)
+    {
+        QMutexLocker lock(&mutex_);
+        if (!topologyFresh_) {
+            return false;
+        }
+        std::swap(front, sharedTopology_);
+        topologyFresh_ = false;
+        return true;
+    }
+
+    void run() override
+    {
+        QElapsedTimer pace;
+        pace.start();
+        QElapsedTimer fieldClock;
+        QElapsedTimer reportClock;
+        lep::playground::ShapeBaseline baseline;
+        SimBuildOptions builtOptions;
+        std::unique_ptr<lep::playground::SettleMonitor> monitor;
+        bool settling = false;
+        bool settleDone = false;
+        bool settleConverged = false;
+        SimBody sim;
+        QString simError;
+
+        while (true) {
+            // --- Inputs, under the lock. ---
+            SimControls controls;
+            int colorMode = 0;
+            bool doRebuild = false;
+            SimMesh mesh;
+            SimBuildOptions options;
+            bool paused = false;
+            std::size_t grabBegin = noConstraint;
+            bool grabMove = false;
+            softwing::Vec3 grabTarget;
+            bool grabEnd = false;
+            bool startSettle = false;
+            double settleBudget = 30.0;
+            bool displayDirty = false;
+            {
+                QMutexLocker lock(&mutex_);
+                if (quit_) {
+                    return;
+                }
+                const bool idle = !rebuildRequested_ && !displayDirty_
+                                  && grabBegin_ == noConstraint
+                                  && !grabMove_ && !grabEnd_
+                                  && !settleRequested_
+                                  && ((paused_ && !settling)
+                                      || !sim.body);
+                if (idle && !settleCancel_) {
+                    wake_.wait(&mutex_);
+                    if (quit_) {
+                        return;
+                    }
+                }
+                controls = controls_;
+                colorMode = colorMode_;
+                paused = paused_;
+                displayDirty = displayDirty_;
+                displayDirty_ = false;
+                if (rebuildRequested_) {
+                    doRebuild = true;
+                    rebuildRequested_ = false;
+                    mesh = std::move(pendingMesh_);
+                    options = pendingOptions_;
+                }
+                grabBegin = grabBegin_;
+                grabBegin_ = noConstraint;
+                grabMove = grabMove_;
+                grabMove_ = false;
+                grabTarget = grabTarget_;
+                grabEnd = grabEnd_;
+                grabEnd_ = false;
+                if (settleRequested_) {
+                    startSettle = true;
+                    settleRequested_ = false;
+                    settleBudget = settleBudget_;
+                }
+                if (settleCancel_) {
+                    settling = false;
+                    settleDone = false;
+                    settleCancel_ = false;
+                    monitor.reset();
+                }
+            }
+
+            // --- Structural work, off the lock. ---
+            if (doRebuild) {
+                simError.clear();
+                settling = false;
+                settleDone = false;
+                monitor.reset();
+                builtOptions = options;
+                try {
+                    sim = buildSimBody(mesh, options, controls);
+                    baseline =
+                        lep::playground::captureShapeBaseline(sim);
+                } catch (const std::exception &failure) {
+                    simError = QString::fromUtf8(failure.what());
+                    sim = SimBody{};
+                }
+                publishTopology(sim, options, simError);
+                fieldClock.invalidate();
+                reportClock.invalidate();
+                publishSnapshot(sim, baseline, builtOptions, controls,
+                                colorMode, settling, settleDone,
+                                settleConverged, monitor.get(),
+                                simError, true, true);
+                continue;
+            }
+            if (!sim.body) {
+                continue;
+            }
+            if (grabBegin != noConstraint) {
+                lep::playground::beginGrab(sim, grabBegin);
+            }
+            if (grabMove) {
+                lep::playground::moveGrab(sim, grabTarget);
+            }
+            if (grabEnd) {
+                lep::playground::endGrab(sim);
+            }
+            if (startSettle) {
+                monitor =
+                    std::make_unique<lep::playground::SettleMonitor>(
+                        settleBudget);
+                settling = true;
+                settleDone = false;
+                settleConverged = false;
+            }
+
+            const bool stepping =
+                simError.isEmpty() && (!paused || settling);
+            if (stepping) {
+                try {
+                    lep::playground::stepSimulation(sim, controls);
+                    if (settling && monitor != nullptr
+                        && monitor->frameStepped(
+                            sim, controls.pressurePascal)) {
+                        settleConverged = monitor->settled();
+                        settling = false;
+                        settleDone = true;
+                        // Freeze exactly at the converged pose; the GUI
+                        // acknowledges with cancelSettle and decides
+                        // the run state.
+                        QMutexLocker lock(&mutex_);
+                        paused_ = true;
+                    }
+                } catch (const std::exception &failure) {
+                    simError = QString::fromUtf8(failure.what());
+                    settling = false;
+                    settleDone = true;
+                    settleConverged = false;
+                }
+            } else if (!displayDirty) {
+                continue;
+            }
+
+            const bool wantFields =
+                !fieldClock.isValid()
+                || fieldClock.elapsed() >= fieldRefreshMilliseconds
+                || displayDirty;
+            const bool wantReport = !reportClock.isValid()
+                                    || reportClock.elapsed() >= 500;
+            if (wantFields) {
+                fieldClock.start();
+            }
+            if (wantReport) {
+                reportClock.start();
+            }
+            publishSnapshot(sim, baseline, builtOptions, controls,
+                            colorMode, settling, settleDone,
+                            settleConverged, monitor.get(), simError,
+                            wantFields, wantReport);
+
+            // Pace to the display rate when the solver is faster than
+            // it; a settle runs flat out on purpose.
+            if (stepping && !settling) {
+                const qint64 remaining = 16 - pace.elapsed();
+                if (remaining > 0) {
+                    msleep(static_cast<unsigned long>(remaining));
+                }
+            }
+            pace.start();
+        }
+    }
+
+private:
+    void publishTopology(const SimBody &sim,
+                         const SimBuildOptions &options,
+                         const QString &error)
+    {
+        backTopology_.renderFaces = sim.renderFaces;
+        backTopology_.lineSegments = sim.lineSegments;
+        backTopology_.skinTriangleCount = sim.skinTriangleCount;
+        backTopology_.boundsLow = sim.boundsLow;
+        backTopology_.boundsHigh = sim.boundsHigh;
+        backTopology_.pilotNode = sim.pilotNode;
+        backTopology_.freeFlight = sim.pilotNode != noConstraint;
+        backTopology_.buildError = error;
+        backTopology_.junctions.clear();
+        std::set<std::size_t> unique;
+        for (const LineSegment &segment : sim.lineSegments) {
+            unique.insert(segment.a);
+            unique.insert(segment.b);
+        }
+        backTopology_.junctions.assign(unique.begin(), unique.end());
+        Q_UNUSED(options);
+        QMutexLocker lock(&mutex_);
+        std::swap(sharedTopology_, backTopology_);
+        topologyFresh_ = true;
+    }
+
+    void publishSnapshot(const SimBody &sim,
+                         const lep::playground::ShapeBaseline &baseline,
+                         const SimBuildOptions &options,
+                         const SimControls &controls,
+                         int colorMode,
+                         bool settling,
+                         bool settleDone,
+                         bool settleConverged,
+                         const lep::playground::SettleMonitor *monitor,
+                         const QString &error,
+                         bool refreshFields,
+                         bool refreshReport)
+    {
+        Snapshot &back = backSnapshot_;
+        back.simError = error;
+        if (sim.body) {
+            const auto &nodes = sim.body->nodes();
+            back.positions.resize(nodes.size());
+            for (std::size_t index = 0; index < nodes.size(); ++index) {
+                const softwing::Vec3 &p = nodes[index].position;
+                back.positions[index] =
+                    QVector3D(static_cast<float>(p.x),
+                              static_cast<float>(p.y),
+                              static_cast<float>(p.z));
+            }
+            back.lineTension.resize(sim.lineSegments.size());
+            for (std::size_t index = 0;
+                 index < sim.lineSegments.size(); ++index) {
+                back.lineTension[index] = static_cast<float>(
+                    lep::playground::constraintTensionNewtons(
+                        sim, controls,
+                        sim.lineSegments[index].constraint));
+            }
+            if (refreshFields) {
+                // ColorMode order matches the page's combo. Computed
+                // into the PERSISTENT field and copied out per
+                // snapshot: writing straight into the ping-pong buffer
+                // alternated a fresh field with a stale one and the
+                // heatmap flickered.
+                if (colorMode == 2) {
+                    lep::playground::nodeDeviationField(
+                        sim, baseline, currentField_);
+                } else if (colorMode == 1 || colorMode == 3) {
+                    lep::playground::nodeStrainFields(
+                        sim, options.detailedRibs,
+                        colorMode == 1 ? currentField_ : scratchField_,
+                        colorMode == 3 ? currentField_
+                                       : scratchField_);
+                } else {
+                    currentField_.clear();
+                }
+            }
+            back.colourField = currentField_;
+            if (refreshReport && !baseline.restPositions.empty()) {
+                currentReport_ = lep::playground::measureShape(
+                    sim, controls, baseline);
+            }
+            back.report = currentReport_;
+            back.polarActive =
+                controls.flightLoad || controls.freeFlight;
+            back.liftNewtons = sim.lastLift;
+            back.alphaDegrees = sim.lastAlphaDegrees;
+            back.airspeed = sim.lastAirspeed;
+            back.glideRatio = sim.lastGlideRatio;
+            back.pilotMassKg = sim.pilotMass;
+            back.forwardSpeed = 0.0;
+            back.sinkSpeed = 0.0;
+            back.pilotBelowMetres = 0.0;
+            if (controls.freeFlight
+                && sim.pilotNode != noConstraint) {
+                softwing::Vec3 velocity;
+                double mass = 0.0;
+                softwing::Vec3 canopyCentre;
+                std::size_t canopyCount = 0;
+                const auto &nodes = sim.body->nodes();
+                for (std::size_t index = 0; index < nodes.size();
+                     ++index) {
+                    const softwing::Node &node = nodes[index];
+                    if (node.inverseMass > 0.0) {
+                        const double nodeMass =
+                            1.0 / node.inverseMass;
+                        velocity += nodeMass * node.velocity;
+                        mass += nodeMass;
+                    }
+                    if (index < sim.canopyNodeCount) {
+                        canopyCentre += node.position;
+                        ++canopyCount;
+                    }
+                }
+                if (mass > 0.0) {
+                    velocity /= mass;
+                }
+                back.forwardSpeed =
+                    dot(velocity, sim.restChordDirection);
+                back.sinkSpeed = velocity.z;
+                if (canopyCount > 0) {
+                    canopyCentre /= double(canopyCount);
+                    back.pilotBelowMetres =
+                        canopyCentre.z
+                        - nodes[sim.pilotNode].position.z;
+                }
+            }
+            back.grabActive = lep::playground::grabActive(sim);
+            back.grabForceNewtons =
+                lep::playground::grabForceNewtons(sim, controls);
+            back.grabPullMetres = 0.0;
+            if (back.grabActive
+                && sim.grabAnchorNode < sim.body->nodes().size()
+                && sim.grabbedNode < sim.body->nodes().size()) {
+                back.grabPullMetres = length(
+                    sim.body->nodes()[sim.grabAnchorNode].position
+                    - sim.body->nodes()[sim.grabbedNode].position);
+            }
+        } else {
+            back.positions.clear();
+            back.colourField.clear();
+            back.lineTension.clear();
+        }
+        back.settleRunning = settling;
+        back.settleDone = settleDone;
+        back.settleConverged = settleConverged;
+        back.settleSimSeconds =
+            monitor != nullptr ? monitor->simulatedSeconds() : 0.0;
+        back.settleAgitation =
+            monitor != nullptr ? monitor->lastAgitation() : 0.0;
+
+        QMutexLocker lock(&mutex_);
+        std::swap(sharedSnapshot_, backSnapshot_);
+        snapshotFresh_ = true;
+    }
+
+    QMutex mutex_;
+    QWaitCondition wake_;
+    bool quit_ = false;
+    bool paused_ = false;
+    bool rebuildRequested_ = false;
+    bool displayDirty_ = false;
+    SimMesh pendingMesh_;
+    SimBuildOptions pendingOptions_;
+    SimControls controls_;
+    int colorMode_ = 0;
+    std::size_t grabBegin_ = noConstraint;
+    bool grabMove_ = false;
+    softwing::Vec3 grabTarget_;
+    bool grabEnd_ = false;
+    bool settleRequested_ = false;
+    bool settleCancel_ = false;
+    double settleBudget_ = 30.0;
+    Snapshot sharedSnapshot_;
+    Snapshot backSnapshot_;
+    bool snapshotFresh_ = false;
+    Topology sharedTopology_;
+    Topology backTopology_;
+    bool topologyFresh_ = false;
+    std::vector<float> scratchField_;
+    std::vector<float> currentField_;
+    lep::playground::ShapeReport currentReport_;
+};
+
 // No signals or slots of its own, so no Q_OBJECT / moc involvement.
 class PlaygroundView : public QOpenGLWidget, protected QOpenGLFunctions
 {
@@ -134,12 +678,31 @@ public:
         // pressure field for its baselines). Must match the page's
         // Flight-load checkbox default.
         controls_.flightLoad = true;
+        worker_ = std::make_unique<SimWorker>();
+        // The GUI's only clock: poll the worker's snapshot slot and
+        // repaint when something new arrived. Stepping happens on the
+        // worker; this timer never blocks on it.
         timer_ = new QTimer(this);
         timer_->setInterval(16);
-        connect(timer_, &QTimer::timeout, this, [this] {
-            stepSimulation();
+        connect(timer_, &QTimer::timeout, this, [this] { pollWorker(); });
+        timer_->start();
+    }
+
+    void pollWorker()
+    {
+        bool changed = false;
+        if (worker_->takeTopology(topo_)) {
+            changed = true;
+            // A fresh build frames itself, exactly as the synchronous
+            // rebuild used to.
+            fitView();
+        }
+        if (worker_->takeSnapshot(front_)) {
+            changed = true;
+        }
+        if (changed) {
             update();
-        });
+        }
     }
 
     QString buildFromMesh(const SimMesh &mesh)
@@ -148,67 +711,46 @@ public:
         // run: the pilot only exists on a body built for free flight, so
         // the toggle is a rebuild.
         mesh_ = mesh;
-        rebuildBody();
+        sendRebuild();
         return {};
     }
 
-    void rebuildBody()
+    // Hands the mesh to the worker; the built topology and first
+    // snapshot come back through the poll. The wing returns to its rest
+    // pose and runs.
+    void sendRebuild()
     {
-        // A grab holds a node of the body being discarded; drop it rather
-        // than let a stale index pull on the fresh wing.
+        if (mesh_.nodes.empty() || worker_ == nullptr) {
+            return;
+        }
+        // A grab holds a node of the body being discarded.
         if (grabbing_) {
             grabbing_ = false;
             setCursor(flyMode_ ? Qt::CrossCursor : Qt::ArrowCursor);
         }
-        sim_ = buildSimBody(mesh_, buildOptions_, controls_);
-        // The baseline is the design shape itself: buildSimBody leaves
-        // every node at the mesh's rest pose (the free-flight launch only
-        // stamps velocities), so capturing here reads exactly the designed
-        // geometry the instruments compare against.
-        baseline_ = lep::playground::captureShapeBaseline(sim_);
-        deviationField_.clear();
-        nodeTensile_.clear();
-        nodeSlack_.clear();
-        refreshColourField();
-
-        fitView();
-
-        setRunning(true);
+        worker_->requestRebuild(mesh_, buildOptions_, controls_,
+                                static_cast<int>(colorMode_));
+        worker_->setPaused(false);
+        runningRequested_ = true;
     }
 
     // Frame the wing (and, flying, the whole pendulum): target and
     // distance only, so the current view direction survives a re-fit.
     void fitView()
     {
-        if (!sim_.body) {
+        if (topo_.renderFaces.empty()) {
             return;
         }
-        const softwing::Vec3 low = sim_.boundsLow;
-        const softwing::Vec3 high = sim_.boundsHigh;
+        const softwing::Vec3 low = topo_.boundsLow;
+        const softwing::Vec3 high = topo_.boundsHigh;
         softwing::Vec3 focus = 0.5 * (low + high);
         double extent = length(high - low);
-        if (controls_.freeFlight
-            && sim_.pilotNode != noConstraint) {
-            // The flying system is re-centred on its mass centre every
-            // step, which sits close to the pilot. Frame the whole
-            // pendulum — canopy above, pilot below — in that frame.
-            softwing::Vec3 centreOfMass;
-            double mass = 0.0;
-            const auto &nodes = sim_.body->nodes();
-            for (const softwing::Node &node : nodes) {
-                if (node.inverseMass <= 0.0) {
-                    continue;
-                }
-                const double nodeMass = 1.0 / node.inverseMass;
-                centreOfMass += nodeMass * node.position;
-                mass += nodeMass;
-            }
-            if (mass > 0.0) {
-                centreOfMass /= mass;
-            }
-            const softwing::Vec3 pilot =
-                nodes[sim_.pilotNode].position;
-            focus = 0.5 * (0.5 * (low + high) + pilot) - centreOfMass;
+        if (topo_.freeFlight
+            && topo_.pilotNode < front_.positions.size()) {
+            // Frame the whole pendulum: canopy above, pilot below.
+            const QVector3D p = front_.positions[topo_.pilotNode];
+            const softwing::Vec3 pilot{p.x(), p.y(), p.z()};
+            focus = 0.5 * (focus + pilot);
             extent = std::max(extent,
                               1.4 * length(0.5 * (low + high) - pilot));
         }
@@ -278,7 +820,7 @@ public:
         }
         controls_.freeFlight = enabled;
         if (!mesh_.nodes.empty()) {
-            rebuildBody();
+            sendRebuild();
         }
         update();
     }
@@ -290,7 +832,7 @@ public:
     void resetSimulation()
     {
         if (!mesh_.nodes.empty()) {
-            rebuildBody();
+            sendRebuild();
         }
     }
 
@@ -331,36 +873,22 @@ public:
     // pilot would use.
     QString flightReadout() const
     {
-        if (!controls_.freeFlight || !sim_.body
-            || sim_.lastAirspeed <= 0.0) {
+        if (!controls_.freeFlight || front_.airspeed <= 0.0) {
             return {};
-        }
-        softwing::Vec3 velocity;
-        double mass = 0.0;
-        for (const softwing::Node &node : sim_.body->nodes()) {
-            if (node.inverseMass <= 0.0) {
-                continue;
-            }
-            const double nodeMass = 1.0 / node.inverseMass;
-            velocity += nodeMass * node.velocity;
-            mass += nodeMass;
-        }
-        if (mass > 0.0) {
-            velocity /= mass;
         }
         return QStringLiteral(
                    "%1 km/h · sink %2 m/s · glide %3 · α %4° · pilot %5 kg")
-            .arg(sim_.lastAirspeed * 3.6, 0, 'f', 0)
-            .arg(-velocity.z, 0, 'f', 1)
-            .arg(sim_.lastGlideRatio, 0, 'f', 1)
-            .arg(sim_.lastAlphaDegrees, 0, 'f', 1)
-            .arg(sim_.pilotMass, 0, 'f', 0);
+            .arg(front_.airspeed * 3.6, 0, 'f', 0)
+            .arg(-front_.sinkSpeed, 0, 'f', 1)
+            .arg(front_.glideRatio, 0, 'f', 1)
+            .arg(front_.alphaDegrees, 0, 'f', 1)
+            .arg(front_.pilotMassKg, 0, 'f', 0);
     }
 
     void setPressurePascal(double pressure)
     {
         controls_.pressurePascal = pressure;
-        applyPressure();
+        pushInputs();
     }
 
     // Degrees between the airflow and the wing's rest chord. The load falls
@@ -369,7 +897,7 @@ public:
     void setAngleOfAttack(double degrees)
     {
         controls_.angleOfAttackDegrees = degrees;
-        applyPressure();
+        pushInputs();
     }
 
     // Takes the VIEWER's left and right. The solver's "left" cascade sits
@@ -381,6 +909,16 @@ public:
     {
         controls_.brakeLeft = rightMetres;
         controls_.brakeRight = leftMetres;
+        pushInputs();
+    }
+
+    // Every live-controls change funnels through here to the worker.
+    void pushInputs()
+    {
+        if (worker_ != nullptr) {
+            worker_->updateInputs(controls_,
+                                  static_cast<int>(colorMode_));
+        }
     }
 
     void setSurfaceVisible(SimSurface surface, bool visible)
@@ -405,6 +943,7 @@ public:
             table[std::clamp(index, 0, count - 1)];
         controls_.substeps = chosen.substeps;
         controls_.constraintIterations = chosen.iterations;
+        pushInputs();
     }
 
     // Skin heatmap source. The page's combo items are in this order.
@@ -422,31 +961,35 @@ public:
             return;
         }
         colorMode_ = mode;
-        // A paused tunnel must colour immediately too; the step-count
-        // cadence only refreshes while the solver runs.
-        refreshColourField();
+        // The worker recomputes the field for the new mode — also while
+        // paused, so a frozen wing recolours (displayDirty).
+        pushInputs();
         update();
     }
 
     // Wind-tunnel loading: impose the wing-level polar pass in pinned mode
     // so line loads are realistic. A per-step control, no rebuild.
-    void setFlightLoad(bool enabled) { controls_.flightLoad = enabled; }
+    void setFlightLoad(bool enabled)
+    {
+        controls_.flightLoad = enabled;
+        pushInputs();
+    }
 
     // Snapshot for the analysis dialog, which drives its own bodies with
     // the tunnel's exact settings.
     SimControls controls() const { return controls_; }
 
-    // Debug only: what the display fields actually hold.
+    // Debug only: what the display snapshot actually holds.
     QString debugFieldSummary() const
     {
-        float devPeak = 0.0F;
-        for (const float value : deviationField_) {
-            devPeak = std::max(devPeak, value);
+        float peak = 0.0F;
+        for (const float value : front_.colourField) {
+            peak = std::max(peak, std::abs(value));
         }
-        return QStringLiteral("mode %1 dev[%2] peak %3")
+        return QStringLiteral("mode %1 field[%2] peak %3")
             .arg(static_cast<int>(colorMode_))
-            .arg(deviationField_.size())
-            .arg(devPeak);
+            .arg(front_.colourField.size())
+            .arg(peak);
     }
 
     // For the angle dial: the polar pass's live numbers. Lift is 0 and
@@ -456,30 +999,33 @@ public:
     {
         return controls_.flightLoad || controls_.freeFlight;
     }
-    double liveLiftNewtons() const { return sim_.lastLift; }
-    double liveAlphaDegrees() const { return sim_.lastAlphaDegrees; }
+    double liveLiftNewtons() const { return front_.liftNewtons; }
+    double liveAlphaDegrees() const { return front_.alphaDegrees; }
 
-    // For the page's foreground settle: one simulation frame, outside
-    // the 16 ms timer's pacing. False when the solver threw (the error
-    // is in lastSimError and the run must stop).
-    bool stepOnce()
+    // The settle runs on the worker; the GUI watches it through the
+    // snapshot and acknowledges completion.
+    void startSettle(double budgetSeconds)
     {
-        stepSimulation();
-        return simError_.isEmpty();
+        if (worker_ != nullptr) {
+            runningRequested_ = true;
+            worker_->startSettle(budgetSeconds);
+        }
     }
+    void acknowledgeSettle()
+    {
+        if (worker_ != nullptr) {
+            worker_->cancelSettle();
+        }
+    }
+    bool settleRunning() const { return front_.settleRunning; }
+    bool settleDone() const { return front_.settleDone; }
+    bool settleConverged() const { return front_.settleConverged; }
+    double settleSimSeconds() const { return front_.settleSimSeconds; }
+    double settleAgitation() const { return front_.settleAgitation; }
 
-    // The live body against sim state for the settle verdict: the
-    // monitor reads agitation and the resultant off the body itself.
-    const SimBody &simBody() const { return sim_; }
-
-    // A full instrument pass on the current pose, for the settle's Done
-    // line. Empty-report when no body or baseline exists.
     lep::playground::ShapeReport currentShapeReport() const
     {
-        if (!sim_.body || baseline_.restPositions.empty()) {
-            return {};
-        }
-        return lep::playground::measureShape(sim_, controls_, baseline_);
+        return front_.report;
     }
 
     // One line for the shape HUD: the live wing measured against its
@@ -487,11 +1033,10 @@ public:
     // its baseline exist.
     QString shapeReadout() const
     {
-        if (!sim_.body || baseline_.restPositions.empty()) {
+        if (front_.positions.empty()) {
             return {};
         }
-        const lep::playground::ShapeReport report =
-            lep::playground::measureShape(sim_, controls_, baseline_);
+        const lep::playground::ShapeReport &report = front_.report;
         QStringList parts;
         // The polar's numbers only exist when a polar pass runs; the raw
         // pinned pressure field carries no drag model worth quoting.
@@ -499,7 +1044,7 @@ public:
             parts << QStringLiteral("L/D %1")
                          .arg(report.glideRatio, 0, 'f', 1)
                   << QStringLiteral("α %1°")
-                         .arg(sim_.lastAlphaDegrees, 0, 'f', 1);
+                         .arg(front_.alphaDegrees, 0, 'f', 1);
         }
         parts << QStringLiteral("span %1%")
                      .arg(report.spanRatio * 100.0, 0, 'f', 0);
@@ -531,19 +1076,10 @@ public:
             parts << QStringLiteral("⚠ %1")
                          .arg(lep::playground::shapeFlagName(flag.flag));
         }
-        if (lep::playground::grabActive(sim_)) {
-            const auto &nodes = sim_.body->nodes();
-            if (sim_.grabAnchorNode < nodes.size()
-                && sim_.grabbedNode < nodes.size()) {
-                const double pull =
-                    length(nodes[sim_.grabAnchorNode].position
-                           - nodes[sim_.grabbedNode].position);
-                parts << QStringLiteral("pull %1 m %2 N")
-                             .arg(pull, 0, 'f', 2)
-                             .arg(lep::playground::grabForceNewtons(
-                                      sim_, controls_),
-                                  0, 'f', 0);
-            }
+        if (front_.grabActive) {
+            parts << QStringLiteral("pull %1 m %2 N")
+                         .arg(front_.grabPullMetres, 0, 'f', 2)
+                         .arg(front_.grabForceNewtons, 0, 'f', 0);
         }
         return parts.join(QStringLiteral(" · "));
     }
@@ -583,13 +1119,9 @@ public:
     // Highest cable load in the wing right now, for the legend.
     double peakLineTension() const
     {
-        if (!sim_.body) {
-            return 0.0;
-        }
-        const auto &constraints = sim_.body->constraints();
-        double peak = 0.0;
-        for (const LineSegment &segment : sim_.lineSegments) {
-            peak = std::max(peak, lineTension(segment, constraints));
+        float peak = 0.0F;
+        for (const float tension : front_.lineTension) {
+            peak = std::max(peak, tension);
         }
         return peak;
     }
@@ -599,8 +1131,8 @@ public:
     double peakStrain() const
     {
         float peak = 0.0F;
-        for (const float strain : nodeTensile_) {
-            peak = std::max(peak, strain);
+        for (const float value : front_.colourField) {
+            peak = std::max(peak, value);
         }
         return peak;
     }
@@ -608,8 +1140,8 @@ public:
     double peakDeviation() const
     {
         float peak = 0.0F;
-        for (const float deviation : deviationField_) {
-            peak = std::max(peak, deviation);
+        for (const float value : front_.colourField) {
+            peak = std::max(peak, value);
         }
         return peak;
     }
@@ -619,8 +1151,8 @@ public:
     double peakSlackCompression() const
     {
         float worst = 0.0F;
-        for (const float strain : nodeSlack_) {
-            worst = std::min(worst, strain);
+        for (const float value : front_.colourField) {
+            worst = std::min(worst, value);
         }
         return -worst;
     }
@@ -670,16 +1202,18 @@ public:
 
     void setRunning(bool running)
     {
-        if (running && sim_.body) {
-            timer_->start();
-        } else {
-            timer_->stop();
+        runningRequested_ = running && !topo_.renderFaces.empty();
+        if (worker_ != nullptr) {
+            worker_->setPaused(!runningRequested_);
         }
     }
 
-    bool isRunning() const { return timer_->isActive(); }
-    bool hasBody() const { return sim_.body != nullptr; }
-    QString lastSimError() const { return simError_; }
+    bool isRunning() const
+    {
+        return runningRequested_ && front_.simError.isEmpty();
+    }
+    bool hasBody() const { return !topo_.renderFaces.empty(); }
+    QString lastSimError() const { return front_.simError; }
     QString lastGlError() const { return glError_; }
 
 protected:
@@ -784,25 +1318,34 @@ protected:
     void paintGL() override
     {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (!sim_.body || !glError_.isEmpty()) {
+        if (topo_.renderFaces.empty() || front_.positions.empty()
+            || !glError_.isEmpty()) {
             return;
         }
 
         const QMatrix4x4 mvp = viewProjection();
 
-        const auto &nodes = sim_.body->nodes();
+        const std::vector<QVector3D> &nodes = front_.positions;
 
         vertexScratch_.clear();
-        vertexScratch_.reserve(sim_.renderFaces.size() * 27);
-        const auto &constraints = sim_.body->constraints();
-        for (const RenderFace &face : sim_.renderFaces) {
+        vertexScratch_.reserve(topo_.renderFaces.size() * 27);
+        for (const RenderFace &face : topo_.renderFaces) {
             if (!surfaceVisible_[static_cast<std::size_t>(face.surface)]) {
                 continue;
             }
-            const softwing::Vec3 &a = nodes[face.nodes[0]].position;
-            const softwing::Vec3 &b = nodes[face.nodes[1]].position;
-            const softwing::Vec3 &c = nodes[face.nodes[2]].position;
-            const softwing::Vec3 normal = normalized(cross(b - a, c - a));
+            // During a rebuild the topology and the latest snapshot can
+            // be one hand-off apart; skip anything the positions cannot
+            // back rather than read past them.
+            if (face.nodes[0] >= nodes.size()
+                || face.nodes[1] >= nodes.size()
+                || face.nodes[2] >= nodes.size()) {
+                continue;
+            }
+            const QVector3D &a = nodes[face.nodes[0]];
+            const QVector3D &b = nodes[face.nodes[1]];
+            const QVector3D &c = nodes[face.nodes[2]];
+            const QVector3D normal =
+                QVector3D::crossProduct(b - a, c - a).normalized();
             // useTint is a per-draw uniform while colourability is per
             // face, so an uncoloured face still needs a colour of its own
             // here — leaving it zeroed painted the simple ribs black.
@@ -820,36 +1363,35 @@ protected:
                 const std::size_t node = face.nodes[
                     static_cast<std::size_t>(corner)];
                 QVector3D tint = uncolouredTint;
+                const float fieldValue =
+                    node < front_.colourField.size()
+                        ? front_.colourField[node]
+                        : 0.0F;
                 if (faceColoured) {
                     switch (colorMode_) {
                     case ColorMode::Stress:
-                        tint = stressTint(node < nodeTensile_.size()
-                                              ? nodeTensile_[node]
-                                              : 0.0F);
+                        tint = stressTint(fieldValue);
                         break;
                     case ColorMode::Slack:
                         tint = rampTint(
-                            (node < nodeSlack_.size() ? -nodeSlack_[node]
-                                                      : 0.0F)
+                            -fieldValue
                             / std::max(stressFullScale_, 1.0e-6));
                         break;
                     case ColorMode::Deviation:
-                        tint = rampTint((node < deviationField_.size()
-                                             ? deviationField_[node]
-                                             : 0.0F)
+                        tint = rampTint(fieldValue
                                         / deviationFullScaleMetres());
                         break;
                     case ColorMode::Plain:
                         break;
                     }
                 }
-                const softwing::Vec3 &point = nodes[node].position;
-                vertexScratch_.push_back(static_cast<float>(point.x));
-                vertexScratch_.push_back(static_cast<float>(point.y));
-                vertexScratch_.push_back(static_cast<float>(point.z));
-                vertexScratch_.push_back(static_cast<float>(normal.x));
-                vertexScratch_.push_back(static_cast<float>(normal.y));
-                vertexScratch_.push_back(static_cast<float>(normal.z));
+                const QVector3D &point = nodes[node];
+                vertexScratch_.push_back(point.x());
+                vertexScratch_.push_back(point.y());
+                vertexScratch_.push_back(point.z());
+                vertexScratch_.push_back(normal.x());
+                vertexScratch_.push_back(normal.y());
+                vertexScratch_.push_back(normal.z());
                 vertexScratch_.push_back(tint.x());
                 vertexScratch_.push_back(tint.y());
                 vertexScratch_.push_back(tint.z());
@@ -857,18 +1399,28 @@ protected:
         }
         const int skinFloats = static_cast<int>(vertexScratch_.size());
         if (linesVisible_) {
-            for (const LineSegment &segment : sim_.lineSegments) {
+            for (std::size_t segmentIndex = 0;
+                 segmentIndex < topo_.lineSegments.size();
+                 ++segmentIndex) {
+                const LineSegment &segment =
+                    topo_.lineSegments[segmentIndex];
+                if (segment.a >= nodes.size()
+                    || segment.b >= nodes.size()) {
+                    continue;
+                }
                 QVector3D tint;
                 if (lineTensionColoring_) {
                     tint = rampTint(
-                        lineTension(segment, constraints)
+                        (segmentIndex < front_.lineTension.size()
+                             ? front_.lineTension[segmentIndex]
+                             : 0.0F)
                         / std::max(lineFullScaleNewtons_, 1.0e-6));
                 }
                 for (const std::size_t node : {segment.a, segment.b}) {
-                    const softwing::Vec3 &point = nodes[node].position;
-                    vertexScratch_.push_back(static_cast<float>(point.x));
-                    vertexScratch_.push_back(static_cast<float>(point.y));
-                    vertexScratch_.push_back(static_cast<float>(point.z));
+                    const QVector3D &point = nodes[node];
+                    vertexScratch_.push_back(point.x());
+                    vertexScratch_.push_back(point.y());
+                    vertexScratch_.push_back(point.z());
                     vertexScratch_.push_back(segment.brake ? 1.0F : 0.0F);
                     vertexScratch_.push_back(0.0F);
                     vertexScratch_.push_back(0.0F);
@@ -1038,7 +1590,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override
     {
         if (grabbing_ && event->button() == Qt::LeftButton) {
-            lep::playground::endGrab(sim_);
+            worker_->endGrab();
             grabbing_ = false;
             setCursor(flyMode_ ? Qt::CrossCursor : Qt::ArrowCursor);
             update();
@@ -1083,7 +1635,7 @@ protected:
                     * (delta.x() * metresPerPixel)
                 - softwing::Vec3{up.x(), up.y(), up.z()}
                       * (delta.y() * metresPerPixel);
-            lep::playground::moveGrab(sim_, grabWorld_);
+            worker_->moveGrab(grabWorld_);
             update();
             return;
         }
@@ -1145,14 +1697,13 @@ protected:
         // re-read it from the anchor's current place or the next drag
         // step scales its cursor motion with a stale metres-per-pixel
         // and the pulled node runs away from the cursor.
-        if (grabbing_ && sim_.body != nullptr
-            && sim_.grabAnchorNode < sim_.body->nodes().size()) {
-            const softwing::Vec3 &anchor =
-                sim_.body->nodes()[sim_.grabAnchorNode].position;
+        if (grabbing_) {
+            // grabWorld_ is the GUI's own accumulated anchor target, so
+            // no trip to the worker is needed.
             const QVector3D eye = viewMatrix().map(
-                QVector3D(static_cast<float>(anchor.x),
-                          static_cast<float>(anchor.y),
-                          static_cast<float>(anchor.z)));
+                QVector3D(static_cast<float>(grabWorld_.x),
+                          static_cast<float>(grabWorld_.y),
+                          static_cast<float>(grabWorld_.z)));
             grabDepth_ = std::max(-eye.z(), 0.05F);
         }
         update();
@@ -1172,27 +1723,6 @@ private:
         return face.surface != SimSurface::Rib || buildOptions_.detailedRibs;
     }
 
-    // Cable tension in newtons. XPBD's multiplier is an impulse over the
-    // substep, so dividing by the substep squared recovers the force; the
-    // sign convention makes a tensile multiplier negative, hence the
-    // magnitude. A slack cable holds zero, which is what we want to show.
-    // The substep length is whatever the solver quality currently asks for,
-    // so it is read from the live controls rather than from a constant --
-    // otherwise switching quality would silently rescale every line load.
-    double lineTension(
-        const LineSegment &segment,
-        const std::vector<softwing::DistanceConstraint> &constraints) const
-    {
-        if (segment.constraint == noConstraint
-            || segment.constraint >= constraints.size()) {
-            return 0.0;
-        }
-        const double substep =
-            lep::playground::simulationTimeStep
-            / std::max(1, controls_.substeps);
-        return std::abs(constraints[segment.constraint].accumulatedLambda)
-               / (substep * substep);
-    }
 
     static QVector3D rampTint(double loadFraction)
     {
@@ -1247,54 +1777,26 @@ private:
     // Refills the cached colour field for the active mode, reusing the
     // vector. Called on the step cadence, on mode changes (so a paused
     // wing colours too) and after a rebuild.
-    void refreshColourField()
-    {
-        if (!sim_.body) {
-            return;
-        }
-        if (colorMode_ == ColorMode::Deviation
-            && !baseline_.restPositions.empty()) {
-            lep::playground::nodeDeviationField(sim_, baseline_,
-                                                deviationField_);
-        } else if (colorMode_ == ColorMode::Slack
-                   || colorMode_ == ColorMode::Stress) {
-            lep::playground::nodeStrainFields(sim_,
-                                              buildOptions_.detailedRibs,
-                                              nodeTensile_,
-                                              nodeSlack_);
-        }
-        fieldClock_.start();
-    }
-
     // Ctrl-click picking: every unique line-junction endpoint projected to
     // widget pixels, nearest within grabPickRadiusPixels wins. Carabiners
     // are fixed nodes, so grabbing one merely parks the anchor on it — not
     // worth excluding.
     void tryBeginGrab(const QPointF &cursor)
     {
-        if (!sim_.body) {
+        if (front_.positions.empty()) {
             return;
         }
         const QMatrix4x4 mvp = viewProjection();
-        const auto &nodes = sim_.body->nodes();
-        std::set<std::size_t> junctions;
-        for (const LineSegment &segment : sim_.lineSegments) {
-            junctions.insert(segment.a);
-            junctions.insert(segment.b);
-        }
+        const std::vector<QVector3D> &nodes = front_.positions;
+        const std::vector<std::size_t> &junctions = topo_.junctions;
         double bestDistance = grabPickRadiusPixels;
         std::size_t bestNode = noConstraint;
         for (const std::size_t node : junctions) {
             if (node >= nodes.size()) {
                 continue;
             }
-            const softwing::Vec3 &position = nodes[node].position;
-            const QVector4D clip =
-                mvp
-                * QVector4D(static_cast<float>(position.x),
-                            static_cast<float>(position.y),
-                            static_cast<float>(position.z),
-                            1.0F);
+            const QVector3D &position = nodes[node];
+            const QVector4D clip = mvp * QVector4D(position, 1.0F);
             if (clip.w() <= 0.0F) {
                 continue;
             }
@@ -1312,17 +1814,10 @@ private:
         if (bestNode == noConstraint) {
             return;
         }
-        // Read before beginGrab: creating the anchor node can grow the
-        // node table and move it.
-        const softwing::Vec3 picked = nodes[bestNode].position;
-        if (!lep::playground::beginGrab(sim_, bestNode)) {
-            return;
-        }
-        grabWorld_ = picked;
-        const QVector3D eye = viewMatrix().map(
-            QVector3D(static_cast<float>(picked.x),
-                      static_cast<float>(picked.y),
-                      static_cast<float>(picked.z)));
+        const QVector3D picked = nodes[bestNode];
+        worker_->beginGrab(bestNode);
+        grabWorld_ = softwing::Vec3{picked.x(), picked.y(), picked.z()};
+        const QVector3D eye = viewMatrix().map(picked);
         // Camera looks down -z; the depth scales the cursor's
         // metres-per-pixel during the drag.
         grabDepth_ = std::max(-eye.z(), 0.05F);
@@ -1330,31 +1825,12 @@ private:
         setCursor(Qt::ClosedHandCursor);
     }
 
-    void applyPressure()
-    {
-        lep::playground::applyPressure(sim_, controls_);
-    }
-
-    void stepSimulation()
-    {
-        try {
-            lep::playground::stepSimulation(sim_, controls_);
-            // Wall-clock cadence, not steps: at high subdivision one
-            // frame can cost hundreds of milliseconds, and a
-            // count-based refresh left the heatmap showing the rest
-            // pose for the first five seconds and crawling after.
-            if (colorMode_ != ColorMode::Plain
-                && (!fieldClock_.isValid()
-                    || fieldClock_.elapsed() >= fieldRefreshMilliseconds)) {
-                refreshColourField();
-            }
-        } catch (const std::exception &exception) {
-            simError_ = QString::fromUtf8(exception.what());
-            setRunning(false);
-        }
-    }
-
-    SimBody sim_;
+    // The worker owns the simulation; the GUI owns only what it needs
+    // to draw and command.
+    std::unique_ptr<SimWorker> worker_;
+    SimWorker::Snapshot front_;
+    SimWorker::Topology topo_;
+    bool runningRequested_ = false;
     SimMesh mesh_;
     SimControls controls_;
     SimBuildOptions buildOptions_;
@@ -1368,21 +1844,12 @@ private:
     double stressFullScale_ = defaultStressFullScaleStrain;
     bool lineTensionColoring_ = false;
     double lineFullScaleNewtons_ = defaultLineFullScaleNewtons;
-    // The design shape and the cached heatmap fields measured against it.
-    // Fields are refreshed on the wall-clock cadence, never reallocated
-    // per frame.
-    lep::playground::ShapeBaseline baseline_;
-    std::vector<float> deviationField_;
-    std::vector<float> nodeTensile_;
-    std::vector<float> nodeSlack_;
-    QElapsedTimer fieldClock_;
     // The interactive grab: anchor position accumulated in doubles so a
     // long drag does not drift, depth fixed at pick time.
     bool grabbing_ = false;
     float grabDepth_ = 1.0F;
     softwing::Vec3 grabWorld_;
     std::vector<float> vertexScratch_;
-    QString simError_;
     QString glError_;
 
     QTimer *timer_ = nullptr;
@@ -1887,51 +2354,32 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     // ms then repaints, so the wing visibly converges while Cancel, the
     // camera and the rest of the UI stay responsive.
     settleTimer_ = new QTimer(this);
-    settleTimer_->setInterval(0);
+    settleTimer_->setInterval(500);
     connect(settleTimer_, &QTimer::timeout, this, [this] {
-        if (!settleRunning_ || view_ == nullptr
-            || settleMonitor_ == nullptr) {
+        if (!settleRunning_ || view_ == nullptr) {
             settleTimer_->stop();
             return;
         }
-        QElapsedTimer chunk;
-        chunk.start();
-        bool done = false;
-        bool failed = false;
-        while (chunk.elapsed() < 40 && !done && !failed) {
-            if (!view_->stepOnce()) {
-                failed = true;
-                break;
-            }
-            done = settleMonitor_->frameStepped(
-                view_->simBody(), view_->controls().pressurePascal);
+        if (view_->settleDone() || !view_->lastSimError().isEmpty()) {
+            finishSettle(false);
+            return;
         }
-        view_->update();
-        ++settleStatusTick_;
-        if (settleStatusTick_ % 6 == 0) {
-            status_->setText(
-                QStringLiteral("Settling at 60×4… %1 of max %2 s "
-                               "simulated · agitation %3 mm/s (quiet "
-                               "below %4)")
-                    .arg(settleMonitor_->simulatedSeconds(), 0, 'f', 1)
-                    .arg(kSettleBudgetSeconds, 0, 'f', 0)
-                    .arg(settleMonitor_->lastAgitation() * 1000.0, 0,
-                         'f', 0)
-                    .arg(lep::playground::settleQuiescenceTarget(
-                             view_->controls().pressurePascal)
-                             * 1000.0,
-                         0, 'f', 0));
-        }
+        status_->setText(
+            QStringLiteral("Settling at 60×4… %1 of max %2 s "
+                           "simulated · agitation %3 mm/s (quiet "
+                           "below %4)")
+                .arg(view_->settleSimSeconds(), 0, 'f', 1)
+                .arg(kSettleBudgetSeconds, 0, 'f', 0)
+                .arg(view_->settleAgitation() * 1000.0, 0, 'f', 0)
+                .arg(lep::playground::settleQuiescenceTarget(
+                         view_->controls().pressurePascal)
+                         * 1000.0,
+                     0, 'f', 0));
         // The shape HUD keeps measuring during the show — the data is
         // the point of watching.
-        if (settleStatusTick_ % 12 == 0) {
-            const QString readout = view_->shapeReadout();
-            shapeLabel_->setText(readout);
-            shapeLabel_->setToolTip(readout);
-        }
-        if (failed || done) {
-            finishSettle(false);
-        }
+        const QString readout = view_->shapeReadout();
+        shapeLabel_->setText(readout);
+        shapeLabel_->setToolTip(readout);
     });
 
     connect(flightLoad_, &QCheckBox::toggled, this, [this](bool enabled) {
@@ -2190,9 +2638,6 @@ void PlaygroundPage::toggleSettle()
         return;
     }
     settleRunning_ = true;
-    settleStatusTick_ = 0;
-    settleMonitor_ = std::make_unique<lep::playground::SettleMonitor>(
-        kSettleBudgetSeconds);
     // The Accurate solver budget, visibly: the combo itself moves (and
     // is restored on finish) — settling exists to afford the quality
     // the interactive frame rate cannot.
@@ -2205,6 +2650,7 @@ void PlaygroundPage::toggleSettle()
     setSweepActive(true);
     settleButton_->setText(QStringLiteral("Cancel"));
     status_->setText(QStringLiteral("Settling at 60×4…"));
+    view_->startSettle(kSettleBudgetSeconds);
     settleTimer_->start();
 }
 
@@ -2225,11 +2671,15 @@ void PlaygroundPage::finishSettle(bool cancelled)
     QString outcome;
     const QString solverError =
         view_ != nullptr ? view_->lastSimError() : QString();
+    const bool converged =
+        view_ != nullptr && view_->settleConverged();
+    const double simSeconds =
+        view_ != nullptr ? view_->settleSimSeconds() : 0.0;
     if (cancelled) {
         outcome = QStringLiteral("Settle cancelled.");
     } else if (!solverError.isEmpty()) {
         outcome = QStringLiteral("Settle failed: %1").arg(solverError);
-    } else if (view_ != nullptr && settleMonitor_ != nullptr) {
+    } else if (view_ != nullptr) {
         // The Done message earns its place with the numbers a designer
         // would ask for first; the HUD below carries the full
         // instrument line.
@@ -2247,10 +2697,10 @@ void PlaygroundPage::finishSettle(bool cancelled)
                 QStringLiteral("⚠ ") + names.join(QStringLiteral(", "));
         }
         const QString headline =
-            settleMonitor_->settled()
+            converged
                 ? QStringLiteral("Done: settled at 60×4 in %1 s "
                                  "simulated")
-                      .arg(settleMonitor_->simulatedSeconds(), 0, 'f', 1)
+                      .arg(simSeconds, 0, 'f', 1)
                 : QStringLiteral("Done: did not converge within %1 s "
                                  "simulated (final pose kept)")
                       .arg(kSettleBudgetSeconds, 0, 'f', 0);
@@ -2269,7 +2719,11 @@ void PlaygroundPage::finishSettle(bool cancelled)
         // click resumes.
         runButton_->setChecked(true);
     }
-    settleMonitor_.reset();
+    if (view_ != nullptr) {
+        // Acknowledge so the worker clears its latched settle state.
+        view_->acknowledgeSettle();
+        view_->setRunning(false);
+    }
     setSweepActive(false);
     status_->setText(outcome);
     // The HUD timer is stopped while paused; one explicit refresh shows
