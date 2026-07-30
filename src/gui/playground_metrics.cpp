@@ -34,6 +34,10 @@ constexpr double kNoseChordFraction = 0.10;
 // are at least half a millimetre by construction, so anything shorter
 // is a pin, not cloth.
 constexpr double kMinimumStrainRestLength = 5.0e-4;
+// The mesh-relative strain floor: edges shorter than this fraction of
+// the median drawn edge are excluded from the strain fields (see
+// nodeStrainFields). Tracks subdivision, where a fixed floor cannot.
+constexpr float kStrainRestMedianFraction = 0.3F;
 
 using softwing::Vec3;
 
@@ -1157,34 +1161,92 @@ void nodeStrainFields(const SimBody &sim,
     }
     const auto &nodes = sim.body->nodes();
     const auto &constraints = sim.body->constraints();
+    // LENGTH-WEIGHTED means per node, not maxima, and tension and
+    // compression aggregated separately. The weighting is what makes
+    // the number fabric rather than numerics: XPBD leaves an absolute
+    // position residual per edge, and a millimetre of residual on a
+    // 4 mm vent-rim edge masquerades as 25% strain while the same
+    // residual on a 40 mm skin edge is an honest 2.5% — an unweighted
+    // max put a 30% "peak" on the legend of a healthy wing. Weighted
+    // by rest length, total elongation over total rest, the short-edge
+    // noise carries only its own few millimetres of weight. Tension
+    // and compression stay separate because a wrinkled panel is BOTH —
+    // taut along the load, slack across it — and netting them to zero
+    // would hide exactly the state the maps exist to show.
     tensileOut.assign(nodes.size(), 0.0F);
     slackOut.assign(nodes.size(), 0.0F);
-    // Scatter each drawn edge's strain to both of its endpoints.
-    // Max/min make the scatter idempotent, so edges shared by two faces
-    // need no dedup pass.
+    // First pass: the drawn, deduplicated edge set and its rest
+    // lengths, for the mesh-relative floor below. Regions meshed much
+    // finer than the wing's norm — the vent rims, the tip web struts —
+    // amplify the solver residual into fake tens-of-percent strain
+    // over the WHOLE region, so a weighted mean inside such a region
+    // is still noise; they have to be excluded outright, and the only
+    // floor that survives a resolution change is one relative to the
+    // wing's own median edge.
+    std::vector<std::size_t> edges;
+    std::vector<float> rests;
+    std::vector<char> seen(constraints.size(), 0);
     for (const RenderFace &drawn : sim.renderFaces) {
         if (drawn.surface == SimSurface::Rib && !detailedRibs) {
             continue;
         }
         for (const std::size_t edge : drawn.edges) {
-            if (edge == noConstraint || edge >= constraints.size()) {
+            if (edge == noConstraint || edge >= constraints.size()
+                || seen[edge] != 0) {
                 continue;
             }
+            seen[edge] = 1;
             const softwing::DistanceConstraint &tie = constraints[edge];
             if (tie.restLength < kMinimumStrainRestLength
                 || tie.a >= nodes.size() || tie.b >= nodes.size()) {
                 continue;
             }
-            const auto strain = static_cast<float>(
-                (length(nodes[tie.b].position - nodes[tie.a].position)
-                 - tie.restLength)
-                / tie.restLength);
-            for (const std::size_t node : {tie.a, tie.b}) {
-                tensileOut[node] =
-                    std::max(tensileOut[node], std::max(0.0F, strain));
-                slackOut[node] =
-                    std::min(slackOut[node], std::min(0.0F, strain));
+            edges.push_back(edge);
+            rests.push_back(static_cast<float>(tie.restLength));
+        }
+    }
+    if (edges.empty()) {
+        return;
+    }
+    std::vector<float> sorted = rests;
+    std::nth_element(sorted.begin(),
+                     sorted.begin()
+                         + static_cast<std::ptrdiff_t>(sorted.size() / 2),
+                     sorted.end());
+    const float medianRest = sorted[sorted.size() / 2];
+    const float restFloor =
+        std::max(static_cast<float>(kMinimumStrainRestLength),
+                 kStrainRestMedianFraction * medianRest);
+
+    std::vector<float> tensileWeight(nodes.size(), 0.0F);
+    std::vector<float> slackWeight(nodes.size(), 0.0F);
+    for (std::size_t index = 0; index < edges.size(); ++index) {
+        const float rest = rests[index];
+        if (rest < restFloor) {
+            continue;
+        }
+        const softwing::DistanceConstraint &tie =
+            constraints[edges[index]];
+        const auto strain = static_cast<float>(
+            (length(nodes[tie.b].position - nodes[tie.a].position)
+             - tie.restLength)
+            / tie.restLength);
+        for (const std::size_t node : {tie.a, tie.b}) {
+            if (strain >= 0.0F) {
+                tensileOut[node] += strain * rest;
+                tensileWeight[node] += rest;
+            } else {
+                slackOut[node] += strain * rest;
+                slackWeight[node] += rest;
             }
+        }
+    }
+    for (std::size_t node = 0; node < nodes.size(); ++node) {
+        if (tensileWeight[node] > 0.0F) {
+            tensileOut[node] /= tensileWeight[node];
+        }
+        if (slackWeight[node] > 0.0F) {
+            slackOut[node] /= slackWeight[node];
         }
     }
 }

@@ -209,14 +209,18 @@ void nodeDeviationField(const SimBody &sim,
 // taut), skin surfaces only. Feeds the "Slack fabric" heatmap.
 void faceSlackField(const SimBody &sim, std::vector<float> &strainOut);
 
-// Per-NODE strain extremes over the constrained edges touching each
-// node: worst tension into tensileOut (>= 0), worst compression into
-// slackOut (<= 0), both sized like the body's node table. A face
-// carries one value in the per-face fields above and renders faceted;
-// scattered to nodes, the same data shades smoothly across the skin.
-// Rib-web faces join in only when detailedRibs built them as real
-// sheets — a hub-and-spoke rib's edge strain is spoke tension dressed
-// up as fabric stress.
+// Per-NODE fabric strain over the constrained edges touching each
+// node: the LENGTH-WEIGHTED mean tension into tensileOut (>= 0) and
+// the length-weighted mean compression into slackOut (<= 0), each over
+// its own subset of edges, both sized like the body's node table. The
+// weighting suppresses short-edge solver-residual noise (see the
+// implementation); keeping the two signs separate keeps a wrinkled
+// panel — taut along the load, slack across it — visible in both
+// maps. A face carries one value in the per-face fields above and
+// renders faceted; per node, the same data shades smoothly. Rib-web
+// faces join in only when detailedRibs built them as real sheets — a
+// hub-and-spoke rib's edge strain is spoke tension dressed up as
+// fabric stress.
 void nodeStrainFields(const SimBody &sim,
                       bool detailedRibs,
                       std::vector<float> &tensileOut,
