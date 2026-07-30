@@ -13,6 +13,7 @@
 //                  [--frames N] [--warmup N] [--threads N]
 //                  [--substeps N] [--iterations N] [--csv]
 //                  [--shape [SECONDS]] [--shape-sweep FROM:TO:STEP]
+//                  [--tuck [PULL_CM]] [--dive [DEGREES]] [--no-cells]
 //                  [--no-flight-load]
 
 #include "../src/gui/playground_metrics.h"
@@ -31,6 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -72,6 +74,18 @@ struct Options
     // given alongside --shape-sweep.
     double shapeSeconds = 6.0;
     bool noFlightLoad = false;
+    // The per-cell air model, on by default like the GUI; --no-cells is
+    // the A/B switch for comparing against the old blanket-ram stamp.
+    bool noCells = false;
+    // The collapse-recovery experiment: settle, yank one side's A cascade
+    // down until it folds, release, and watch whether the wing recovers.
+    bool tuck = false;
+    double tuckPullMetres = 1.2;
+    // The aerodynamic collapse-recovery experiment: settle at trim, slam
+    // the airflow to a front-tuck angle for a few seconds, return to
+    // trim, and watch whether the wing re-inflates.
+    bool dive = false;
+    double diveDegrees = -6.0;
     bool shapeSweep = false;
     double sweepFromDegrees = 0.0;
     double sweepToDegrees = 0.0;
@@ -136,6 +150,33 @@ struct Options
             }
         } else if (argument == "--no-flight-load") {
             options.noFlightLoad = true;
+        } else if (argument == "--no-cells") {
+            options.noCells = true;
+        } else if (argument == "--tuck") {
+            options.tuck = true;
+            // Full-string numeric parse, so a following mesh path is not
+            // swallowed as a pull distance.
+            if (index + 1 < argc) {
+                char *end = nullptr;
+                const double centimetres =
+                    std::strtod(argv[index + 1], &end);
+                if (end != argv[index + 1] && *end == '\0') {
+                    options.tuckPullMetres = centimetres / 100.0;
+                    ++index;
+                }
+            }
+        } else if (argument == "--dive") {
+            options.dive = true;
+            // The angle is usually negative, so a leading '-' cannot be
+            // the option-vs-value discriminator here.
+            if (index + 1 < argc) {
+                char *end = nullptr;
+                const double degrees = std::strtod(argv[index + 1], &end);
+                if (end != argv[index + 1] && *end == '\0') {
+                    options.diveDegrees = degrees;
+                    ++index;
+                }
+            }
         } else if (argument == "--shape-sweep") {
             if (index + 1 >= argc) return false;
             const QStringList parts =
@@ -223,6 +264,91 @@ double spanExtent(const pg::SimBody &sim)
         high = std::max(high, node.position.x);
     }
     return high - low;
+}
+
+// Which side of the centreline each cell sits on, captured ONCE before
+// the collapse: a folded side's ribs cross the centreline, and a live
+// classification would migrate them into the other column — corrupting
+// exactly the per-side recovery signal the experiments read.
+std::vector<double> cellSides(const pg::SimBody &sim)
+{
+    const auto &nodes = sim.body->nodes();
+    std::vector<double> sides(sim.cells.size(), 0.0);
+    for (std::size_t cell = 0; cell < sim.cells.size(); ++cell) {
+        const double x =
+            nodes[sim.ribChords[sim.cells[cell].ribs[0]].leadingNode]
+                .position.x
+            + nodes[sim.ribChords[sim.cells[cell].ribs[1]].leadingNode]
+                  .position.x;
+        sides[cell] = x > 0.0 ? 1.0 : -1.0;
+    }
+    return sides;
+}
+
+// Live/rest section area ratio averaged over the cells on one side of the
+// centreline — the same signal the cell model's squeeze term reads, so
+// the collapse experiments report the quantity the physics acts on.
+double sideSectionRatio(const pg::SimBody &sim,
+                        const std::vector<double> &sides,
+                        double sideSign)
+{
+    const auto &nodes = sim.body->nodes();
+    double live = 0.0;
+    double rest = 0.0;
+    for (std::size_t index = 0; index < sim.cells.size(); ++index) {
+        if (sides[index] * sideSign <= 0.0) {
+            continue;
+        }
+        const pg::SimCell &cell = sim.cells[index];
+        double area = 0.0;
+        for (const std::size_t rib : cell.ribs) {
+            softwing::Vec3 sum;
+            const auto &loop = sim.ribLoopNodes[rib];
+            for (std::size_t node = 0; node < loop.size(); ++node) {
+                sum += cross(nodes[loop[node]].position,
+                             nodes[loop[(node + 1) % loop.size()]]
+                                 .position);
+            }
+            area += 0.5 * length(sum);
+        }
+        live += 0.5 * area;
+        rest += cell.restSectionArea;
+    }
+    return rest > 0.0 ? live / rest : 1.0;
+}
+
+// One row of the collapse-experiment tables.
+void printCollapseRow(const pg::SimBody &sim,
+                      const std::vector<double> &sides,
+                      double timeSeconds,
+                      const char *phase,
+                      double referenceVolume,
+                      double trailing)
+{
+    double cellLow = 0.0;
+    double cellHigh = 0.0;
+    if (!sim.cellPressure.empty()) {
+        cellLow = 1e30;
+        cellHigh = -1e30;
+        for (const double pressure : sim.cellPressure) {
+            cellLow = std::min(cellLow, pressure);
+            cellHigh = std::max(cellHigh, pressure);
+        }
+    }
+    std::printf("  %5.1fs   %-5s   %+6.1f   %6.2f   %+5.1f   %+5.1f"
+                "   %4.0f..%-4.0f   %7.0f\n",
+                timeSeconds,
+                phase,
+                referenceVolume > 0.0
+                    ? 100.0 * (enclosedVolume(sim) - referenceVolume)
+                          / referenceVolume
+                    : 0.0,
+                spanExtent(sim),
+                (sideSectionRatio(sim, sides, -1.0) - 1.0) * 100.0,
+                (sideSectionRatio(sim, sides, +1.0) - 1.0) * 100.0,
+                cellLow,
+                cellHigh,
+                trailing);
 }
 
 // The CSV strings come from playground_metrics; own the line framing here
@@ -345,6 +471,7 @@ int main(int argc, char **argv)
                      "[--threads N] [--substeps N] [--iterations N] "
                      "[--gpu|--gpu-jacobi] [--csv] "
                      "[--shape [SECONDS]] [--shape-sweep FROM:TO:STEP] "
+                     "[--tuck [PULL_CM]] [--dive [DEGREES]] [--no-cells] "
                      "[--no-flight-load]\n");
         return 2;
     }
@@ -390,14 +517,17 @@ int main(int argc, char **argv)
     // --brake pull from the first step. Every other mode keeps flightLoad
     // false, which is what keeps the timing baselines and pose checksums
     // bit-identical to runs that predate these flags.
-    if (options.shape || options.shapeSweep) {
+    controls.cellPressureModel = !options.noCells;
+    if (options.shape || options.shapeSweep || options.tuck
+        || options.dive) {
         if (options.freeFlight) {
             // A free-flying wing chooses its own angle of attack, so a
             // sweep prescribing alpha would label its rows with angles
             // the wing never flew at. Refuse rather than mislabel.
             std::fprintf(stderr,
-                         "--shape/--shape-sweep are tunnel modes; "
-                         "--free-flight does not combine with them.\n");
+                         "--shape/--shape-sweep/--tuck/--dive are tunnel "
+                         "modes; --free-flight does not combine with "
+                         "them.\n");
             return 2;
         }
         controls.flightLoad = !options.noFlightLoad;
@@ -475,7 +605,8 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (options.shape || options.shapeSweep) {
+    if (options.shape || options.shapeSweep || options.tuck
+        || options.dive) {
         // ShapeBaseline compares live sections against rest ones; a mesh
         // without rib loops has no sections to compare.
         if (sim.ribChords.empty()) {
@@ -533,6 +664,179 @@ int main(int argc, char **argv)
             printCsvLine(pg::shapeReportCsvRow(result.report));
         } else {
             printShapeReport(controls, result, options.meshPath);
+        }
+        return 0;
+    }
+
+    // The collapse-recovery experiment. Settle under flight load, grab
+    // the outermost A-row cascade junction on the +x side (the same
+    // interactive grab the GUI has), haul it straight down until that
+    // side folds, hold, let go, and watch the recovery signals: with the
+    // per-cell air model the folded side seals its intake, gets re-fed
+    // through the cross-ports and squeezed back open; with --no-cells the
+    // old blanket stamp pins the fold shut forever.
+    if (options.tuck) {
+        const pg::ShapeBaseline baseline = pg::captureShapeBaseline(sim);
+        const pg::SettleResult settled = pg::settleAndMeasure(
+            sim, controls, baseline, options.shapeSeconds);
+        std::printf("mesh            %s\n", options.meshPath.c_str());
+        std::printf("cell model      %s\n",
+                    controls.cellPressureModel ? "on" : "off (--no-cells)");
+        std::printf("settle          %s after %.1f s\n",
+                    settled.settled ? "settled" : "NOT settled",
+                    settled.simulatedSeconds);
+
+        // The grab target: a node used by at least two A-row segments —
+        // a cascade junction, not a skin attachment — excluding the
+        // carabiners, furthest out on the +x side.
+        std::map<std::size_t, int> junctionUses;
+        for (const pg::LineSegment &segment : sim.lineSegments) {
+            if (segment.plan != 1) {
+                continue;
+            }
+            ++junctionUses[segment.a];
+            ++junctionUses[segment.b];
+        }
+        for (const std::size_t node : sim.carabinerNodes) {
+            junctionUses.erase(node);
+        }
+        std::size_t grabNode = pg::noConstraint;
+        double bestX = 0.0;
+        for (const auto &[node, uses] : junctionUses) {
+            if (uses < 2 || node < sim.canopyNodeCount) {
+                continue;
+            }
+            const double x = sim.body->nodes()[node].position.x;
+            if (grabNode == pg::noConstraint || x > bestX) {
+                grabNode = node;
+                bestX = x;
+            }
+        }
+        if (grabNode == pg::noConstraint) {
+            std::fprintf(stderr,
+                         "No A-row cascade junction to grab; this mesh "
+                         "predates the line plan tags.\n");
+            return 1;
+        }
+        const softwing::Vec3 grabStart =
+            sim.body->nodes()[grabNode].position;
+        std::printf("grab            node %zu at (%.2f, %.2f, %.2f), "
+                    "pulling %.2f m down\n\n",
+                    grabNode,
+                    grabStart.x,
+                    grabStart.y,
+                    grabStart.z,
+                    options.tuckPullMetres);
+
+        const double settledVolume = enclosedVolume(sim);
+        const std::vector<double> sides = cellSides(sim);
+        std::printf("   time   phase   volume%%   span m   secL%%   secR%%"
+                    "   cells Pa      grab N\n");
+        pg::beginGrab(sim, grabNode);
+        const int rampFrames = 60;
+        const int holdFrames = 60;
+        const int recoverFrames = 900;
+        const int totalFrames = rampFrames + holdFrames + recoverFrames;
+        for (int frame = 0; frame < totalFrames; ++frame) {
+            const bool pulling = frame < rampFrames + holdFrames;
+            if (pulling) {
+                const double progress = std::min(
+                    1.0,
+                    static_cast<double>(frame + 1)
+                        / static_cast<double>(rampFrames));
+                // Down AND aft: a straight-down pull only pitches the
+                // tethered wing and it springs back; dragging the A
+                // cascade backwards under the wing is what folds the
+                // leading edge under — the real front-tuck gesture.
+                pg::moveGrab(sim,
+                             grabStart
+                                 + progress * options.tuckPullMetres
+                                       * softwing::Vec3{0.0, 0.6, -0.8});
+            } else if (frame == rampFrames + holdFrames) {
+                pg::endGrab(sim);
+            }
+            pg::stepSimulation(sim, controls);
+            if (frame % 30 != 29) {
+                continue;
+            }
+            printCollapseRow(sim,
+                             sides,
+                             (frame + 1) / 60.0,
+                             pulling ? (frame < rampFrames ? "pull"
+                                                           : "hold")
+                                     : "free",
+                             settledVolume,
+                             pulling
+                                 ? pg::grabForceNewtons(sim, controls)
+                                 : 0.0);
+        }
+        std::printf("\n");
+        const pg::ShapeReport after =
+            pg::measureShape(sim, controls, baseline);
+        if (after.flags.empty()) {
+            std::printf("  recovered: no flags\n");
+        } else {
+            for (const pg::ShapeFlagInfo &flag : after.flags) {
+                std::printf("  %s: %s\n",
+                            pg::shapeFlagName(flag.flag).toUtf8().constData(),
+                            flag.detail.toUtf8().constData());
+            }
+        }
+        return 0;
+    }
+
+    // The aerodynamic collapse-recovery experiment. Settle at trim, slam
+    // the airflow to a front-tuck angle (the calibrated collapse boundary
+    // sits at -4 degrees on gnuC2), hold it there while the nose folds,
+    // return the airflow to trim, and watch whether the wing takes itself
+    // back. The last column is the prescribed slider angle.
+    if (options.dive) {
+        const pg::ShapeBaseline baseline = pg::captureShapeBaseline(sim);
+        const pg::SettleResult settled = pg::settleAndMeasure(
+            sim, controls, baseline, options.shapeSeconds);
+        std::printf("mesh            %s\n", options.meshPath.c_str());
+        std::printf("cell model      %s\n",
+                    controls.cellPressureModel ? "on" : "off (--no-cells)");
+        std::printf("settle          %s after %.1f s\n",
+                    settled.settled ? "settled" : "NOT settled",
+                    settled.simulatedSeconds);
+        std::printf("dive            alpha %+.1f deg for 3 s, then back "
+                    "to %+.1f deg\n\n",
+                    options.diveDegrees,
+                    controls.angleOfAttackDegrees);
+        const double settledVolume = enclosedVolume(sim);
+        const std::vector<double> sides = cellSides(sim);
+        std::printf("   time   phase   volume%%   span m   secL%%   secR%%"
+                    "   cells Pa    alpha deg\n");
+        pg::SimControls dived = controls;
+        dived.angleOfAttackDegrees = options.diveDegrees;
+        const int diveFrames = 180;
+        const int recoverFrames = 900;
+        for (int frame = 0; frame < diveFrames + recoverFrames; ++frame) {
+            const bool diving = frame < diveFrames;
+            pg::stepSimulation(sim, diving ? dived : controls);
+            if (frame % 30 != 29) {
+                continue;
+            }
+            printCollapseRow(sim,
+                             sides,
+                             (frame + 1) / 60.0,
+                             diving ? "dive" : "trim",
+                             settledVolume,
+                             diving ? options.diveDegrees
+                                    : controls.angleOfAttackDegrees);
+        }
+        std::printf("\n");
+        const pg::ShapeReport after =
+            pg::measureShape(sim, controls, baseline);
+        if (after.flags.empty()) {
+            std::printf("  recovered: no flags\n");
+        } else {
+            for (const pg::ShapeFlagInfo &flag : after.flags) {
+                std::printf("  %s: %s\n",
+                            pg::shapeFlagName(flag.flag).toUtf8().constData(),
+                            flag.detail.toUtf8().constData());
+            }
         }
         return 0;
     }

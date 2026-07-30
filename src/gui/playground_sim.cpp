@@ -26,6 +26,29 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegreesToRadians = kPi / 180.0;
 constexpr double kAirDensity = 1.225;   // kg/m^3
 constexpr double kMaximumDynamicPressureRatio = 4.0;
+// The per-cell air model (see SimCell in the header). Flows through the
+// intake and the cross-ports are volumetric orifice flows — discharge
+// factor × area × flow speed — expressed as first-order relaxation rates
+// on the cell's gauge pressure, with the flow speed taken from the
+// section's own ram pressure. On gnuC2-sized cells this puts intake fill
+// around a quarter second and cross-port equalisation under a second,
+// which is the regime where the fabric, not the air, is the slow part.
+constexpr double kCellFlowDischarge = 0.6;
+// The squeeze response: below this fraction of the rest section area the
+// cell answers with extra pressure, rising as the section flattens. The
+// deadband matters — a healthy loaded wing settles between 100% and 106%
+// of rest volume, so above the threshold the model must add nothing and
+// the stamped field stays exactly the old calibrated one.
+constexpr double kCellSqueezeThreshold = 0.9;
+constexpr double kCellSqueezeGain = 1.5;
+// Cap on the squeeze response, as a multiple of the cell's own pressure
+// state. Both the gain and the cap scale with the state rather than the
+// ram target: a cell that has actually lost its air cannot push back.
+constexpr double kCellSqueezeCapRatio = 3.0;
+constexpr double kCellSectionRatioFloor = 0.05;
+// Per-frame stability clamp on the explicit relaxation step: no cell may
+// close more than this fraction of its pressure gap in one frame.
+constexpr double kCellMaxRateStep = 0.5;
 // Zero-lift drag referred to the projected planform: canopy profile drag
 // with its cell openings and seams, plus the line cascade. Together with
 // the induced term below this puts the polar's best glide around 7–8,
@@ -635,6 +658,11 @@ SimBody buildSimBody(const SimMesh &mesh,
         sim.renderFaces.push_back(drawn);
     }
 
+    // Which mesh rib loop each recorded RibChord came from, so the cell
+    // construction below can look up that rib's hole outlines. Parallel to
+    // ribChords (degenerate loops are skipped from both).
+    std::vector<std::size_t> ribMeshIndex;
+
     // Rib webs. Both models are the same cross-section ladder; the simple
     // one is that ladder at its coarsest — one bay deep, one station per
     // outline segment, no holes.
@@ -768,6 +796,7 @@ SimBody buildSimBody(const SimMesh &mesh,
             chord.restChordLength = length(mesh.nodes[chord.trailingNode]
                                            - mesh.nodes[chord.leadingNode]);
             sim.ribChords.push_back(chord);
+            ribMeshIndex.push_back(ribIndex);
             // The shape instrumentation fits each rest section onto the
             // live one through this loop, indexed parallel to ribChords —
             // so it is recorded in the exact scope that records the chord.
@@ -1078,6 +1107,133 @@ SimBody buildSimBody(const SimMesh &mesh,
             if (station > tipHigh) {
                 tipHigh = station;
                 sim.spanTipRibs[1] = index;
+            }
+        }
+
+        // The pneumatic cells: one per bay between spanwise-adjacent ribs.
+        // Adjacency is geometric — ribs sorted by their leading edge's
+        // station along the rest span axis — because the mesh file's loop
+        // order carries no such promise.
+        if (sim.ribChords.size() >= 2) {
+            std::vector<std::size_t> order(sim.ribChords.size());
+            for (std::size_t index = 0; index < order.size(); ++index) {
+                order[index] = index;
+            }
+            std::sort(order.begin(), order.end(),
+                      [&](std::size_t a, std::size_t b) {
+                          return dot(mesh.nodes[sim.ribChords[a].leadingNode],
+                                     sim.restSpanAxis)
+                                 < dot(mesh.nodes[sim.ribChords[b].leadingNode],
+                                       sim.restSpanAxis);
+                      });
+            // Rank of each rib in span order, for the face → cell map.
+            std::vector<std::size_t> rank(order.size());
+            for (std::size_t position = 0; position < order.size();
+                 ++position) {
+                rank[order[position]] = position;
+            }
+
+            // Rest section area per rib as the loop's VECTOR area — the
+            // same quantity the live collapse signal reads each frame, so
+            // the ratio of the two is meaningful. A folded loop's edge
+            // cross products cancel, which is exactly what makes it a
+            // collapse signal; a plane fit would chase the fold instead.
+            std::vector<double> ribArea(sim.ribChords.size(), 0.0);
+            for (std::size_t rib = 0; rib < sim.ribLoopNodes.size();
+                 ++rib) {
+                softwing::Vec3 sum;
+                const auto &loop = sim.ribLoopNodes[rib];
+                for (std::size_t index = 0; index < loop.size(); ++index) {
+                    sum += cross(
+                        mesh.nodes[loop[index]],
+                        mesh.nodes[loop[(index + 1) % loop.size()]]);
+                }
+                ribArea[rib] = 0.5 * length(sum);
+            }
+
+            sim.cells.resize(sim.ribChords.size() - 1);
+            for (std::size_t cell = 0; cell < sim.cells.size(); ++cell) {
+                SimCell &record = sim.cells[cell];
+                record.ribs = {order[cell], order[cell + 1]};
+                record.restSectionArea = 0.5
+                                         * (ribArea[order[cell]]
+                                            + ribArea[order[cell + 1]]);
+                const double spacing = length(
+                    mesh.nodes[sim.ribChords[order[cell + 1]].leadingNode]
+                    - mesh.nodes[sim.ribChords[order[cell]].leadingNode]);
+                record.restVolume =
+                    std::max(record.restSectionArea * spacing, 1.0e-6);
+                // Cross-port to the next cell: the hole outlines of the
+                // rib the two bays share. Closed loops, so the vector
+                // area is origin-independent.
+                if (cell + 1 < sim.cells.size()) {
+                    const std::size_t shared = ribMeshIndex[order[cell + 1]];
+                    double portArea = 0.0;
+                    for (const auto &outline : mesh.ribHoles[shared]) {
+                        softwing::Vec3 sum;
+                        for (std::size_t index = 0; index < outline.size();
+                             ++index) {
+                            sum += cross(
+                                outline[index],
+                                outline[(index + 1) % outline.size()]);
+                        }
+                        portArea += 0.5 * length(sum);
+                    }
+                    record.portAreaToNext = portArea;
+                }
+            }
+
+            // Face → cell: the nearest rib's rank, stepped one bay back
+            // when the face sits on that rib's low-span side. The span
+            // axes are all oriented +x, so a positive signed distance to
+            // the rib plane means the high-span side.
+            // Same convention as applyPressure: free flight ignores the
+            // slider and flies in level air, so its opening fraction must
+            // be normalised against the wind it will actually measure.
+            const softwing::Vec3 buildWind = rotateAbout(
+                sim.restChordDirection, sim.restSpanAxis,
+                (controls.freeFlight ? 0.0
+                                     : controls.angleOfAttackDegrees)
+                    * kDegreesToRadians);
+            for (std::size_t face = 0; face < triangles.size(); ++face) {
+                FaceAero &aero = sim.faceAero[face];
+                const RibChord &rib = sim.ribChords[aero.rib];
+                const auto &tri = triangles[face];
+                const softwing::Vec3 centroid =
+                    (mesh.nodes[static_cast<std::size_t>(tri[0])]
+                     + mesh.nodes[static_cast<std::size_t>(tri[1])]
+                     + mesh.nodes[static_cast<std::size_t>(tri[2])])
+                    / 3.0;
+                const double side = dot(
+                    centroid - mesh.nodes[rib.leadingNode], rib.spanAxis);
+                const std::size_t position = rank[aero.rib];
+                std::size_t cell =
+                    side >= 0.0 ? position
+                                : (position == 0 ? 0 : position - 1);
+                cell = std::min(cell, sim.cells.size() - 1);
+                aero.cell = static_cast<std::uint32_t>(cell);
+                if (triangleSurfaces[face] == SimSurface::Vent) {
+                    SimCell &record = sim.cells[cell];
+                    record.ventFaces.push_back(face);
+                    const softwing::Vec3 &a =
+                        mesh.nodes[static_cast<std::size_t>(tri[0])];
+                    const softwing::Vec3 &b =
+                        mesh.nodes[static_cast<std::size_t>(tri[1])];
+                    const softwing::Vec3 &c =
+                        mesh.nodes[static_cast<std::size_t>(tri[2])];
+                    record.restVentArea +=
+                        0.5 * length(cross(b - a, c - a));
+                    // Vent faces are wound outward, so at rest the area
+                    // vector opposes the build-time airflow; the dot
+                    // against -wind is the projection the live opening
+                    // fraction is normalised by.
+                    record.restVentProjection += dot(
+                        0.5 * cross(b - a, c - a), -1.0 * buildWind);
+                }
+            }
+            for (SimCell &record : sim.cells) {
+                record.restVentProjection =
+                    std::max(record.restVentProjection, 1.0e-9);
             }
         }
     }
@@ -1567,6 +1723,164 @@ double externalPressureCoefficient(double chordFraction,
     return std::min(1.0, stagnation + 0.3 * liftCoefficient * aft * aft);
 }
 
+// Advances the per-cell internal gauge pressures by one frame and returns
+// the per-cell pressure the stamp should use: the state plus the squeeze
+// response. Three effects, all positional and all restoring, so none of
+// them re-opens the closed loops that sank the free-flight attempts:
+//
+//   intake     the cell relaxes toward its section's ram pressure, but
+//              only in proportion to how much of its vent still faces the
+//              oncoming air — a tucked nose seals its own intake, which is
+//              why a tucked cell stops being force-fed the full ram
+//              pressure the old model stamped regardless.
+//   cross-flow neighbouring cells exchange pressure through the rib hole
+//              area the design actually has. This is the re-inflation
+//              path: a collapsed side with a sealed intake is re-fed by
+//              the inflated side, exactly what the ports are for.
+//   squeeze    a cell pressed below its rest section reacts with extra
+//              pressure. Per-cell-uniform pressure times the live area
+//              vectors is the gradient of enclosed volume, so this term
+//              pushes the fabric toward re-opening even where the fold
+//              has inverted faces — the chordwise-shaped stamp cannot.
+std::vector<double> advanceCellPressures(
+    SimBody &sim,
+    const std::vector<double> &ribPressure,
+    const softwing::Vec3 &relativeWind)
+{
+    const std::size_t count = sim.cells.size();
+    std::vector<double> target(count, 0.0);
+    std::vector<double> speed(count, 0.0);
+    if (sim.cellPressure.size() != count) {
+        // Fresh build: cells pre-inflated to their ram target, so the
+        // first stamp reproduces the old model exactly and the build-time
+        // trim passes see the field they always saw.
+        sim.cellPressure.assign(count, 0.0);
+        for (std::size_t cell = 0; cell < count; ++cell) {
+            const SimCell &record = sim.cells[cell];
+            sim.cellPressure[cell] = 0.5
+                                     * (ribPressure[record.ribs[0]]
+                                        + ribPressure[record.ribs[1]]);
+        }
+    }
+    for (std::size_t cell = 0; cell < count; ++cell) {
+        const SimCell &record = sim.cells[cell];
+        target[cell] = 0.5
+                       * (ribPressure[record.ribs[0]]
+                          + ribPressure[record.ribs[1]]);
+        // The flow speed through an orifice follows the HIGHER-pressure
+        // side, not the target alone: a cell above its target must be
+        // able to exhaust even when the target — and with it the tunnel
+        // airflow — has dropped to zero, or turning the wind off leaves
+        // the wing frozen hard-inflated at its stale state forever. At
+        // healthy convergence state == target, so this is the same speed
+        // as before.
+        speed[cell] = std::sqrt(
+            2.0
+            * std::max({0.0, target[cell], sim.cellPressure[cell]})
+            / kAirDensity);
+    }
+
+    const auto &nodes = sim.body->nodes();
+    const auto &triangles = sim.body->triangles();
+    const double windSpeed = length(relativeWind);
+    const softwing::Vec3 windDirection =
+        windSpeed > 1.0e-6 ? relativeWind / windSpeed : softwing::Vec3{};
+
+    std::vector<double> rate(count, 0.0);
+    std::vector<double> change(count, 0.0);
+    for (std::size_t cell = 0; cell < count; ++cell) {
+        const SimCell &record = sim.cells[cell];
+        if (record.restVentArea <= 0.0) {
+            continue;
+        }
+        // How much of the intake still faces the oncoming air. Vent
+        // faces are wound outward, so a vent taking ram air has its
+        // live area vector AGAINST the downstream wind direction.
+        double opening = 0.0;
+        if (windSpeed > 1.0e-6) {
+            softwing::Vec3 ventArea;
+            for (const std::size_t face : record.ventFaces) {
+                const auto &tri = triangles[face];
+                ventArea += 0.5
+                            * cross(nodes[tri.b].position
+                                        - nodes[tri.a].position,
+                                    nodes[tri.c].position
+                                        - nodes[tri.a].position);
+            }
+            opening = std::clamp(dot(ventArea, -1.0 * windDirection)
+                                     / record.restVentProjection,
+                                 0.0, 1.0);
+        }
+        // Scooping air IN needs the vent to face the wind; venting OUT
+        // does not — an over-pressured cell exhausts through its mouth
+        // whichever way that mouth points, including in dead air.
+        const double gate =
+            sim.cellPressure[cell] > target[cell] ? 1.0 : opening;
+        const double intakeRate = gate * kCellFlowDischarge
+                                  * record.restVentArea * speed[cell]
+                                  / record.restVolume;
+        rate[cell] += intakeRate;
+        change[cell] +=
+            intakeRate * (target[cell] - sim.cellPressure[cell]);
+    }
+    for (std::size_t cell = 0; cell + 1 < count; ++cell) {
+        const SimCell &record = sim.cells[cell];
+        if (record.portAreaToNext <= 0.0) {
+            continue;
+        }
+        const double flow = kCellFlowDischarge * record.portAreaToNext
+                            * 0.5 * (speed[cell] + speed[cell + 1]);
+        const double difference =
+            sim.cellPressure[cell + 1] - sim.cellPressure[cell];
+        const double rateHere = flow / record.restVolume;
+        const double rateNext = flow / sim.cells[cell + 1].restVolume;
+        rate[cell] += rateHere;
+        change[cell] += rateHere * difference;
+        rate[cell + 1] += rateNext;
+        change[cell + 1] -= rateNext * difference;
+    }
+    for (std::size_t cell = 0; cell < count; ++cell) {
+        const double step = rate[cell] * simulationTimeStep;
+        const double scale =
+            step > kCellMaxRateStep ? kCellMaxRateStep / step : 1.0;
+        sim.cellPressure[cell] +=
+            change[cell] * simulationTimeStep * scale;
+    }
+
+    // The squeeze response, from the live rib loop vector areas.
+    std::vector<double> liveRibArea(sim.ribLoopNodes.size(), 0.0);
+    for (std::size_t rib = 0; rib < sim.ribLoopNodes.size(); ++rib) {
+        softwing::Vec3 sum;
+        const auto &loop = sim.ribLoopNodes[rib];
+        for (std::size_t index = 0; index < loop.size(); ++index) {
+            sum += cross(nodes[loop[index]].position,
+                         nodes[loop[(index + 1) % loop.size()]].position);
+        }
+        liveRibArea[rib] = 0.5 * length(sum);
+    }
+    std::vector<double> stamp(count, 0.0);
+    for (std::size_t cell = 0; cell < count; ++cell) {
+        const SimCell &record = sim.cells[cell];
+        double boost = 0.0;
+        if (record.restSectionArea > 0.0) {
+            const double live = 0.5
+                                * (liveRibArea[record.ribs[0]]
+                                   + liveRibArea[record.ribs[1]]);
+            const double ratio =
+                std::max(live / record.restSectionArea,
+                         kCellSectionRatioFloor);
+            if (ratio < kCellSqueezeThreshold) {
+                boost = std::min(
+                    sim.cellPressure[cell] * kCellSqueezeGain
+                        * (kCellSqueezeThreshold - ratio) / ratio,
+                    sim.cellPressure[cell] * kCellSqueezeCapRatio);
+            }
+        }
+        stamp[cell] = sim.cellPressure[cell] + boost;
+    }
+    return stamp;
+}
+
 }  // namespace
 
 void applyPressure(SimBody &sim, const SimControls &controls)
@@ -1679,15 +1993,34 @@ void applyPressure(SimBody &sim, const SimControls &controls)
                      kMaximumDynamicPressureRatio * dynamicPressure);
     }
 
+    // The interior side of every face. With the cell model on, each cell
+    // carries its own gauge pressure state (fed through its intake,
+    // exchanged through the cross-ports, squeezed by collapse); with it
+    // off — or when the mesh gave us no cells — the interior sits at the
+    // blanket ram pressure the model always assumed, whose healthy-wing
+    // field the cell state converges to anyway.
+    const bool cellsActive =
+        controls.cellPressureModel && !sim.cells.empty();
+    std::vector<double> interior;
+    if (cellsActive) {
+        interior = advanceCellPressures(sim, ribPressure,
+                                        freestream - systemVelocity);
+    }
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const FaceAero &aero = sim.faceAero[face];
         const double coefficient = externalPressureCoefficient(
             aero.chordFraction, aero.upperSurface, ribLift[aero.rib]);
-        // The cell interior sits at ram pressure, so its gauge pressure is
-        // q; the outside of the face is q·Cp. Only the difference loads the
-        // fabric, which is why there is no separate ambient anywhere here.
+        // The outside of the face is q·Cp; only the difference across the
+        // fabric loads it, which is why there is no separate ambient
+        // anywhere here. The legacy expression is kept verbatim on the
+        // legacy path — q·(1−Cp) and q − q·Cp round differently in IEEE
+        // double, and the bench's pose checksums notice.
         sim.body->setFacePressureDifference(
-            face, ribPressure[aero.rib] * (1.0 - coefficient));
+            face,
+            cellsActive
+                ? interior[aero.cell]
+                      - ribPressure[aero.rib] * coefficient
+                : ribPressure[aero.rib] * (1.0 - coefficient));
     }
 }
 

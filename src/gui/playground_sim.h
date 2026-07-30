@@ -189,9 +189,42 @@ struct RibChord
 struct FaceAero
 {
     std::uint32_t rib = 0;
+    // Which pneumatic cell (bay between two adjacent ribs) the face
+    // belongs to. Meaningless when SimBody::cells is empty.
+    std::uint32_t cell = 0;
     // 0 at the leading edge, 1 at the trailing edge.
     float chordFraction = 0.0F;
     bool upperSurface = false;
+};
+
+// One pneumatic cell: the bay between two spanwise-adjacent ribs. The
+// cells carry the wing's internal air as a per-cell gauge pressure state
+// instead of the old blanket assumption that every cell sits at ram
+// pressure: a cell is fed through its leading-edge intake only while that
+// intake actually faces the airflow, neighbouring cells exchange air
+// through the rib's cross-port holes, and a cell squeezed below its rest
+// section reacts with extra pressure. Together those are what let a
+// collapsed side re-inflate — the old open-loop stamp held a fold shut
+// forever, because a flat cell was stamped exactly like an inflated one.
+struct SimCell
+{
+    // The two bounding ribs, as indices into ribChords, in span order.
+    std::array<std::size_t, 2> ribs{0, 0};
+    // Skin triangles of this cell's leading-edge intake (Vent surface).
+    std::vector<std::size_t> ventFaces;
+    // Rest magnitudes the live signals are measured against.
+    double restVentArea = 0.0;      // m², sum of vent face areas
+    // The vent's rest-pose projection onto the build-time airflow, m².
+    // The live projection over this one is the intake's opening fraction:
+    // the designed pose counts as fully open, and the fraction falls as
+    // the nose rotates the intake away from the wind.
+    double restVentProjection = 0.0;
+    double restSectionArea = 0.0;   // m², mean of the two rib loop areas
+    double restVolume = 0.0;        // m³, section area × rib spacing
+    // Cross-port area through the rib shared with the NEXT cell in span
+    // order, summed from that rib's hole outlines. Zero when the design
+    // has no holes there — an unported rib genuinely blocks cross-flow.
+    double portAreaToNext = 0.0;
 };
 
 struct SimBuildOptions
@@ -261,6 +294,12 @@ struct SimBody
     // Per-rib section lift coefficient from the most recent load stamp;
     // shapes the chordwise pressure distribution.
     std::vector<double> ribLiftCoefficient;
+    // The pneumatic cells in span order, and their internal gauge pressure
+    // in pascals — the state applyPressure integrates each frame. Empty
+    // until the first stamp initialises it (cells pre-inflated to their
+    // ram target, so a fresh build behaves exactly like the old model).
+    std::vector<SimCell> cells;
+    std::vector<double> cellPressure;
     // Chord fraction of the designed hang line: the chord station the
     // carabiners sit under at rest. The imposed aerodynamic resultant
     // acts here at trim and travels aft/forward of it as the angle of
@@ -322,10 +361,12 @@ struct SimControls
 {
     // Dynamic pressure q = ½ρV². It sets the whole load field, because in
     // this model both sides of the fabric are referred to it: the cell
-    // interior sits at ram (stagnation) pressure, so its gauge pressure IS
-    // q, and the outside of any face is q·Cp. 80 Pa is 41 km/h, an ordinary
-    // trim speed. A real canopy runs 0.7–2.3 mbar this way, not the 0.1 bar
-    // that gets quoted — 0.1 bar would need 460 km/h.
+    // interior is fed toward ram (stagnation) pressure — per cell through
+    // its intake and cross-ports when the cell model is on, pinned at
+    // exactly q when it is off — and the outside of any face is q·Cp.
+    // 80 Pa is 41 km/h, an ordinary trim speed. A real canopy runs
+    // 0.7–2.3 mbar this way, not the 0.1 bar that gets quoted — 0.1 bar
+    // would need 460 km/h.
     double pressurePascal = 80.0;
     // Angle of the airflow to the wing's rest chord, in degrees. Replaces
     // the old fake follower "lift" force: the load now comes out of the
@@ -347,6 +388,13 @@ struct SimControls
     // untouched; the GUI turns it on. Ignored in free flight, which has
     // its own force pass.
     bool flightLoad = false;
+    // Per-cell internal air model: intake gating, cross-port flow between
+    // neighbouring cells, and a volume-deficit pressure response. On a
+    // healthy wing the stamped field converges to exactly the old
+    // uniform-ram one; it differs only in distress (a tucked cell seals
+    // its own intake, a collapsed side is re-fed by its neighbours). Off
+    // reproduces the old blanket ram-pressure stamp bit for bit.
+    bool cellPressureModel = true;
     double brakeLeft = 0.0;
     double brakeRight = 0.0;
     int substeps = simulationSubsteps;

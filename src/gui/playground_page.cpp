@@ -2167,8 +2167,10 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "Colour the skin by edge stretch (Stress), by distance from the "
         "designed shape (Deviation), by compressed — wrinkled — fabric "
         "(Slack), or by the pressure difference across each cell's "
-        "fabric (Pressure) — watch the wing inflate, and see how the "
-        "load lands cell by cell."));
+        "fabric (Pressure) — each cell carries its own internal "
+        "pressure, fed through its intake and the rib cross-port "
+        "holes, so a tucked cell visibly loses its feed and a "
+        "collapsed side is re-fed by its neighbours."));
     // Full-scale for the ramp. Read as hundredths of a percent strain for
     // Stress and Slack (so the low end, where fabric actually works, still
     // has resolution) and as millimetres for Deviation.

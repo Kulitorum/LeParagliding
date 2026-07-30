@@ -66,6 +66,48 @@ and the asymmetric snatch wound the wing up); and **heavier damping**
 be damped — the tunnel measures statics, and the dynamics it would
 distort are free flight's job.
 
+### Per-cell air
+
+The interior side of the stamp used to be one blanket assumption — every
+cell sits at its section's ram pressure, always. That assumption cannot
+lose pressure, so it also cannot re-inflate: a folded region kept being
+stamped exactly like a healthy one, the fold carried no strain energy,
+and the field pinned it shut forever (measured: after a −6° excursion the
+wing parked at −21% volume with one side's A row unloaded and never came
+back). `SimCell` replaces the assumption with one gauge-pressure state
+per bay between adjacent ribs, advanced once per frame in
+`applyPressure` by three effects — all positional and all restoring, so
+none re-opens the velocity loops the stability stack exists to avoid:
+
+- **Intake**: the cell relaxes toward its section's ram target, gated by
+  how much of its Vent-tagged skin still projects into the oncoming air
+  (normalised so the designed pose counts as fully open). A tucked nose
+  seals its own intake instead of being force-fed.
+- **Cross-ports**: neighbouring cells exchange pressure through the rib
+  hole area the design actually declares (`SimMesh::ribHoles`, exported
+  from the Section 4 hole groups). This is the re-inflation path — and a
+  design without holes honestly does not get it.
+- **Squeeze**: below 90% of the rest section area the cell answers with
+  extra pressure (up to 3× its state). Per-cell-uniform pressure times
+  the live area vectors is the gradient of enclosed volume, so this term
+  pushes toward re-opening even where a fold has inverted faces, which
+  the chordwise-shaped part of the stamp cannot.
+
+On a healthy wing the state converges to exactly the ram target and the
+squeeze deadband adds nothing, so the stamped field — and with it the
+whole `--shape` calibration — is unchanged (verified identical flags,
+loads and settle time on gnuC2, and `SimControls::cellPressureModel =
+false` reproduces the old stamp bit for bit; the bench takes
+`--no-cells`). Measured A/B on gnuC2 with the bench's `--dive` and
+`--tuck` experiments: moderate collapses (−4° excursion, grab yanks to
+~3 m) now recover cleanly where recovery is expected; after a violent
+−6° excursion the old model parks permanently deflated while the cell
+model re-pressurises every section back to rest volume but the wing can
+stay span-folded — an inflated cravat, which is also what a real wing
+does, because clearing a cravat needs fabric-on-fabric contact the
+playground does not model (the engine's contact machinery exists but is
+not wired in; that is the known next step if tangle-clearing matters).
+
 ## The instruments
 
 `playground_metrics.{h,cpp}` compares the live wing against a
@@ -141,10 +183,14 @@ airspeed forever).
   shape, mm), *Slack fabric* (compression strain — the wrinkle map)
   and *Pressure* (the pressure difference across each cell face, Pa —
   per FACE and unsmoothed on purpose, because the cell-by-cell
-  structure of the inflation load is the thing being examined; note
-  the model stamps each section at its own ram pressure and models no
-  cross-port flow between neighbours, which this display makes
-  visible). One combo box, one shared scale slider. All three tint per
+  structure of the inflation load is the thing being examined; each
+  cell carries its own internal gauge pressure state — fed through its
+  leading-edge intake while that intake faces the airflow, exchanged
+  with its neighbours through the rib cross-port holes the design
+  declares, and boosted when the section is squeezed below its rest
+  area — so a tucked cell visibly loses its ram feed and a collapsed
+  side is re-fed by the inflated one; see "Per-cell air" below). One
+  combo box, one shared scale slider. All three tint per
   VERTEX from per-node fields (edge strains scattered to their
   endpoints), so the skin shades smoothly instead of rendering as
   facets. A calibrated legend paints INSIDE the viewport (top right)
