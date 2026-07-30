@@ -2123,7 +2123,8 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     // Capped at a third of what the slider used to reach: past roughly this
     // the skin inflates further than the fabric would really allow and the
     // wing stops looking like one, so the extra travel was only misleading.
-    pressure_ = makeSlider(100, 80);
+    // Default 61 Pa = 36 km/h (q = ½ρv² at 10 m/s), a typical trim speed.
+    pressure_ = makeSlider(100, 61);
     lift_ = makeSlider(15, 6);
     leftBrake_ = makeSlider(100, 0);
     rightBrake_ = makeSlider(100, 0);
