@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QDebug>
 #include <QFile>
+#include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -21,9 +22,12 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QPainter>
+#include <QPainterPath>
 #include <QSurfaceFormat>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSlider>
+#include <QToolButton>
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -74,10 +78,12 @@ constexpr double maximumStressFullScaleStrain = 0.05;   // slider top, 5%
 // multiplier instead, which is a force. Newtons per line.
 constexpr double defaultLineFullScaleNewtons = 100.0;
 constexpr double maximumLineFullScaleNewtons = 500.0;
-// Cadence of the deviation/slack field refresh, in simulation steps. The
+// Cadence of the heatmap field refresh, in wall-clock milliseconds. The
 // fields are a measurement pass over the whole body — cheap enough for a
-// few hertz, pointless (and allocating) every frame.
-constexpr int fieldRefreshSteps = 15;
+// few hertz, pointless every frame — and the cadence must be wall time:
+// counted in steps, a heavily subdivided wing at hundreds of
+// milliseconds per frame showed its rest pose for seconds.
+constexpr int fieldRefreshMilliseconds = 400;
 // How close a Ctrl-click must land to a projected line junction to grab it.
 constexpr double grabPickRadiusPixels = 14.0;
 // Simulated-time bound on the foreground settle; convergence normally
@@ -165,6 +171,18 @@ public:
         nodeSlack_.clear();
         refreshColourField();
 
+        fitView();
+
+        setRunning(true);
+    }
+
+    // Frame the wing (and, flying, the whole pendulum): target and
+    // distance only, so the current view direction survives a re-fit.
+    void fitView()
+    {
+        if (!sim_.body) {
+            return;
+        }
         const softwing::Vec3 low = sim_.boundsLow;
         const softwing::Vec3 high = sim_.boundsHigh;
         softwing::Vec3 focus = 0.5 * (low + high);
@@ -198,8 +216,57 @@ public:
                             static_cast<float>(focus.y),
                             static_cast<float>(focus.z));
         distance_ = static_cast<float>(2.0 * extent);
+        update();
+    }
 
-        setRunning(true);
+    // The same named views the Design tab's viewport offers. Mesh
+    // convention: span +x, chord +y (leading edge at low y), z up; the
+    // camera at pitch 0 / yaw 0 looks straight down, so Top is the
+    // identity and the others rotate off it.
+    enum class ViewPreset
+    {
+        Iso,
+        Front,
+        Back,
+        Left,
+        Right,
+        Top,
+        Bottom,
+    };
+
+    void setViewPreset(ViewPreset preset)
+    {
+        switch (preset) {
+        case ViewPreset::Iso:
+            yaw_ = 30.0F;
+            pitch_ = -60.0F;
+            break;
+        case ViewPreset::Front:
+            yaw_ = 0.0F;
+            pitch_ = -90.0F;
+            break;
+        case ViewPreset::Back:
+            yaw_ = 180.0F;
+            pitch_ = -90.0F;
+            break;
+        case ViewPreset::Left:
+            yaw_ = 90.0F;
+            pitch_ = -90.0F;
+            break;
+        case ViewPreset::Right:
+            yaw_ = -90.0F;
+            pitch_ = -90.0F;
+            break;
+        case ViewPreset::Top:
+            yaw_ = 0.0F;
+            pitch_ = 0.0F;
+            break;
+        case ViewPreset::Bottom:
+            yaw_ = 0.0F;
+            pitch_ = 180.0F;
+            break;
+        }
+        update();
     }
 
     // Free flight rebuilds the body: pinned and flying wings differ in
@@ -368,6 +435,29 @@ public:
     // Snapshot for the analysis dialog, which drives its own bodies with
     // the tunnel's exact settings.
     SimControls controls() const { return controls_; }
+
+    // Debug only: what the display fields actually hold.
+    QString debugFieldSummary() const
+    {
+        float devPeak = 0.0F;
+        for (const float value : deviationField_) {
+            devPeak = std::max(devPeak, value);
+        }
+        return QStringLiteral("mode %1 dev[%2] peak %3")
+            .arg(static_cast<int>(colorMode_))
+            .arg(deviationField_.size())
+            .arg(devPeak);
+    }
+
+    // For the angle dial: the polar pass's live numbers. Lift is 0 and
+    // the angle stale when no polar pass runs (pinned without flight
+    // load), which the dial states rather than hides.
+    bool polarActive() const
+    {
+        return controls_.flightLoad || controls_.freeFlight;
+    }
+    double liveLiftNewtons() const { return sim_.lastLift; }
+    double liveAlphaDegrees() const { return sim_.lastAlphaDegrees; }
 
     // For the page's foreground settle: one simulation frame, outside
     // the 16 ms timer's pacing. False when the solver threw (the error
@@ -598,6 +688,13 @@ protected:
         initializeOpenGLFunctions();
         glEnable(GL_DEPTH_TEST);
         glClearColor(0.10F, 0.11F, 0.13F, 1.0F);
+        if (qEnvironmentVariableIsSet("LEP_PLAYGROUND_DEBUG")) {
+            qWarning() << "GL context: stencil"
+                       << context()->format().stencilBufferSize()
+                       << "samples" << context()->format().samples()
+                       << "profile"
+                       << int(context()->format().profile());
+        }
 
         // The application's default surface format is XFLR5's, which is a
         // 3.3 core profile on most machines: core GLSL syntax and a bound
@@ -816,6 +913,113 @@ protected:
                          / 9);
         buffer_.release();
         program_->release();
+
+        // The calibrated legend, painted over the scene it calibrates.
+        // This needs the stencil buffer requested in the constructor —
+        // without one QPainter's GL engine silently drops filled paths.
+        if (colorMode_ != ColorMode::Plain || lineTensionColoring_) {
+            glDisable(GL_DEPTH_TEST);
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setRenderHint(QPainter::TextAntialiasing);
+            drawLegendOverlay(painter);
+            painter.end();
+            glEnable(GL_DEPTH_TEST);
+        }
+    }
+
+    // One calibrated colour bar per active colouring, top-right in the
+    // viewport: quantity, unit, ticks and a live peak marker — a peak
+    // past full scale parks at the top with its true value printed, so
+    // saturation reads as saturation.
+    void drawLegendOverlay(QPainter &painter)
+    {
+        const std::vector<LegendBar> bars = legendBars();
+        if (bars.empty()) {
+            return;
+        }
+        const QFont titleFont(painter.font().family(), 8,
+                              QFont::DemiBold);
+        const QFont tickFont(painter.font().family(), 8);
+        constexpr int panelWidth = 146;
+        constexpr int barWidth = 14;
+        constexpr int margin = 12;
+        constexpr int pad = 10;
+        const int barHeight =
+            std::clamp(static_cast<int>(height() * 0.30), 100, 240);
+        int top = margin;
+        for (const LegendBar &bar : bars) {
+            const QRectF panel(width() - margin - panelWidth, top,
+                               panelWidth, barHeight + 3 * pad + 16);
+            painter.setPen(QColor(0x26, 0x35, 0x4a));
+            painter.setBrush(QColor(0x0d, 0x14, 0x22, 222));
+            painter.drawRoundedRect(panel, 7.0, 7.0);
+
+            painter.setFont(titleFont);
+            painter.setPen(QColor(0xb9, 0xc6, 0xd8));
+            painter.drawText(
+                QRectF(panel.left() + pad, panel.top() + pad,
+                       panelWidth - 2 * pad, 14),
+                Qt::AlignLeft | Qt::AlignVCenter, bar.title);
+
+            const QRectF gradient(panel.left() + pad + 8,
+                                  panel.top() + 2 * pad + 14, barWidth,
+                                  barHeight);
+            QLinearGradient ramp(gradient.bottomLeft(),
+                                 gradient.topLeft());
+            for (std::size_t stop = 0; stop < kRampStops.size();
+                 ++stop) {
+                const QVector3D &colour = kRampStops[stop];
+                ramp.setColorAt(
+                    static_cast<double>(stop) / (kRampStops.size() - 1),
+                    QColor::fromRgbF(colour.x(), colour.y(),
+                                     colour.z()));
+            }
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(ramp);
+            painter.drawRect(gradient);
+
+            painter.setFont(tickFont);
+            for (int tick = 0; tick <= 4; ++tick) {
+                const double fraction = tick / 4.0;
+                const double tickY = gradient.bottom()
+                                     - fraction * gradient.height();
+                painter.setPen(QColor(0x93, 0xa4, 0xba));
+                painter.drawLine(QPointF(gradient.right(), tickY),
+                                 QPointF(gradient.right() + 4, tickY));
+                if (tick % 2 == 0) {
+                    painter.drawText(
+                        QRectF(gradient.right() + 7, tickY - 8,
+                               panel.right() - gradient.right() - 9,
+                               16),
+                        Qt::AlignLeft | Qt::AlignVCenter,
+                        bar.format(fraction * bar.fullScale));
+                }
+            }
+
+            const double peakFraction =
+                std::clamp(bar.peak / bar.fullScale, 0.0, 1.0);
+            const double peakY =
+                gradient.bottom() - peakFraction * gradient.height();
+            QPolygonF marker;
+            marker << QPointF(gradient.left() - 2, peakY)
+                   << QPointF(gradient.left() - 8, peakY - 4)
+                   << QPointF(gradient.left() - 8, peakY + 4);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(0xf7, 0xfb, 0xff));
+            painter.drawPolygon(marker);
+            painter.setPen(QColor(0xf7, 0xfb, 0xff));
+            const double labelY =
+                std::clamp(peakY + 10.0, gradient.top(),
+                           gradient.bottom() - 16.0);
+            painter.drawText(
+                QRectF(gradient.right() + 7, labelY,
+                       panel.right() - gradient.right() - 9, 16),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("◂ %1").arg(bar.format(bar.peak)));
+
+            top += static_cast<int>(panel.height()) + 8;
+        }
     }
 
     void mousePressEvent(QMouseEvent *event) override
@@ -1059,7 +1263,7 @@ private:
                                               nodeTensile_,
                                               nodeSlack_);
         }
-        fieldSteps_ = 0;
+        fieldClock_.start();
     }
 
     // Ctrl-click picking: every unique line-junction endpoint projected to
@@ -1135,8 +1339,13 @@ private:
     {
         try {
             lep::playground::stepSimulation(sim_, controls_);
+            // Wall-clock cadence, not steps: at high subdivision one
+            // frame can cost hundreds of milliseconds, and a
+            // count-based refresh left the heatmap showing the rest
+            // pose for the first five seconds and crawling after.
             if (colorMode_ != ColorMode::Plain
-                && ++fieldSteps_ >= fieldRefreshSteps) {
+                && (!fieldClock_.isValid()
+                    || fieldClock_.elapsed() >= fieldRefreshMilliseconds)) {
                 refreshColourField();
             }
         } catch (const std::exception &exception) {
@@ -1160,13 +1369,13 @@ private:
     bool lineTensionColoring_ = false;
     double lineFullScaleNewtons_ = defaultLineFullScaleNewtons;
     // The design shape and the cached heatmap fields measured against it.
-    // Fields are refreshed on the fieldRefreshSteps cadence, never
-    // reallocated per frame.
+    // Fields are refreshed on the wall-clock cadence, never reallocated
+    // per frame.
     lep::playground::ShapeBaseline baseline_;
     std::vector<float> deviationField_;
     std::vector<float> nodeTensile_;
     std::vector<float> nodeSlack_;
-    int fieldSteps_ = 0;
+    QElapsedTimer fieldClock_;
     // The interactive grab: anchor position accumulated in doubles so a
     // long drag does not drift, depth fixed at pick time.
     bool grabbing_ = false;
@@ -1187,24 +1396,22 @@ private:
     QPointF lastMouse_;
 };
 
-// The legend beside the 3D view: one calibrated colour bar per active
-// colouring, each with its quantity, unit, ticks and a live peak marker
-// — a picture coloured by numbers is only a measurement when the
-// numbers are printed next to it. A sibling widget rather than a
-// QPainter overlay inside paintGL: the app's shared GL surface format
-// carries no stencil buffer, and the painter's GL engine silently loses
-// its filled paths without one. Plain widget painting has no such
-// dependency.
-class LegendStrip : public QWidget
+// The angle-of-attack dial: a section glyph with the wind arrow at the
+// SET angle (accent), a second thinner arrow at the MEASURED live angle
+// (ink), and the computed lift in newtons — the picture that makes the
+// Angle slider mean something. A plain painted widget for the same
+// stencil-buffer reason as the legend strip.
+class AngleOfAttackDial : public QWidget
 {
 public:
-    explicit LegendStrip(const PlaygroundView *view, QWidget *parent)
-        : QWidget(parent), view_(view)
+    explicit AngleOfAttackDial(QWidget *parent) : QWidget(parent)
     {
-        setFixedWidth(150);
-        // Peaks move while the solver runs; a few refreshes a second
-        // keep the marker honest without repainting per frame. Runs
-        // only while shown.
+        setFixedSize(236, 40);
+        setToolTip(QStringLiteral(
+            "The airflow against the wing's chord. Solid arrow: the "
+            "angle the sliders set. Thin arrow: the angle the rigged "
+            "wing actually holds under load. Lift is the imposed "
+            "polar's, in newtons."));
         auto *refresh = new QTimer(this);
         refresh->setInterval(250);
         connect(refresh, &QTimer::timeout, this,
@@ -1212,108 +1419,96 @@ public:
         refresh->start();
     }
 
+    void setView(const PlaygroundView *view) { view_ = view; }
+    void setSetAngleProvider(std::function<double()> provider)
+    {
+        setAngle_ = std::move(provider);
+    }
+
 protected:
     void paintEvent(QPaintEvent *) override
     {
-        const std::vector<LegendBar> bars = view_->legendBars();
-        if (bars.empty()) {
-            return;
-        }
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setRenderHint(QPainter::TextAntialiasing);
-        const QFont titleFont(painter.font().family(), 8,
-                              QFont::DemiBold);
-        const QFont tickFont(painter.font().family(), 8);
-        constexpr int barWidth = 14;
-        constexpr int pad = 10;
-        const int panelWidth = width() - 4;
-        // Split the height between the bars; the gradient gets what the
-        // chrome leaves over.
-        const int panelHeight =
-            (height() - 8) / static_cast<int>(bars.size()) - 8;
-        const int barHeight =
-            std::clamp(panelHeight - 3 * pad - 16, 80, 300);
-        int top = 4;
-        for (const LegendBar &bar : bars) {
-            const QRectF panel(2, top, panelWidth,
-                               barHeight + 3 * pad + 16);
-            painter.setPen(QColor(0x26, 0x35, 0x4a));
-            painter.setBrush(QColor(0x11, 0x1b, 0x2a));
-            painter.drawRoundedRect(panel, 7.0, 7.0);
+        painter.setPen(QColor(0x26, 0x35, 0x4a));
+        painter.setBrush(QColor(0x11, 0x1b, 0x2a));
+        painter.drawRoundedRect(QRectF(0.5, 0.5, width() - 1.0,
+                                       height() - 1.0),
+                                6.0, 6.0);
 
-            painter.setFont(titleFont);
-            painter.setPen(QColor(0xb9, 0xc6, 0xd8));
-            painter.drawText(
-                QRectF(panel.left() + pad, panel.top() + pad,
-                       panelWidth - 2 * pad, 14),
-                Qt::AlignLeft | Qt::AlignVCenter, bar.title);
+        const double setDegrees = setAngle_ ? setAngle_() : 0.0;
+        const bool live = view_ != nullptr && view_->hasBody()
+                          && view_->polarActive();
+        const double liveDegrees =
+            live ? view_->liveAlphaDegrees() : setDegrees;
 
-            const QRectF gradient(panel.left() + pad + 8,
-                                  panel.top() + 2 * pad + 14, barWidth,
-                                  barHeight);
-            QLinearGradient ramp(gradient.bottomLeft(),
-                                 gradient.topLeft());
-            for (std::size_t stop = 0; stop < kRampStops.size();
-                 ++stop) {
-                const QVector3D &colour = kRampStops[stop];
-                ramp.setColorAt(
-                    static_cast<double>(stop) / (kRampStops.size() - 1),
-                    QColor::fromRgbF(colour.x(), colour.y(),
-                                     colour.z()));
-            }
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(ramp);
-            painter.drawRect(gradient);
+        // The section glyph: chord horizontal, nose left; wind arrows
+        // point along the flow, tilted UP toward the tail by the angle
+        // of attack — air from below, the physical convention.
+        const QPointF nose(14.0, height() * 0.5);
+        const QPointF tail(58.0, height() * 0.5);
+        QPainterPath section;
+        section.moveTo(nose);
+        section.cubicTo(nose + QPointF(8.0, -7.0),
+                        tail + QPointF(-18.0, -6.0), tail);
+        section.cubicTo(tail + QPointF(-18.0, 1.5),
+                        nose + QPointF(10.0, 3.5), nose);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0x93, 0xa4, 0xba));
+        painter.drawPath(section);
 
-            painter.setFont(tickFont);
-            for (int tick = 0; tick <= 4; ++tick) {
-                const double fraction = tick / 4.0;
-                const double tickY = gradient.bottom()
-                                     - fraction * gradient.height();
-                painter.setPen(QColor(0x93, 0xa4, 0xba));
-                painter.drawLine(QPointF(gradient.right(), tickY),
-                                 QPointF(gradient.right() + 4, tickY));
-                if (tick % 2 == 0) {
-                    painter.drawText(
-                        QRectF(gradient.right() + 7, tickY - 8,
-                               panel.right() - gradient.right() - 9, 16),
-                        Qt::AlignLeft | Qt::AlignVCenter,
-                        bar.format(fraction * bar.fullScale));
-                }
-            }
-
-            // The live peak: marker on the bar, true value beside it. A
-            // peak past full scale parks at the top with its real value
-            // printed — the display's way of saying "saturated" instead
-            // of lying.
-            const double peakFraction =
-                std::clamp(bar.peak / bar.fullScale, 0.0, 1.0);
-            const double peakY =
-                gradient.bottom() - peakFraction * gradient.height();
-            QPolygonF marker;
-            marker << QPointF(gradient.left() - 2, peakY)
-                   << QPointF(gradient.left() - 8, peakY - 4)
-                   << QPointF(gradient.left() - 8, peakY + 4);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(0xf7, 0xfb, 0xff));
-            painter.drawPolygon(marker);
-            painter.setPen(QColor(0xf7, 0xfb, 0xff));
-            const double labelY =
-                std::clamp(peakY + 10.0, gradient.top(),
-                           gradient.bottom() - 16.0);
-            painter.drawText(
-                QRectF(gradient.right() + 7, labelY,
-                       panel.right() - gradient.right() - 9, 16),
-                Qt::AlignLeft | Qt::AlignVCenter,
-                QStringLiteral("◂ %1").arg(bar.format(bar.peak)));
-
-            top += static_cast<int>(panel.height()) + 8;
+        const auto windArrow = [&](double degrees, const QColor &colour,
+                                   double strokeWidth) {
+            const double radians = degrees * 3.14159265358979 / 180.0;
+            // Points downstream; positive alpha lifts the tail end.
+            const QPointF direction(std::cos(radians),
+                                    -std::sin(radians));
+            const QPointF centre((nose.x() + tail.x()) * 0.5,
+                                 height() * 0.5);
+            const QPointF from = centre - direction * 26.0;
+            const QPointF to = centre + direction * 26.0;
+            painter.setPen(QPen(colour, strokeWidth, Qt::SolidLine,
+                                Qt::RoundCap));
+            painter.drawLine(from, to);
+            const QPointF back = to - direction * 6.0;
+            const QPointF side(direction.y() * 3.5,
+                               -direction.x() * 3.5);
+            painter.drawLine(to, back + side);
+            painter.drawLine(to, back - side);
+        };
+        // Measured first, so the set arrow stays on top where they
+        // nearly coincide.
+        if (live) {
+            windArrow(liveDegrees, QColor(0xf7, 0xfb, 0xff), 1.0);
         }
+        windArrow(setDegrees, QColor(0x38, 0xbd, 0xf8), 2.0);
+
+        const QFont textFont(painter.font().family(), 8);
+        painter.setFont(textFont);
+        painter.setPen(QColor(0xb9, 0xc6, 0xd8));
+        const QString angleLine =
+            live ? QStringLiteral("α %1° · holds %2°")
+                       .arg(setDegrees, 0, 'f', 0)
+                       .arg(liveDegrees, 0, 'f', 1)
+                 : QStringLiteral("α %1°").arg(setDegrees, 0, 'f', 0);
+        painter.drawText(QRectF(70.0, 3.0, width() - 76.0, 16.0),
+                         Qt::AlignLeft | Qt::AlignVCenter, angleLine);
+        painter.setPen(QColor(0xf7, 0xfb, 0xff));
+        const QFont liftFont(painter.font().family(), 8,
+                             QFont::DemiBold);
+        painter.setFont(liftFont);
+        painter.drawText(
+            QRectF(70.0, 20.0, width() - 76.0, 16.0),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            live ? QStringLiteral("lift %1 N")
+                       .arg(view_->liveLiftNewtons(), 0, 'f', 0)
+                 : QStringLiteral("lift — (flight load off)"));
     }
 
 private:
-    const PlaygroundView *view_;
+    const PlaygroundView *view_ = nullptr;
+    std::function<double()> setAngle_;
 };
 
 PlaygroundPage::PlaygroundPage(QWidget *parent)
@@ -1380,14 +1575,6 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "Colour the skin by edge stretch (Stress), by distance from the "
         "designed shape (Deviation), or by compressed — wrinkled — fabric "
         "(Slack)."));
-    // Start-up preset for scripted runs and screenshots, the same idea
-    // as LEP_PLAYGROUND_DEBUG.
-    if (qEnvironmentVariableIsSet("LEP_PLAYGROUND_COLOR")) {
-        colorBy_->setCurrentIndex(
-            std::clamp(qEnvironmentVariableIntValue("LEP_PLAYGROUND_COLOR"),
-                       0, colorBy_->count() - 1));
-    }
-
     // Full-scale for the ramp. Read as hundredths of a percent strain for
     // Stress and Slack (so the low end, where fabric actually works, still
     // has resolution) and as millimetres for Deviation.
@@ -1425,55 +1612,29 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "Substeps x iterations per frame. More substeps hold the fabric "
         "closer to its designed length; fewer keep the wing interactive."));
 
-    auto *view = new QHBoxLayout;
-    view->addWidget(new QLabel(QStringLiteral("Show"), this));
-    view->addWidget(showExtrados_);
-    view->addWidget(showVent_);
-    view->addWidget(showIntrados_);
-    view->addWidget(showRibs_);
-    view->addWidget(showStraps_);
-    view->addWidget(showLines_);
-    view->addSpacing(16);
-    view->addWidget(showLineTension_);
-    view->addWidget(lineScale_);
-    view->addStretch();
+    // ---- The left panel. The wing on screen is roughly 1:1 while the
+    // window is closer to 2:1, so chrome above the viewport is exactly
+    // the wrong place for it: everything lives in a column on the left
+    // and the viewport gets the full height. ----
 
-    // Its own row. The other two are already full edge to edge — the filter
-    // row runs to the legend and the wing row's four stretching sliders will
-    // grow until whatever follows them is pushed off the window — so a
-    // widget added to either disappears rather than wraps.
     freeFlight_ = makeCheck(QStringLiteral("Free flight"), false);
     freeFlight_->setToolTip(QStringLiteral(
         "Unpin the wing: gravity on, a pilot slung under the risers, the "
         "whole system flying and re-centred each frame. Steer with the "
         "brakes; a little symmetric brake steadies it."));
     flightLabel_ = new QLabel(this);
+    flightLabel_->setWordWrap(true);
 
     settleButton_ = new QPushButton(QStringLiteral("Settle"), this);
     settleButton_->setToolTip(QStringLiteral(
-        "Run a twin of this wing at the Accurate solver setting (60×"
-        "4) on a worker thread until it converges, then adopt the "
-        "settled pose and pause for review. Start it, do something "
-        "else, come back to the answer."));
+        "Step the live wing at the Accurate setting (60×4), as fast as "
+        "the machine allows, until it converges — watch it happen — "
+        "then pause for review."));
 
-    auto *solver = new QHBoxLayout;
-    solver->addWidget(new QLabel(QStringLiteral("Solver"), this));
-    solver->addWidget(quality_);
-    solver->addWidget(settleButton_);
-    solver->addSpacing(16);
-    solver->addWidget(freeFlight_);
-    solver->addWidget(flightLabel_, 1);
-    solver->addStretch();
-
-    // The shape instruments get a row of their own for the same
-    // row-fullness reason free flight did (see above).
     shapeLabel_ = new QLabel(this);
-    // The HUD line can outgrow the window (row loads, flags, a grab
-    // readout); Ignored lets the layout clip it rather than push the
-    // Flight load and Analyse controls off the right edge. The full
-    // text rides in the tooltip.
-    shapeLabel_->setSizePolicy(QSizePolicy::Ignored,
-                               QSizePolicy::Preferred);
+    // In a side panel the HUD may wrap: the full instrument line beats
+    // a clipped one.
+    shapeLabel_->setWordWrap(true);
     flightLoad_ = makeCheck(QStringLiteral("Flight load"), true);
     flightLoad_->setToolTip(QStringLiteral(
         "Impose the wing-level polar load in the tunnel so line loads are "
@@ -1483,33 +1644,179 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "Sweep the tunnel across an angle-of-attack range on a worker "
         "thread and report shape integrity vs α."));
 
-    auto *shape = new QHBoxLayout;
-    shape->addWidget(new QLabel(QStringLiteral("Colour"), this));
-    shape->addWidget(colorBy_);
-    shape->addWidget(stressScale_);
-    shape->addWidget(shapeLabel_, 1);
-    shape->addWidget(flightLoad_);
-    shape->addWidget(analyseButton_);
+    pressureLabel_ = new QLabel(this);
+    angleLabel_ = new QLabel(this);
+    leftBrakeLabel_ = new QLabel(this);
+    rightBrakeLabel_ = new QLabel(this);
+    alphaDial_ = new AngleOfAttackDial(this);
+    alphaDial_->setSetAngleProvider(
+        [this] { return static_cast<double>(lift_->value()); });
 
-    auto *controls = new QHBoxLayout;
-    controls->addWidget(new QLabel(QStringLiteral("Pressure"), this));
-    controls->addWidget(pressure_, 1);
-    controls->addWidget(new QLabel(QStringLiteral("Angle"), this));
-    controls->addWidget(lift_, 1);
-    controls->addWidget(new QLabel(QStringLiteral("Left brake"), this));
-    controls->addWidget(leftBrake_, 1);
-    controls->addWidget(new QLabel(QStringLiteral("Right brake"), this));
-    controls->addWidget(rightBrake_, 1);
-    controls->addWidget(runButton_);
-    controls->addWidget(resetButton_);
-    controls->addWidget(flyButton_);
+    // Initial readouts before any slider moves.
+    const auto refreshControlReadouts = [this] {
+        const double pascal = static_cast<double>(pressure_->value());
+        pressureLabel_->setText(
+            QStringLiteral("Pressure %1 Pa · %2 km/h")
+                .arg(pressure_->value())
+                .arg(std::sqrt(2.0 * pascal / 1.225) * 3.6, 0, 'f', 0));
+        angleLabel_->setText(
+            QStringLiteral("Angle %1°").arg(lift_->value()));
+        leftBrakeLabel_->setText(
+            QStringLiteral("Left brake %1 cm")
+                .arg(std::lround(leftBrake_->value() / 100.0
+                                 * maximumBrakeTravelMetres * 100.0)));
+        rightBrakeLabel_->setText(
+            QStringLiteral("Right brake %1 cm")
+                .arg(std::lround(rightBrake_->value() / 100.0
+                                 * maximumBrakeTravelMetres * 100.0)));
+    };
+    refreshControlReadouts();
+    for (QSlider *slider :
+         {pressure_, lift_, leftBrake_, rightBrake_}) {
+        connect(slider, &QSlider::valueChanged, this,
+                [refreshControlReadouts] { refreshControlReadouts(); });
+    }
 
-    layout_ = new QVBoxLayout(this);
-    layout_->addWidget(status_);
-    layout_->addLayout(view);
-    layout_->addLayout(solver);
-    layout_->addLayout(shape);
-    layout_->addLayout(controls);
+    const auto sectionLabel = [this](const QString &text) {
+        auto *label = new QLabel(text, this);
+        label->setObjectName(QStringLiteral("fieldLabel"));
+        return label;
+    };
+
+    auto *panelLayout = new QVBoxLayout;
+    panelLayout->setContentsMargins(0, 0, 6, 0);
+    panelLayout->setSpacing(6);
+
+    panelLayout->addWidget(sectionLabel(QStringLiteral("Show")));
+    auto *showGrid = new QGridLayout;
+    showGrid->setHorizontalSpacing(10);
+    showGrid->setVerticalSpacing(4);
+    showGrid->addWidget(showExtrados_, 0, 0);
+    showGrid->addWidget(showVent_, 0, 1);
+    showGrid->addWidget(showIntrados_, 1, 0);
+    showGrid->addWidget(showRibs_, 1, 1);
+    showGrid->addWidget(showStraps_, 2, 0);
+    showGrid->addWidget(showLines_, 2, 1);
+    panelLayout->addLayout(showGrid);
+    panelLayout->addWidget(showLineTension_);
+    panelLayout->addWidget(lineScale_);
+
+    panelLayout->addSpacing(8);
+    panelLayout->addWidget(sectionLabel(QStringLiteral("Solver")));
+    auto *solverRow = new QHBoxLayout;
+    solverRow->addWidget(quality_, 1);
+    solverRow->addWidget(settleButton_);
+    panelLayout->addLayout(solverRow);
+    panelLayout->addWidget(freeFlight_);
+    panelLayout->addWidget(flightLabel_);
+
+    panelLayout->addSpacing(8);
+    panelLayout->addWidget(sectionLabel(QStringLiteral("Colour")));
+    auto *colourRow = new QHBoxLayout;
+    colourRow->addWidget(colorBy_, 1);
+    colourRow->addWidget(stressScale_, 1);
+    panelLayout->addLayout(colourRow);
+    auto *analysisRow = new QHBoxLayout;
+    analysisRow->addWidget(flightLoad_);
+    analysisRow->addWidget(analyseButton_, 1);
+    panelLayout->addLayout(analysisRow);
+
+    panelLayout->addSpacing(8);
+    panelLayout->addWidget(sectionLabel(QStringLiteral("Tunnel")));
+    panelLayout->addWidget(pressureLabel_);
+    panelLayout->addWidget(pressure_);
+    panelLayout->addWidget(angleLabel_);
+    panelLayout->addWidget(lift_);
+    panelLayout->addWidget(alphaDial_);
+    panelLayout->addWidget(leftBrakeLabel_);
+    panelLayout->addWidget(leftBrake_);
+    panelLayout->addWidget(rightBrakeLabel_);
+    panelLayout->addWidget(rightBrake_);
+    auto *runRow = new QHBoxLayout;
+    runRow->addWidget(runButton_, 1);
+    runRow->addWidget(resetButton_, 1);
+    runRow->addWidget(flyButton_, 1);
+    panelLayout->addLayout(runRow);
+
+    panelLayout->addSpacing(8);
+    panelLayout->addWidget(shapeLabel_);
+    panelLayout->addStretch();
+
+    auto *panel = new QWidget(this);
+    panel->setLayout(panelLayout);
+    // Wide enough for the dial and the slider readouts; the scroll area
+    // keeps a short window usable instead of crushing the sections.
+    panel->setFixedWidth(272);
+    auto *panelScroll = new QScrollArea(this);
+    panelScroll->setWidget(panel);
+    panelScroll->setWidgetResizable(true);
+    panelScroll->setFrameShape(QFrame::NoFrame);
+    panelScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    panelScroll->setFixedWidth(292);
+
+    // ---- The right column: the viewport (inserted by ensureView) over
+    // the Design-tab-style navigation buttons. ----
+    const auto makeNav = [this](const QString &text, const QString &tip) {
+        auto *button = new QToolButton(this);
+        button->setObjectName(QStringLiteral("viewButton"));
+        button->setText(text);
+        button->setToolTip(tip);
+        return button;
+    };
+    auto *navRow = new QHBoxLayout;
+    navRow->setSpacing(5);
+    navRow->addStretch();
+    struct NavPreset
+    {
+        const char *label;
+        const char *tip;
+        int preset;   // -1 = fit
+    };
+    static constexpr NavPreset navPresets[] = {
+        {"Fit", "Frame the wing", -1},
+        {"Iso", "Isometric", 0},
+        {"Front", "Front", 1},
+        {"Back", "Back", 2},
+        {"Left", "Left", 3},
+        {"Right", "Right", 4},
+        {"Top", "Top", 5},
+        {"Bottom", "Bottom", 6},
+    };
+    for (const NavPreset &entry : navPresets) {
+        QToolButton *button = makeNav(QLatin1String(entry.label),
+                                      QLatin1String(entry.tip));
+        const int preset = entry.preset;
+        connect(button, &QToolButton::clicked, this, [this, preset] {
+            if (view_ == nullptr) {
+                return;
+            }
+            if (preset < 0) {
+                view_->fitView();
+            } else {
+                view_->setViewPreset(
+                    static_cast<PlaygroundView::ViewPreset>(preset));
+            }
+        });
+        navRow->addWidget(button);
+    }
+    navRow->addStretch();
+
+    layout_ = new QVBoxLayout;
+    layout_->setSpacing(4);
+    // ensureView() inserts the GL view at index 0 with stretch 1.
+    layout_->addLayout(navRow);
+
+    auto *contentRow = new QHBoxLayout;
+    contentRow->addWidget(panelScroll);
+    contentRow->addLayout(layout_, 1);
+
+    // ---- One status line across the bottom. ----
+    status_->setWordWrap(false);
+    status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
+    auto *pageLayout = new QVBoxLayout(this);
+    pageLayout->addLayout(contentRow, 1);
+    pageLayout->addWidget(status_);
 
     const auto bindSurface = [this](QCheckBox *check, SimSurface surface) {
         connect(check, &QCheckBox::toggled, this,
@@ -1651,10 +1958,6 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
                         static_cast<PlaygroundView::ColorMode>(index));
                 }
                 stressScale_->setVisible(index != 0);
-                if (legendStrip_ != nullptr) {
-                    legendStrip_->setVisible(
-                        index != 0 || showLineTension_->isChecked());
-                }
             });
     connect(lineScale_, &QSlider::valueChanged, this, [this](int value) {
         if (view_ != nullptr) {
@@ -1667,10 +1970,6 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
                     view_->setLineTensionColoring(enabled);
                 }
                 lineScale_->setVisible(enabled);
-                if (legendStrip_ != nullptr) {
-                    legendStrip_->setVisible(
-                        enabled || colorBy_->currentIndex() != 0);
-                }
             });
 
     // The sliders write live controls that only a STEPPING solver reads.
@@ -1728,6 +2027,15 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             view_->setFlyMode(enabled);
         }
     });
+
+    // Start-up preset for scripted runs and screenshots, the same idea
+    // as LEP_PLAYGROUND_DEBUG. After the connections, so the dependent
+    // widgets (the scale slider's visibility) follow the preset.
+    if (qEnvironmentVariableIsSet("LEP_PLAYGROUND_COLOR")) {
+        colorBy_->setCurrentIndex(
+            std::clamp(qEnvironmentVariableIntValue("LEP_PLAYGROUND_COLOR"),
+                       0, colorBy_->count() - 1));
+    }
 }
 
 void PlaygroundPage::ensureView()
@@ -1741,14 +2049,10 @@ void PlaygroundPage::ensureView()
                    << static_cast<void *>(this);
     }
     view_ = new PlaygroundView(this);
-    legendStrip_ = new LegendStrip(view_, this);
-    auto *viewRow = new QHBoxLayout;
-    viewRow->setSpacing(4);
-    viewRow->addWidget(view_, 1);
-    viewRow->addWidget(legendStrip_);
-    layout_->addLayout(viewRow, 1);
-    legendStrip_->setVisible(colorBy_->currentIndex() != 0
-                             || showLineTension_->isChecked());
+    alphaDial_->setView(view_);
+    // Above the navigation buttons, taking every spare pixel: the wing
+    // is the page.
+    layout_->insertWidget(0, view_, 1);
     view_->setPressurePascal(static_cast<double>(pressure_->value()));
     view_->setAngleOfAttack(static_cast<double>(lift_->value()));
     view_->setBrakePull(
@@ -2033,8 +2337,31 @@ void PlaygroundPage::showEvent(QShowEvent *event)
     loadIfPending();
     updateShapeTimer();
     if (qEnvironmentVariableIsSet("LEP_PLAYGROUND_DEBUG")) {
+        // A Qt-side screenshot: QWidget::grab renders the widget tree
+        // including the QOpenGLWidget's framebuffer, which PrintWindow
+        // captures miss whenever native child windows are involved.
+        if (qEnvironmentVariableIsSet("LEP_PLAYGROUND_SHOT")) {
+            QTimer::singleShot(4500, this, [this] {
+                const QString path = QString::fromLocal8Bit(
+                    qgetenv("LEP_PLAYGROUND_SHOT"));
+                window()->grab().save(path);
+                // grab() cannot render the paintGL QPainter overlay (a
+                // nested painter cannot begin); grabFramebuffer runs a
+                // clean paintGL and shows the view as the screen does.
+                if (view_ != nullptr) {
+                    view_->grabFramebuffer().save(
+                        path + QStringLiteral(".view.png"));
+                }
+                qWarning() << "grab saved";
+            });
+        }
         QTimer::singleShot(4000, this, [this] {
             qWarning() << "PlaygroundPage geometry" << geometry();
+            if (view_ != nullptr) {
+                qWarning() << "colour mode"
+                           << colorBy_->currentIndex() << "field sizes"
+                           << view_->debugFieldSummary();
+            }
             const QList<QWidget *> children =
                 findChildren<QWidget *>(Qt::FindDirectChildrenOnly);
             for (QWidget *child : children) {

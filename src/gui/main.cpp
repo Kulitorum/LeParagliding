@@ -545,7 +545,14 @@ void configureXflr5OpenGL()
     if (gl3dView::defaultXflSurfaceFormat().samples() < 0) {
         gl3dView::setDefaultSamples(4);
     }
-    QSurfaceFormat::setDefaultFormat(gl3dView::defaultXflSurfaceFormat());
+    QSurfaceFormat sharedFormat = gl3dView::defaultXflSurfaceFormat();
+    // A stencil buffer app-wide: the Playground draws its legend with
+    // QPainter over the GL scene, and the painter's GL engine silently
+    // drops filled paths without one. App-wide rather than per-widget —
+    // a per-widget format that diverges from the shared context left
+    // that view blank.
+    sharedFormat.setStencilBufferSize(8);
+    QSurfaceFormat::setDefaultFormat(sharedFormat);
 }
 
 } // namespace

@@ -142,12 +142,20 @@ airspeed forever).
   map). One combo box, one shared scale slider. All three tint per
   VERTEX from per-node fields (edge strains scattered to their
   endpoints), so the skin shades smoothly instead of rendering as
-  facets. A calibrated legend strip appears beside the view whenever a
-  colouring is active: the exact ramp the skin is tinted with, the
-  quantity and unit, numeric ticks, and a live peak marker — a peak
-  past full scale parks at the top of the bar with its true value
-  printed, so a saturated display reads as saturated rather than
-  lying. Line-tension colouring gets its own bar below.
+  facets. A calibrated legend paints INSIDE the viewport (top right)
+  whenever a colouring is active: the exact ramp the skin is tinted
+  with, the quantity and unit, numeric ticks, and a live peak marker —
+  a peak past full scale parks at the top of the bar with its true
+  value printed, so a saturated display reads as saturated rather than
+  lying. Line-tension colouring gets its own bar below. (The overlay
+  needs a stencil buffer; the app's shared GL format requests one.)
+- **The page layout** puts every control in a panel on the LEFT and
+  gives the viewport the full window height — the wing on screen is
+  roughly 1:1 while a typical window is 2:1, so chrome above the
+  picture was the wrong place for it. Under the viewport sit the same
+  navigation buttons as the Design tab's 3D view (Fit, Iso, Front,
+  Back, Left, Right, Top, Bottom); a single status line runs across
+  the bottom.
 - **Settle** — steps the live wing at the Accurate solver setting (60
   substeps × 4 iterations) as fast as the machine allows, unpaced by
   the 16 ms frame clock, until the measurement converges — IN the

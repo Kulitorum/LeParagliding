@@ -16,7 +16,7 @@ class QSlider;
 class QTimer;
 class QVBoxLayout;
 
-class LegendStrip;
+class AngleOfAttackDial;
 class PlaygroundAnalysisDialog;
 class PlaygroundView;
 
@@ -84,16 +84,24 @@ private:
     // The α-sweep report, non-modal so the tunnel stays usable beside it.
     void openAnalysis();
 
+    // The right column: the GL view (inserted by ensureView) above the
+    // navigation button row. The legend paints inside the view itself.
     QVBoxLayout *layout_ = nullptr;
     PlaygroundView *view_ = nullptr;
-    // The colour-bar legend beside the view; visible while any coloured
-    // mode is.
-    LegendStrip *legendStrip_ = nullptr;
     QLabel *status_ = nullptr;
     QSlider *pressure_ = nullptr;
     QSlider *lift_ = nullptr;
     QSlider *leftBrake_ = nullptr;
     QSlider *rightBrake_ = nullptr;
+    // The slider name labels carry their live values ("Pressure 80 Pa ·
+    // 41 km/h"), so the numbers sit where the hand is.
+    QLabel *pressureLabel_ = nullptr;
+    QLabel *angleLabel_ = nullptr;
+    QLabel *leftBrakeLabel_ = nullptr;
+    QLabel *rightBrakeLabel_ = nullptr;
+    // Airfoil-and-wind glyph beside the sliders: the set angle, the
+    // measured live angle, and the computed lift in newtons.
+    AngleOfAttackDial *alphaDial_ = nullptr;
     QPushButton *runButton_ = nullptr;
     QPushButton *resetButton_ = nullptr;
     QPushButton *flyButton_ = nullptr;
