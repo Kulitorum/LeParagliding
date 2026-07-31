@@ -73,6 +73,12 @@ constexpr double kMaximumSpinWindRatio = 1.0;
 // picked at build time: the measured line is scaled by 1/this so the
 // wing-level angle keeps reading in whole-chord terms.
 constexpr double kAttitudeReferenceStation = 0.40;
+// Effective camber a full brake pull adds to its own half of the wing,
+// as an angle-of-attack increment. A trailing-edge flap at paraglider
+// brake travel is worth roughly this much; entering it as an angle
+// rather than a lift increment also makes the braked half reach the
+// stall blend first, which is what really happens.
+constexpr double kBrakeCamberRadians = 8.0 * kDegreesToRadians;
 // Zero-lift drag referred to the projected planform: canopy profile drag
 // with its cell openings and seams, plus the line cascade. Together with
 // the induced term below this puts the polar's best glide around 7–8,
@@ -2563,34 +2569,61 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                   + (controls.angleOfAttackDegrees
                      - sim.builtAngleOfAttackDegrees)
                         * kDegreesToRadians;
-    const double attachedLift = std::max(
-        kMinimumLiftCoefficient,
-        finiteWing * wingLiftCoefficient(sample.alphaRadians));
-
-    // Blend toward flat-plate normal force past the stall: the attached
-    // polar between ±20°, the parachute beyond ±40°, mixed in between.
-    const double sinAlpha = std::sin(sample.alphaRadians);
-    const double cosAlpha = std::cos(sample.alphaRadians);
-    const double postStall = std::clamp(
-        (std::abs(sample.alphaRadians) - 20.0 * kDegreesToRadians)
-            / (20.0 * kDegreesToRadians),
-        0.0,
-        1.0);
-    const double plateNormal = kFlatPlateNormal * sinAlpha;
-    sample.liftCoefficient =
-        (1.0 - postStall) * attachedLift
-        + postStall * plateNormal * cosAlpha;
-    const double brakeFraction = std::clamp(
-        (controls.brakeLeft + controls.brakeRight)
-            / (2.0 * kBrakeFullPullMetres),
-        0.0,
-        1.0);
-    sample.dragCoefficient =
-        kParasiticDragCoefficient
-        + kBrakeDragCoefficient * brakeFraction
-        + sample.liftCoefficient * sample.liftCoefficient
-              / (kPi * aspectRatio * kSpanEfficiency)
-        + postStall * plateNormal * sinAlpha;
+    // The polar, evaluated for ONE half of the wing at its own brake
+    // setting. A brake is a flap: it cambers and drags its own half, and
+    // the difference between the halves is what turns a paraglider.
+    // Averaging the two pulls into a single wing-level coefficient — what
+    // this did — made a one-sided pull aerodynamically identical to a
+    // symmetric half-pull, so the polar produced no turning moment at all
+    // and the entire response was left to the pressure distribution.
+    //
+    // The camber enters as an effective angle rather than a bare lift
+    // increment, so the braked half also reaches the stall blend earlier:
+    // a hard pull on one side dropping that half first is the real
+    // behaviour, and it falls out of this rather than needing its own
+    // rule.
+    struct SidePolar
+    {
+        double lift = 0.0;
+        double drag = 0.0;
+    };
+    const auto polarFor = [&](double brakeMetres) {
+        const double pull =
+            std::clamp(brakeMetres / kBrakeFullPullMetres, 0.0, 1.0);
+        const double alpha =
+            sample.alphaRadians + pull * kBrakeCamberRadians;
+        SidePolar side;
+        const double attachedLift = std::max(
+            kMinimumLiftCoefficient,
+            finiteWing * wingLiftCoefficient(alpha));
+        // Blend toward flat-plate normal force past the stall: the
+        // attached polar between ±20°, the parachute beyond ±40°, mixed
+        // in between.
+        const double sinAlpha = std::sin(alpha);
+        const double cosAlpha = std::cos(alpha);
+        const double postStall =
+            std::clamp((std::abs(alpha) - 20.0 * kDegreesToRadians)
+                           / (20.0 * kDegreesToRadians),
+                       0.0,
+                       1.0);
+        const double plateNormal = kFlatPlateNormal * sinAlpha;
+        side.lift = (1.0 - postStall) * attachedLift
+                    + postStall * plateNormal * cosAlpha;
+        side.drag = kParasiticDragCoefficient
+                    + kBrakeDragCoefficient * pull
+                    + side.lift * side.lift
+                          / (kPi * aspectRatio * kSpanEfficiency)
+                    + postStall * plateNormal * sinAlpha;
+        return side;
+    };
+    // "Left" is the solver's left — the negative-span-station half, the
+    // same convention SimBody::brakeLines uses.
+    const SidePolar leftSide = polarFor(controls.brakeLeft);
+    const SidePolar rightSide = polarFor(controls.brakeRight);
+    // The wing-level pair stays the mean, so every reported number and
+    // every symmetric case is bit-for-bit what it was.
+    sample.liftCoefficient = 0.5 * (leftSide.lift + rightSide.lift);
+    sample.dragCoefficient = 0.5 * (leftSide.drag + rightSide.drag);
 
     const double q = sample.dynamicPressure;
     const double area = sim.planformArea;
@@ -2790,6 +2823,7 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     std::vector<softwing::Vec3> areaVector(sim.skinTriangleCount);
     std::vector<softwing::Vec3> faceCentre(sim.skinTriangleCount);
     std::vector<double> station(sim.skinTriangleCount, 0.0);
+    std::vector<double> spanStation(sim.skinTriangleCount, 0.0);
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const softwing::Triangle &tri = triangles[face];
         const softwing::Vec3 &a = nodes[tri.a].position;
@@ -2798,10 +2832,55 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         areaVector[face] = 0.5 * cross(b - a, c - a);
         faceCentre[face] = (a + b + c) / 3.0;
         station[face] = dot(faceCentre[face] - anchor, chordDirection);
+        spanStation[face] = dot(faceCentre[face] - anchor, sample.spanAxis);
     }
 
-    // Assemble the 4x4 system: columns are (v.x, v.y, v.z, μ), rows are
-    // the three force components and the span-axis moment.
+    // The turning couple the two halves' polars disagree about. Each half
+    // carries half the area at its own coefficients, so the difference is
+    // a pure couple — the summed force is unchanged, which is why a
+    // symmetric pull leaves everything below exactly as it was. Applied
+    // at each half's own area-weighted centre, so the lever arm is the
+    // wing's real one rather than a nominal semi-span.
+    softwing::Vec3 leftCentre;
+    softwing::Vec3 rightCentre;
+    double leftArea = 0.0;
+    double rightArea = 0.0;
+    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+        const double areaLength = length(areaVector[face]);
+        if (spanStation[face] < 0.0) {
+            leftCentre += areaLength * faceCentre[face];
+            leftArea += areaLength;
+        } else {
+            rightCentre += areaLength * faceCentre[face];
+            rightArea += areaLength;
+        }
+    }
+    double rollTarget = 0.0;
+    // The roll axis is the direction of flight: a wing rolls about the
+    // air it is going through.
+    const softwing::Vec3 rollAxis = sample.windDirection;
+    if (leftArea > 0.0 && rightArea > 0.0) {
+        leftCentre = leftCentre / leftArea;
+        rightCentre = rightCentre / rightArea;
+        const softwing::Vec3 sideDifference =
+            q * 0.5 * area * 0.5
+            * ((leftSide.lift - rightSide.lift) * sample.liftDirection
+               + (leftSide.drag - rightSide.drag) * sample.windDirection);
+        rollTarget =
+            dot(cross(leftCentre - rightCentre, sideDifference), rollAxis);
+    }
+
+    // Assemble the 5x5 system: columns are (v.x, v.y, v.z, μ, ν), rows are
+    // the three force components, the span-axis moment (pitch) and the
+    // wind-axis moment (roll). ν multiplies the SPANWISE station, making
+    // it a spanwise pressure gradient — the pressure-native form of a
+    // roll couple, exactly as μ's chordwise gradient is of a pitch one.
+    //
+    // The pitch row cancels the pressure field's own pitch moment; the
+    // roll row does NOT cancel the field's roll, it ADDS the couple the
+    // two halves' polars disagree about. The field's roll and yaw are
+    // still how the deflected fabric steers — this supplies the part the
+    // wing-level polar was silent about.
     double system[4][5] = {};
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const softwing::Vec3 &areaN = areaVector[face];
@@ -2868,6 +2947,44 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         const softwing::Vec3 gradient{solution[0], solution[1],
                                       solution[2]};
         const double couple = solution[3];
+        // The differential couple the two halves' polars disagree about,
+        // added as a spanwise-linear pressure increment on top of the
+        // solved field rather than as a fifth constraint inside it.
+        // Constraining the solve to a prescribed roll moment was tried
+        // and is wrong: the extra row rebuilds the whole increment field
+        // to satisfy it, and it wrecked the SYMMETRIC glide (airspeed 9
+        // -> 14.5 m/s, sink -1.3 -> -3.2, before any brake was pulled)
+        // because forcing the increment's own roll moment to zero is not
+        // a no-op. Layered on afterwards, a symmetric wing gets exactly
+        // zero and the field it flies on is untouched.
+        //
+        // Layering it on afterwards is stable where the fifth row was not,
+        // but it is still WRONG, so it is off unless asked for: driving
+        // the couple through a spanwise pressure gradient loads the tips
+        // hardest, and on gnuC2-class fabric that folded the wing at 4 s
+        // against a 9 s baseline (span 8.4 -> 5.4 m in one second). A
+        // brake's turning moment has to arrive where the brake acts — the
+        // aft fabric of its own half — not as a gradient across the whole
+        // span. That is the next attempt, and it needs the polar split
+        // per half-span rather than a couple bolted onto a wing-level
+        // resultant.
+        static const bool brakeRoll =
+            qEnvironmentVariableIsSet("LEP_AERO_BRAKE_ROLL");
+        double rollGradient = 0.0;
+        if (brakeRoll && std::abs(rollTarget) > 0.0) {
+            double rollFromSpan = 0.0;
+            for (std::size_t face = 0; face < sim.skinTriangleCount;
+                 ++face) {
+                rollFromSpan +=
+                    spanStation[face]
+                    * dot(cross(faceCentre[face] - anchor,
+                                areaVector[face]),
+                          rollAxis);
+            }
+            if (std::abs(rollFromSpan) > 1.0e-9) {
+                rollGradient = rollTarget / rollFromSpan;
+            }
+        }
         for (std::size_t face = 0; face < sim.skinTriangleCount;
              ++face) {
             const double areaLength = length(areaVector[face]);
@@ -2875,8 +2992,9 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                 continue;
             }
             const softwing::Vec3 normal = areaVector[face] / areaLength;
-            const double increment =
-                dot(normal, gradient) + couple * station[face];
+            const double increment = dot(normal, gradient)
+                                     + couple * station[face]
+                                     + rollGradient * spanStation[face];
             // The base field never pulls a face inward (Cp is capped at
             // stagnation); the retrim may, a little, but a face sucked
             // hard into the cell is how the intrados got dented before,

@@ -151,12 +151,32 @@ polar answered with more lift, more induced drag, less airspeed and
 therefore a still higher angle. With a hand held still at 20 cm, α ran
 20.9 → 23.1 → 29.4 → 76°. It now goes 13.2 → 15.5 → 16.4°.
 
-Known remaining gap: the polar has no per-side split. One brake still
-enters it as `(left + right)/2` — a symmetric half-pull — so the turn is
-left entirely to the pressure distribution, and a one-sided pull still
-departs after several seconds. Absolute tunnel loads moved with the α
-reference (gnuC2: 1406 → 1278 N lift, L/D 7.79 → 7.66); settle time,
-span, area, volume and flags did not.
+The polar is evaluated **per half-span**, each side at its own brake. The
+pull enters as an effective camber angle (8° at full travel) rather than
+a bare lift increment, so the braked half also reaches the stall blend
+first — a hard pull dropping its own side is then a consequence rather
+than a rule. The wing-level pair stays the mean of the two, so a
+symmetric pull is bit-for-bit what it was. Absolute tunnel loads moved
+with the α reference (gnuC2: 1406 → 1278 N lift, L/D 7.79 → 7.66); settle
+time, span, area, volume and flags did not.
+
+**The turning moment from that split is NOT solved**, and two attempts
+are recorded in the code so a third does not repeat them. Adding a roll
+row to the force-distribution solve wrecked the *symmetric* glide
+(airspeed 9 → 14.5 m/s, sink −1.3 → −3.2, before any brake was pulled):
+forcing the increment's own roll moment to a prescribed value is not a
+no-op, it rebuilds the whole increment field. Layering the couple on
+after the solve is symmetric-safe but folded the wing at 4 s against a
+9 s baseline (span 8.4 → 5.4 m in one second), because a spanwise-linear
+pressure gradient loads the tips hardest — exactly where this fabric is
+weakest. It sits behind `LEP_AERO_BRAKE_ROLL`, off by default.
+
+Both attempts share one flaw: they bolt a couple onto a wing-level
+resultant. A brake's moment has to arrive where the brake acts — the aft
+fabric of its own half — which means running the whole force-and-
+distribution pass per half-span, each with its own α, brake, anchor and
+4×4 solve. That is the next attempt. Until then a one-sided pull still
+departs after several seconds (8 s, against 9 s before the split).
 
 ### Fabric contact
 
