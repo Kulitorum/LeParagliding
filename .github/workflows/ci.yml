@@ -132,8 +132,31 @@ jobs:
         run: |
           FTV=$(brew list --versions freetype | awk '{print $2}')
           echo "Rebuilding FreeType $FTV as universal in $(brew --prefix freetype)"
-          curl -fsSL "https://download.savannah.gnu.org/releases/freetype/freetype-${FTV}.tar.gz" \
-            | tar xz -C "$RUNNER_TEMP"
+          # Savannah's primary download host returns 502 often enough to have
+          # cost a release, so its mirror alias and SourceForge are tried after
+          # it. All three serve the identical release tarball, unpacking to the
+          # same freetype-$FTV directory. Downloaded to a file rather than
+          # piped into tar, so a mirror handing back an HTML error page is
+          # caught by gzip -t instead of half-extracting.
+          TARBALL="$RUNNER_TEMP/freetype-${FTV}.tar.gz"
+          for url in \
+            "https://download.savannah.gnu.org/releases/freetype/freetype-${FTV}.tar.gz" \
+            "https://download-mirror.savannah.gnu.org/releases/freetype/freetype-${FTV}.tar.gz" \
+            "https://downloads.sourceforge.net/freetype/freetype-${FTV}.tar.gz"
+          do
+            echo "Trying $url"
+            if curl -fsSL --retry 3 --retry-delay 5 -o "$TARBALL" "$url" \
+               && gzip -t "$TARBALL"; then
+              echo "Fetched FreeType $FTV from $url"
+              break
+            fi
+            rm -f "$TARBALL"
+          done
+          if [ ! -f "$TARBALL" ]; then
+            echo "::error::could not download FreeType $FTV from any mirror"
+            exit 1
+          fi
+          tar xzf "$TARBALL" -C "$RUNNER_TEMP"
           cmake -S "$RUNNER_TEMP/freetype-${FTV}" -B "$RUNNER_TEMP/ft-build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
