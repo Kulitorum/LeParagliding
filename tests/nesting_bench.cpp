@@ -3,10 +3,14 @@
 // actually helps — "it looks tighter" is not a result.
 //
 //   nesting-bench <lep-2d-parts.json> [--category <name>] [--scale <f>]
-//                 [--page <w> <h>] [--gap <mm>] [--res <mm>] [--svg <file>]
+//                 [--page <w> <h>] [--sheet <w> <h>] [--gap <mm>] [--res <mm>]
+//                 [--svg <file>] [--pdf <file>] [--dxf <file>]
 //                 [--time <ms>] [--grain] [--bed]
-#include <QCoreApplication>
+//
+// --pdf and --dxf run the Print tab's own writers, so what they produce is what
+// the application would have written for the same layout.
 #include <QFile>
+#include <QGuiApplication>
 #include <QMap>
 #include <QPair>
 #include <QTextStream>
@@ -16,6 +20,7 @@
 
 #include "flat_parts.h"
 #include "nesting.h"
+#include "sheet_export.h"
 
 namespace {
 
@@ -81,10 +86,17 @@ void writeSvg(const QString &path,
 
 int main(int argc, char *argv[])
 {
-    QCoreApplication app(argc, argv);
+    // QGuiApplication rather than QCoreApplication: --pdf goes through
+    // QPdfWriter, which needs a font database.
+#ifndef Q_OS_WIN
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+    }
+#endif
+    QGuiApplication app(argc, argv);
     QTextStream out(stdout);
 
-    const QStringList args = QCoreApplication::arguments();
+    const QStringList args = QGuiApplication::arguments();
     if (args.size() < 2) {
         out << "usage: nesting-bench <lep-2d-parts.json> [options]\n";
         return 2;
@@ -95,6 +107,11 @@ int main(int argc, char *argv[])
     options.timeBudgetMs = 4000;
     QString category;
     QString svgPath;
+    QString pdfPath;
+    QString dxfPath;
+    // Physical paper. Defaults to A4, which is the printable page the nester
+    // defaults to plus a 10 mm margin all round.
+    QSizeF sheetMm(210.0, 297.0);
     for (int i = 2; i < args.size(); ++i) {
         const QString &flag = args.at(i);
         const auto next = [&](double fallback) {
@@ -123,8 +140,15 @@ int main(int argc, char *argv[])
         } else if (flag == QLatin1String("--page")) {
             options.pageWidthMm = next(190.0);
             options.pageHeightMm = next(277.0);
+        } else if (flag == QLatin1String("--sheet")) {
+            const double width = next(210.0);
+            sheetMm = QSizeF(width, next(297.0));
         } else if (flag == QLatin1String("--svg") && i + 1 < args.size()) {
             svgPath = args.at(++i);
+        } else if (flag == QLatin1String("--pdf") && i + 1 < args.size()) {
+            pdfPath = args.at(++i);
+        } else if (flag == QLatin1String("--dxf") && i + 1 < args.size()) {
+            dxfPath = args.at(++i);
         }
     }
 
@@ -256,6 +280,42 @@ int main(int argc, char *argv[])
     if (!svgPath.isEmpty()) {
         writeSvg(svgPath, set, result, options);
         out << QStringLiteral("  wrote       %1\n").arg(svgPath);
+    }
+
+    if (!pdfPath.isEmpty() || !dxfPath.isEmpty()) {
+        flatparts::ExportOptions exportOptions;
+        exportOptions.sheetWidthMm = sheetMm.width();
+        exportOptions.sheetHeightMm = sheetMm.height();
+        exportOptions.title = set.wing;
+        exportOptions.stamp = QStringLiteral("nesting-bench");
+        exportOptions.splitSheets = options.partsWithinOneSheet;
+
+        QString error;
+        if (!pdfPath.isEmpty()) {
+            int sheets = 0;
+            if (flatparts::exportPdf(pdfPath, set, result, options,
+                                     exportOptions, &error, &sheets)) {
+                out << QStringLiteral("  wrote       %1 (%2 pages of %3)\n")
+                           .arg(pdfPath)
+                           .arg(sheets)
+                           .arg(result.pageCount);
+            } else {
+                out << QStringLiteral("  pdf failed  %1\n").arg(error);
+                return 1;
+            }
+        }
+        if (!dxfPath.isEmpty()) {
+            QStringList files;
+            if (flatparts::exportDxf(dxfPath, set, result, options,
+                                     exportOptions, &error, &files)) {
+                out << QStringLiteral("  wrote       %1 file(s), first %2\n")
+                           .arg(files.size())
+                           .arg(files.value(0));
+            } else {
+                out << QStringLiteral("  dxf failed  %1\n").arg(error);
+                return 1;
+            }
+        }
     }
     return 0;
 }

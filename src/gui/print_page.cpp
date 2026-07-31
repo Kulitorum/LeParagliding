@@ -2,16 +2,22 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
+#include <QDir>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSizeF>
 #include <QSplitter>
+#include <QStandardPaths>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -23,6 +29,31 @@
 namespace {
 
 constexpr int idRole = Qt::UserRole + 1;
+
+// Where the last export went. Remembered because a wing is exported many times
+// over a build and the folder is never the Documents root after the first.
+constexpr auto exportDirectoryKey = "print/lastExportDirectory";
+
+// Wing names come from the design file and can hold anything; a file name
+// cannot.
+QString fileStem(const QString &wing)
+{
+    QString stem;
+    stem.reserve(wing.size());
+    for (const QChar &character : wing) {
+        if (character.isLetterOrNumber() || character == QLatin1Char('-')
+            || character == QLatin1Char('_')) {
+            stem.append(character);
+        } else if (character.isSpace() || character == QLatin1Char('.')) {
+            stem.append(QLatin1Char('-'));
+        }
+    }
+    while (stem.contains(QStringLiteral("--"))) {
+        stem.replace(QStringLiteral("--"), QStringLiteral("-"));
+    }
+    stem = stem.trimmed();
+    return stem.isEmpty() ? QStringLiteral("flat-parts") : stem;
+}
 
 QString describe(const flatparts::FlatPiece &piece)
 {
@@ -50,12 +81,29 @@ PrintPage::PrintPage(QWidget *parent) : QWidget(parent)
     auto *splitter = new QSplitter(Qt::Horizontal, this);
     layout->addWidget(splitter);
 
-    // The sidebar is taller than most windows once every option group is
-    // expanded, so it scrolls rather than squeezing the part tree to nothing.
-    auto *sidebarScroll = new QScrollArea(splitter);
+    // The sidebar splits in two: the options scroll, the actions do not.
+    //
+    // Selection and options are taller than most windows once every group is
+    // expanded, so they scroll rather than squeezing the part tree to nothing.
+    // Pack and the two export buttons stay pinned below that, because they are
+    // what the tab is for and a terminal action reached only by scrolling past
+    // every option is one the user has to go looking for.
+    auto *sidebarColumn = new QWidget(splitter);
+    auto *sidebarColumnLayout = new QVBoxLayout(sidebarColumn);
+    sidebarColumnLayout->setContentsMargins(0, 0, 0, 0);
+    sidebarColumnLayout->setSpacing(0);
+
+    auto *sidebarScroll = new QScrollArea(sidebarColumn);
     sidebarScroll->setWidgetResizable(true);
     sidebarScroll->setFrameShape(QFrame::NoFrame);
     sidebarScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    sidebarColumnLayout->addWidget(sidebarScroll, 1);
+
+    auto *actions = new QWidget(sidebarColumn);
+    auto *actionsLayout = new QVBoxLayout(actions);
+    actionsLayout->setContentsMargins(10, 8, 10, 10);
+    actionsLayout->setSpacing(8);
+    sidebarColumnLayout->addWidget(actions, 0);
 
     auto *sidebar = new QWidget(sidebarScroll);
     auto *sidebarLayout = new QVBoxLayout(sidebar);
@@ -207,18 +255,59 @@ PrintPage::PrintPage(QWidget *parent) : QWidget(parent)
     packForm->addRow(separateCategories_);
     sidebarLayout->addWidget(packBox);
 
-    packButton_ = new QPushButton(QStringLiteral("Pack"), sidebar);
-    packButton_->setEnabled(false);
-    sidebarLayout->addWidget(packButton_);
-
-    summary_ = new QLabel(sidebar);
-    summary_->setWordWrap(true);
-    sidebarLayout->addWidget(summary_);
-
     sidebarScroll->setWidget(sidebar);
 
+    packButton_ = new QPushButton(QStringLiteral("Pack"), actions);
+    packButton_->setEnabled(false);
+    actionsLayout->addWidget(packButton_);
+
+    summary_ = new QLabel(actions);
+    summary_->setWordWrap(true);
+    actionsLayout->addWidget(summary_);
+
+    auto *exportBox = new QGroupBox(QStringLiteral("Export"), actions);
+    auto *exportLayout = new QVBoxLayout(exportBox);
+
+    exportSeams_ = new QCheckBox(QStringLiteral("Stitch lines"), exportBox);
+    exportSeams_->setChecked(true);
+    exportSeams_->setToolTip(QStringLiteral(
+        "The dashed line inside the cut outline, where the seam is sewn. Off "
+        "leaves only the line you cut along."));
+    exportLayout->addWidget(exportSeams_);
+
+    exportMarks_ = new QCheckBox(QStringLiteral("Marks and part numbers"),
+                                 exportBox);
+    exportMarks_->setChecked(true);
+    exportMarks_->setToolTip(QStringLiteral(
+        "Registration ticks, vent outlines, rod positions and the number each "
+        "part carries on the plan. Worth keeping — an unnumbered pile of "
+        "similar-looking panels is unsewable."));
+    exportLayout->addWidget(exportMarks_);
+
+    exportFurniture_ = new QCheckBox(
+        QStringLiteral("Sheet border, alignment marks and ruler"), exportBox);
+    exportFurniture_->setChecked(true);
+    exportFurniture_->setToolTip(QStringLiteral(
+        "PDF only. Adds the page border, 100 mm registration crosses shared "
+        "with the neighbouring sheets, a header naming the sheet, and a "
+        "measuring bar for checking the printer did not scale the page."));
+    exportLayout->addWidget(exportFurniture_);
+
+    auto *exportRow = new QHBoxLayout;
+    pdfButton_ = new QPushButton(QStringLiteral("Export PDF…"), exportBox);
+    pdfButton_->setToolTip(QStringLiteral(
+        "Writes one page per sheet at true size, ready to print and tape."));
+    dxfButton_ = new QPushButton(QStringLiteral("Export DXF…"), exportBox);
+    dxfButton_->setToolTip(QStringLiteral(
+        "Writes the nested layout as DXF for a plotter or cutting table, with "
+        "the cut line, stitch line and marks on separate layers."));
+    exportRow->addWidget(pdfButton_);
+    exportRow->addWidget(dxfButton_);
+    exportLayout->addLayout(exportRow);
+    actionsLayout->addWidget(exportBox);
+
     view_ = new FlatPartsView(splitter);
-    splitter->addWidget(sidebarScroll);
+    splitter->addWidget(sidebarColumn);
     splitter->addWidget(view_);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
@@ -286,9 +375,13 @@ PrintPage::PrintPage(QWidget *parent) : QWidget(parent)
         }
         startPack();
     });
+    connect(pdfButton_, &QPushButton::clicked, this, &PrintPage::exportPdf);
+    connect(dxfButton_, &QPushButton::clicked, this, &PrintPage::exportDxf);
+
+    updateExportEnabled();
 }
 
-flatparts::NestOptions PrintPage::currentOptions() const
+QSizeF PrintPage::sheetSizeMm() const
 {
     // ISO A sizes in millimetres, index-aligned with the combo; the last entry
     // is the custom bed.
@@ -304,6 +397,14 @@ flatparts::NestOptions PrintPage::currentOptions() const
     if (landscape_->isChecked()) {
         sheet.transpose();
     }
+    return sheet;
+}
+
+flatparts::NestOptions PrintPage::currentOptions() const
+{
+    const QSizeF sheet = sheetSizeMm();
+    // Index 5 and beyond is the custom bed; anything before it is ISO A paper.
+    const bool custom = paperSize_->currentIndex() >= 5;
 
     flatparts::NestOptions options;
     const double margin = margin_->value();
@@ -339,7 +440,9 @@ void PrintPage::startPack()
     }
 
     packing_ = true;
+    hasPack_ = false;
     packButton_->setText(QStringLiteral("Stop"));
+    updateExportEnabled();
     summary_->setText(
         QStringLiteral("Packing %1 parts — keeps improving until you press "
                        "Stop.")
@@ -348,16 +451,24 @@ void PrintPage::startPack()
     // runs, so how long to spend is the user's call, not a constant.
     flatparts::NestOptions options = currentOptions();
     options.timeBudgetMs = 0;
+    // Frozen here, and used by the preview and both exporters from now on. The
+    // sidebar stays editable while a pack runs, and a layout redrawn against a
+    // paper size it was not packed for is a layout that lies.
+    packedOptions_ = options;
+    packedSheetMm_ = sheetSizeMm();
     worker_->start(parts_, indices, options);
 }
 
 void PrintPage::showPackResult(const flatparts::NestResult &result, bool finished)
 {
-    view_->setPackedLayout(result, currentOptions());
+    packedResult_ = result;
+    hasPack_ = !result.placements.isEmpty();
+    view_->setPackedLayout(result, packedOptions_);
     if (finished) {
         packing_ = false;
         packButton_->setText(QStringLiteral("Pack"));
     }
+    updateExportEnabled();
 
     QString text =
         QStringLiteral("%1 pages · %2 x %3 sheets · %4% used · %5 layouts "
@@ -379,6 +490,18 @@ void PrintPage::showPackResult(const flatparts::NestResult &result, bool finishe
                                "scale.")
                     .arg(result.unplaced.size());
     }
+    if (finished) {
+        // Only once the search has stopped: this costs a pass over every part
+        // and the answer barely moves between successive best layouts.
+        const QVector<int> clipped =
+            flatparts::clippedPlacements(parts_, result, packedOptions_);
+        if (!clipped.isEmpty()) {
+            text += QStringLiteral("\n%1 part(s) have cut geometry reaching "
+                                   "past the sheets; that much will be missing "
+                                   "from the export.")
+                        .arg(clipped.size());
+        }
+    }
     summary_->setText(text);
 }
 
@@ -387,6 +510,12 @@ void PrintPage::setPartsPath(const QString &path)
     partsPath_ = path;
     parts_ = flatparts::FlatPartSet();
     selected_.clear();
+    // A rebuild invalidates the pack: the placements index into the old part
+    // list, so both the preview and the export buttons have to let go of it.
+    packedResult_ = flatparts::NestResult();
+    hasPack_ = false;
+    view_->clearPackedLayout();
+    updateExportEnabled();
 
     QString errorMessage;
     if (!QFileInfo::exists(path)
@@ -537,6 +666,147 @@ void PrintPage::applyScaleFromArea()
     syncingScale_ = false;
     view_->setScale(scaleFactor());
     updateSummary();
+}
+
+void PrintPage::updateExportEnabled()
+{
+    // Only between packs. Exporting mid-search would write whichever best
+    // happened to be current, and the file would not match what the user sees
+    // a second later.
+    const bool ready = hasPack_ && !packing_;
+    pdfButton_->setEnabled(ready);
+    dxfButton_->setEnabled(ready);
+    const QString reason =
+        packing_ ? QStringLiteral("Stop the pack to export it.")
+                 : QStringLiteral("Pack a layout first.");
+    pdfButton_->setToolTip(
+        ready ? QStringLiteral("Writes one page per sheet at true size, ready "
+                               "to print and tape.")
+              : reason);
+    dxfButton_->setToolTip(
+        ready ? QStringLiteral("Writes the nested layout as DXF for a plotter "
+                               "or cutting table, with the cut line, stitch "
+                               "line and marks on separate layers.")
+              : reason);
+}
+
+flatparts::ExportOptions PrintPage::exportOptions() const
+{
+    flatparts::ExportOptions options;
+    options.sheetWidthMm = packedSheetMm_.width();
+    options.sheetHeightMm = packedSheetMm_.height();
+    options.title = parts_.wing.isEmpty() ? QStringLiteral("Flat parts")
+                                          : parts_.wing;
+    options.subtitle = QStringLiteral("%1 parts").arg(packedResult_.placements.size());
+    options.stamp =
+        QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+    options.drawSeamLines = exportSeams_->isChecked();
+    options.drawMarks = exportMarks_->isChecked();
+    options.drawLabels = exportMarks_->isChecked();
+    options.drawFurniture = exportFurniture_->isChecked();
+    // A bed load is cut in one pass, so each load is its own file in its own
+    // coordinates; paper sheets are one continuous canvas and stay one file.
+    options.splitSheets = packedOptions_.partsWithinOneSheet;
+    return options;
+}
+
+QString PrintPage::askForPath(const QString &caption,
+                              const QString &filter,
+                              const QString &suffix)
+{
+    QSettings settings;
+    QString directory =
+        settings.value(QLatin1String(exportDirectoryKey)).toString();
+    if (directory.isEmpty() || !QFileInfo::exists(directory)) {
+        directory = QStandardPaths::writableLocation(
+            QStandardPaths::DocumentsLocation);
+    }
+    const QString suggestion =
+        QDir(directory).filePath(QStringLiteral("%1-parts.%2")
+                                     .arg(fileStem(parts_.wing), suffix));
+
+    QString path = QFileDialog::getSaveFileName(this, caption, suggestion,
+                                                filter);
+    if (path.isEmpty()) {
+        return path;
+    }
+    // Qt only appends the suffix on platforms whose dialog does it; typing a
+    // bare name on the others would otherwise produce an extensionless file.
+    if (QFileInfo(path).suffix().isEmpty()) {
+        path += QLatin1Char('.') + suffix;
+    }
+    settings.setValue(QLatin1String(exportDirectoryKey),
+                      QFileInfo(path).absolutePath());
+    return path;
+}
+
+void PrintPage::exportPdf()
+{
+    if (!hasPack_) {
+        return;
+    }
+    const QString path = askForPath(QStringLiteral("Export printable sheets"),
+                                    QStringLiteral("PDF documents (*.pdf)"),
+                                    QStringLiteral("pdf"));
+    if (path.isEmpty()) {
+        return;
+    }
+
+    QString error;
+    int sheets = 0;
+    if (!flatparts::exportPdf(path, parts_, packedResult_, packedOptions_,
+                              exportOptions(), &error, &sheets)) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"), error);
+        return;
+    }
+
+    QString text = QStringLiteral("Wrote %1 page(s) to %2.")
+                       .arg(sheets)
+                       .arg(QDir::toNativeSeparators(path));
+    const int skipped = packedResult_.pageCount - sheets;
+    if (skipped > 0) {
+        text += QStringLiteral(" %1 empty sheet(s) skipped.").arg(skipped);
+    }
+    if (!packedResult_.unplaced.isEmpty()) {
+        text += QStringLiteral(" %1 part(s) did not fit and were left out.")
+                    .arg(packedResult_.unplaced.size());
+    }
+    text += QStringLiteral("\nPrint at 100% — the sheets carry a 100 mm bar to "
+                           "check against.");
+    summary_->setText(text);
+}
+
+void PrintPage::exportDxf()
+{
+    if (!hasPack_) {
+        return;
+    }
+    const QString path = askForPath(QStringLiteral("Export nested DXF"),
+                                    QStringLiteral("DXF drawings (*.dxf)"),
+                                    QStringLiteral("dxf"));
+    if (path.isEmpty()) {
+        return;
+    }
+
+    QString error;
+    QStringList files;
+    if (!flatparts::exportDxf(path, parts_, packedResult_, packedOptions_,
+                              exportOptions(), &error, &files)) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"), error);
+        return;
+    }
+
+    QString text = files.size() == 1
+        ? QStringLiteral("Wrote %1.").arg(QDir::toNativeSeparators(files.first()))
+        : QStringLiteral("Wrote %1 files, one per bed load, next to %2.")
+              .arg(files.size())
+              .arg(QDir::toNativeSeparators(QFileInfo(path).fileName()));
+    if (!packedResult_.unplaced.isEmpty()) {
+        text += QStringLiteral(" %1 part(s) did not fit and were left out.")
+                    .arg(packedResult_.unplaced.size());
+    }
+    text += QStringLiteral("\nLayers: CUT, SEAM, MARK, TEXT.");
+    summary_->setText(text);
 }
 
 void PrintPage::updateSummary()

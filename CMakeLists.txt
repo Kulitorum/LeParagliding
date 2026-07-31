@@ -12,7 +12,7 @@ endif()
 
 project(
     LEparagliding
-    VERSION 0.4.0
+    VERSION 0.4.1
     DESCRIPTION "Qt C++ port of LEparagliding 3.28"
     LANGUAGES C CXX
 )
@@ -298,12 +298,15 @@ else()
     )
 endif()
 
-# Flat-part model and nester, shared by the Print tab and the nesting bench.
+# Flat-part model, nester and sheet writers, shared by the Print tab and the
+# nesting bench.
 add_library(flatparts STATIC
     src/flatparts/flat_parts.cpp
     src/flatparts/flat_parts.h
     src/flatparts/nesting.cpp
     src/flatparts/nesting.h
+    src/flatparts/sheet_export.cpp
+    src/flatparts/sheet_export.h
 )
 target_link_libraries(flatparts PUBLIC Qt6::Gui)
 target_include_directories(flatparts PUBLIC
@@ -372,6 +375,11 @@ add_executable(playground-contact-test
     tests/playground_contact_test.cpp
 )
 target_link_libraries(playground-contact-test PRIVATE playground_sim)
+
+add_executable(flatparts-export-test
+    tests/flatparts_export_test.cpp
+)
+target_link_libraries(flatparts-export-test PRIVATE flatparts Qt6::Gui)
 
 qt_add_executable(LEparagliding WIN32
     src/gui/airfoil_file.cpp
@@ -471,6 +479,8 @@ set_target_properties(
     playground-metrics-test
     playground-cells-test
     playground-contact-test
+    flatparts-export-test
+    nesting-bench
     softwing-bench
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -489,6 +499,8 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         playground-metrics-test
         playground-cells-test
         playground-contact-test
+        flatparts-export-test
+        nesting-bench
         softwing-bench
         PROPERTIES
         "RUNTIME_OUTPUT_DIRECTORY_${configuration_upper}" "${CMAKE_BINARY_DIR}/bin/${configuration}"
@@ -588,6 +600,7 @@ add_test(NAME airfoil_file COMMAND airfoil-file-test
 add_test(NAME playground_metrics COMMAND playground-metrics-test)
 add_test(NAME playground_cells COMMAND playground-cells-test)
 add_test(NAME playground_contact COMMAND playground-contact-test)
+add_test(NAME flatparts_export COMMAND flatparts-export-test)
 add_test(NAME engine_rejects_missing_input
     COMMAND leparagliding-engine
         "${CMAKE_BINARY_DIR}/does-not-exist.txt"

@@ -96,6 +96,25 @@ correctly. Requirements for the C++ port, the options for deriving the
 direction, and a proposed "draw the fibre vector on each piece" editor are
 written up in `docs/flat-part-orientation.md`.
 
+## Packed footprint misses some cut geometry
+
+`outerBoundary()` chains a piece's cut-role polylines into one closed boundary,
+and that boundary is what the nester rasterises, positions and measures. On
+gnuA7/24 four parts carry cut points the boundary does not cover, so they sit
+2–8 mm outside the packed canvas. The Print tab now says so after a pack ("N
+part(s) have cut geometry reaching past the sheets", via
+`flatparts::clippedPlacements`) rather than letting the PDF clip it away in
+silence, but the fix belongs in the chaining: either make the boundary cover
+every cut polyline, or pack against the union of them. Note it changes packing
+results, so the nesting bench numbers move with it.
+
+Related, and already handled in the writers: the engine's text anchors are
+positions in the plan's drawing box, not on the part — every rib's number is
+anchored 635 mm to the *left* of the rib. `sheet_export.cpp` re-anchors any
+label that does not land on its own part to the part's centre. If flat-part
+capture ever records label positions relative to the part, that workaround can
+go.
+
 ## Smaller ideas
 
 - Optional auto-rebuild of the 3D preview after a curve commit (debounced),
