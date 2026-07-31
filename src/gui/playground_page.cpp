@@ -36,11 +36,20 @@
 #include <QVBoxLayout>
 #include <QVector3D>
 
+#include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
+#include <QStandardPaths>
+#include <QTextStream>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -71,6 +80,22 @@ namespace {
 constexpr float cameraFieldOfViewDegrees = 40.0F;
 constexpr float degreesToRadians = 3.14159265358979323846F / 180.0F;
 constexpr double maximumBrakeTravelMetres = 0.6;
+// How far out the air motes are drawn. Big enough that the field reads as
+// surrounding space rather than a cloud around the wing, small enough that
+// the densest lattice setting stays a few tens of thousands of points.
+constexpr float kAirMoteRadiusMetres = 35.0F;
+// Lattice pitch at the two ends of the Air slider, metres.
+constexpr double kAirSpacingSparse = 9.0;
+constexpr double kAirSpacingDense = 2.0;
+// Slider position (1..100) to lattice pitch. Geometric, because the mote
+// COUNT goes as the cube of the pitch: a linear map would spend most of
+// the travel between "nothing there" and "solid fog".
+double airSpacingFor(int sliderValue)
+{
+    const double fraction = std::clamp(sliderValue / 100.0, 0.0, 1.0);
+    return kAirSpacingSparse
+           * std::pow(kAirSpacingDense / kAirSpacingSparse, fraction);
+}
 // Stretch that saturates the stress ramp, adjustable so slack fabric and
 // hard-loaded seams can each be examined at a useful contrast. The legend
 // reports the live peak next to it.
@@ -128,6 +153,58 @@ struct LegendBar
 // swaps it out and paints at its own pace. Inputs flow the other way —
 // live controls under the same mutex, structural changes (rebuild,
 // grab, settle) as queued commands handled between frames.
+// The session log. Everything the collapse diagnostics report, written
+// from the worker thread as the wing flies, so a session that ended in a
+// shape nobody can explain leaves a record instead of a memory. Truncated
+// on every rebuild — Reset included — because a log that spans two
+// different wings is a log nobody can read.
+//
+// Written by the worker and nobody else: the SimBody it measures lives on
+// that thread, and the file follows it rather than needing a lock.
+class SessionLog
+{
+public:
+    static QString path()
+    {
+        return QStandardPaths::writableLocation(
+                   QStandardPaths::AppLocalDataLocation)
+               + QStringLiteral("/playground-session.log");
+    }
+
+    void restart(const QString &header)
+    {
+        const QString target = path();
+        QDir().mkpath(QFileInfo(target).absolutePath());
+        file_.setFileName(target);
+        // Truncate: WriteOnly without Append does exactly that.
+        open_ = file_.open(QIODevice::WriteOnly | QIODevice::Text);
+        if (!open_) {
+            return;
+        }
+        stream_.setDevice(&file_);
+        stream_ << header;
+        stream_.flush();
+    }
+
+    void write(const QString &line)
+    {
+        if (!open_) {
+            return;
+        }
+        stream_ << line;
+        // Flushed every line: the whole point is to survive the session,
+        // and a session can end by being closed mid-flight.
+        stream_.flush();
+    }
+
+    [[nodiscard]] bool isOpen() const { return open_; }
+
+private:
+    QFile file_;
+    QTextStream stream_;
+    bool open_ = false;
+};
+
 class SimWorker : public QThread
 {
 public:
@@ -154,6 +231,9 @@ public:
         double sinkSpeed = 0.0;
         double pilotBelowMetres = 0.0;
         double pilotMassKg = 0.0;
+        // How far the air has slid past the wing since the build. The
+        // only thing in the model that knows the wing is going anywhere.
+        QVector3D airTravel;
         bool polarActive = false;
         bool grabActive = false;
         double grabForceNewtons = 0.0;
@@ -288,6 +368,187 @@ public:
         wake_.wakeAll();
     }
 
+    // ---- The session log, worker-thread only. ----
+
+    void startLog(const SimBody &sim,
+                  const SimControls &controls,
+                  const QString &error)
+    {
+        QString header;
+        QTextStream out(&header);
+        out << "LEparagliding Playground session log\n"
+            << "started        "
+            << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n";
+        if (!error.isEmpty()) {
+            out << "BUILD FAILED   " << error << "\n";
+            log_.restart(header);
+            return;
+        }
+        out << "body           " << sim.body->nodes().size() << " nodes, "
+            << sim.body->triangles().size() << " triangles, "
+            << sim.body->constraints().size() << " constraints\n"
+            << "wing           " << QString::number(sim.planformArea, 'f', 2)
+            << " m2 planform, AR "
+            << QString::number(sim.aspectRatio, 'f', 2) << ", pilot "
+            << QString::number(sim.pilotMass, 'f', 1) << " kg\n"
+            << "solver         " << controls.substeps << " substeps x "
+            << controls.constraintIterations << " iterations\n"
+            << "cells          " << sim.cells.size()
+            << ", cross-port gain x"
+            << QString::number(controls.crossPortGain, 'f', 1) << "\n";
+        std::size_t ported = 0;
+        for (std::size_t cell = 0; cell + 1 < sim.cells.size(); ++cell) {
+            if (sim.cells[cell].portAreaToNext > 0.0) {
+                ++ported;
+            }
+        }
+        out << "cross-ports    " << ported << " of "
+            << (sim.cells.empty() ? 0 : sim.cells.size() - 1)
+            << " rib crossings ported\n"
+            << "\n"
+            << "  Rows are 0.5 s of SIMULATED time apart. 'real' is the "
+               "wall-clock cost of\n"
+            << "  one frame: at 16.7 ms the wing flies in real time, at "
+               "125 ms it is 7x slow.\n"
+            << "\n"
+            << "   sim s   real ms   q Pa  alpha    brakeL/R cm   "
+               "airspeed  sink   L/D   span  vol%   cells Pa   "
+               "risers N  slack   weak cell            kink        "
+               "fabric N\n";
+        log_.restart(header);
+    }
+
+    void logFrame(const SimBody &sim,
+                  const SimControls &controls,
+                  double frameSeconds)
+    {
+        if (!log_.isOpen() || !sim.body) {
+            return;
+        }
+        loggedSeconds_ += lep::playground::simulationTimeStep;
+        // Every control change gets its own line whatever the cadence:
+        // what the pilot did is the half of the record that explains the
+        // other half.
+        const bool changed =
+            std::abs(controls.brakeLeft - loggedControls_.brakeLeft) > 0.005
+            || std::abs(controls.brakeRight - loggedControls_.brakeRight)
+                   > 0.005
+            || std::abs(controls.pressurePascal
+                        - loggedControls_.pressurePascal)
+                   > 0.5
+            || std::abs(controls.angleOfAttackDegrees
+                        - loggedControls_.angleOfAttackDegrees)
+                   > 0.05
+            || controls.freeFlight != loggedControls_.freeFlight
+            || controls.fabricContact != loggedControls_.fabricContact
+            || std::abs(controls.crossPortGain
+                        - loggedControls_.crossPortGain)
+                   > 0.01
+            || controls.substeps != loggedControls_.substeps;
+        if (changed) {
+            QString line;
+            QTextStream out(&line);
+            out << "  ---- " << QString::number(loggedSeconds_, 'f', 1)
+                << "s  brakes "
+                << QString::number(controls.brakeLeft * 100.0, 'f', 0)
+                << "/"
+                << QString::number(controls.brakeRight * 100.0, 'f', 0)
+                << " cm, q "
+                << QString::number(controls.pressurePascal, 'f', 0)
+                << " Pa, angle "
+                << QString::number(controls.angleOfAttackDegrees, 'f', 1)
+                << " deg, "
+                << (controls.freeFlight ? "free flight" : "tunnel")
+                << (controls.fabricContact ? ", contact" : "")
+                << ", cross-port x"
+                << QString::number(controls.crossPortGain, 'f', 1) << ", "
+                << controls.substeps << "x" << controls.constraintIterations
+                << "\n";
+            log_.write(line);
+            loggedControls_ = controls;
+        }
+        if (++loggedFrames_ < 30) {
+            return;
+        }
+        loggedFrames_ = 0;
+
+        const lep::playground::WeakCellReport weak =
+            lep::playground::weakestCell(sim);
+        const lep::playground::KinkReport kink =
+            lep::playground::sharpestKink(sim);
+        const lep::playground::LineLoadReport lines =
+            lep::playground::lineLoads(sim, controls);
+        double cellLow = 0.0;
+        double cellHigh = 0.0;
+        if (!sim.cellPressure.empty()) {
+            cellLow = *std::min_element(sim.cellPressure.begin(),
+                                        sim.cellPressure.end());
+            cellHigh = *std::max_element(sim.cellPressure.begin(),
+                                         sim.cellPressure.end());
+        }
+        double spanLow = std::numeric_limits<double>::max();
+        double spanHigh = std::numeric_limits<double>::lowest();
+        for (std::size_t node = 0; node < sim.canopyNodeCount
+                                   && node < sim.body->nodes().size();
+             ++node) {
+            const double x = sim.body->nodes()[node].position.x;
+            spanLow = std::min(spanLow, x);
+            spanHigh = std::max(spanHigh, x);
+        }
+        // Sink and enclosed volume, computed here rather than carried on
+        // the body: neither is wanted anywhere else, and the log is the
+        // one place both have to line up with the same frame.
+        double sink = 0.0;
+        double mass = 0.0;
+        for (const softwing::Node &node : sim.body->nodes()) {
+            if (node.inverseMass <= 0.0) {
+                continue;
+            }
+            const double nodeMass = 1.0 / node.inverseMass;
+            sink += nodeMass * node.velocity.z;
+            mass += nodeMass;
+        }
+        sink = mass > 0.0 ? sink / mass : 0.0;
+        double volume = 0.0;
+        for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+            const softwing::Triangle &tri = sim.body->triangles()[face];
+            const softwing::Vec3 &a = sim.body->nodes()[tri.a].position;
+            const softwing::Vec3 &b = sim.body->nodes()[tri.b].position;
+            const softwing::Vec3 &c = sim.body->nodes()[tri.c].position;
+            volume += dot(a, cross(b, c)) / 6.0;
+        }
+        const double volumePercent =
+            loggedRestVolume_ > 0.0
+                ? 100.0 * (std::abs(volume) - loggedRestVolume_)
+                      / loggedRestVolume_
+                : 0.0;
+
+        QString line;
+        QTextStream out(&line);
+        const auto field = [](double value, int width, int decimals) {
+            return QStringLiteral("%1").arg(
+                QString::number(value, 'f', decimals), width);
+        };
+        out << field(loggedSeconds_, 8, 1) << field(frameSeconds * 1000.0, 10, 1)
+            << field(controls.pressurePascal, 7, 0)
+            << field(sim.lastAlphaDegrees, 7, 1)
+            << field(controls.brakeLeft * 100.0, 9, 0) << "/"
+            << field(controls.brakeRight * 100.0, 3, 0)
+            << field(sim.lastAirspeed, 12, 2) << field(sink, 7, 2)
+            << field(sim.lastGlideRatio, 6, 2)
+            << field(spanHigh - spanLow, 7, 2)
+            << field(volumePercent, 6, 1) << "  "
+            << field(cellLow, 5, 0) << ".." << field(cellHigh, 4, 0)
+            << field(lines.riserNewtons, 10, 0)
+            << field(static_cast<double>(lines.slackSegments), 7, 0) << "  #"
+            << weak.index << " x" << field(weak.x, 6, 2) << " "
+            << field(100.0 * weak.sectionRatio, 4, 0) << "%  "
+            << field(kink.degrees, 4, 0) << "deg@" << kink.rib << " s"
+            << field(kink.spanFraction, 4, 2)
+            << field(sim.lastFabricDragNewtons, 9, 0) << "\n";
+        log_.write(line);
+    }
+
     // Swap the freshest snapshot/topology out, surrendering the
     // previous front buffer for reuse. False when nothing new arrived.
     bool takeSnapshot(Snapshot &front)
@@ -405,6 +666,24 @@ public:
                     simError = QString::fromUtf8(failure.what());
                     sim = SimBody{};
                 }
+                loggedFrames_ = 0;
+                loggedSeconds_ = 0.0;
+                loggedControls_ = controls;
+                loggedRestVolume_ = 0.0;
+                if (sim.body) {
+                    for (std::size_t face = 0; face < sim.skinTriangleCount;
+                         ++face) {
+                        const softwing::Triangle &tri =
+                            sim.body->triangles()[face];
+                        loggedRestVolume_ +=
+                            dot(sim.body->nodes()[tri.a].position,
+                                cross(sim.body->nodes()[tri.b].position,
+                                      sim.body->nodes()[tri.c].position))
+                            / 6.0;
+                    }
+                    loggedRestVolume_ = std::abs(loggedRestVolume_);
+                }
+                startLog(sim, controls, simError);
                 publishTopology(sim, options, simError);
                 fieldClock.invalidate();
                 reportClock.invalidate();
@@ -439,7 +718,15 @@ public:
                 simError.isEmpty() && (!paused || settling);
             if (stepping) {
                 try {
+                    const auto frameStart =
+                        std::chrono::steady_clock::now();
                     lep::playground::stepSimulation(sim, controls);
+                    logFrame(sim,
+                             controls,
+                             std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now()
+                                 - frameStart)
+                                 .count());
                     if (settling && monitor != nullptr
                         && monitor->frameStepped(
                             sim, controls.pressurePascal)) {
@@ -598,6 +885,10 @@ private:
             back.liftNewtons = sim.lastLift;
             back.alphaDegrees = sim.lastAlphaDegrees;
             back.airspeed = sim.lastAirspeed;
+            back.airTravel = QVector3D(
+                static_cast<float>(sim.airTravel.x),
+                static_cast<float>(sim.airTravel.y),
+                static_cast<float>(sim.airTravel.z));
             back.glideRatio = sim.lastGlideRatio;
             back.pilotMassKg = sim.pilotMass;
             back.forwardSpeed = 0.0;
@@ -666,6 +957,14 @@ private:
         snapshotFresh_ = true;
     }
 
+    // Log state. Worker thread only — no lock, because nothing else
+    // touches it.
+    SessionLog log_;
+    int loggedFrames_ = 0;
+    double loggedSeconds_ = 0.0;
+    double loggedRestVolume_ = 0.0;
+    SimControls loggedControls_;
+
     QMutex mutex_;
     QWaitCondition wake_;
     bool quit_ = false;
@@ -732,7 +1031,8 @@ public:
         // that order on the worker, so taking them the other way round
         // here framed the new wing against the previous body's
         // positions.
-        if (worker_->takeSnapshot(front_)) {
+        const bool freshSnapshot = worker_->takeSnapshot(front_);
+        if (freshSnapshot) {
             changed = true;
         }
         if (worker_->takeTopology(topo_)) {
@@ -746,13 +1046,52 @@ public:
             // A fresh build frames itself, exactly as the synchronous
             // rebuild used to.
             fitView();
+            // ...and the follow starts over from it: where the discarded
+            // body had flown to says nothing about where this one begins.
+            haveFollowAnchor_ = false;
             if (topologyArrived_) {
                 topologyArrived_(topo_.buildError);
             }
         }
+        if (freshSnapshot) {
+            followSystem();
+        }
         if (changed) {
             update();
         }
+    }
+
+    // The mean of the live node positions — steadier than the bounding
+    // box's centre, which a single fluttering tip can shift.
+    QVector3D systemCentre() const
+    {
+        QVector3D sum;
+        for (const QVector3D &position : front_.positions) {
+            sum += position;
+        }
+        return front_.positions.empty()
+                   ? target_
+                   : sum / static_cast<float>(front_.positions.size());
+    }
+
+    // A flying wing travels through the world at flying speed, so a camera
+    // anchored in the world loses it within seconds — and a Reset then
+    // frames the launch pose the wing has already left, which looks like
+    // the reset not being framed at all. Carry the orbit target along with
+    // the system's own motion. Only the DELTA is applied, so the distance,
+    // orbit angles and any pan the user has dialled in all survive.
+    void followSystem()
+    {
+        if (!topo_.freeFlight || front_.positions.empty()) {
+            haveFollowAnchor_ = false;
+            return;
+        }
+        const QVector3D centre = systemCentre();
+        if (haveFollowAnchor_) {
+            target_ += centre - followAnchor_;
+        }
+        followAnchor_ = centre;
+        haveFollowAnchor_ = true;
     }
 
     // Page hook, invoked on the GUI thread when a build completes (the
@@ -994,6 +1333,21 @@ public:
         controls_.brakeLeft = rightMetres;
         controls_.brakeRight = leftMetres;
         pushInputs();
+    }
+
+    void setCrossPortGain(double gain)
+    {
+        controls_.crossPortGain = gain;
+        pushInputs();
+    }
+
+    // Metres between air motes; 0 clears the field. Denser is a shorter
+    // lattice pitch, and the count goes as the cube of it, so the slider
+    // is mapped to the pitch rather than to a count.
+    void setAirSpacing(double metres)
+    {
+        airSpacingMetres_ = static_cast<float>(std::max(0.0, metres));
+        update();
     }
 
     // Every live-controls change funnels through here to the worker.
@@ -1560,6 +1914,15 @@ protected:
             }
         }
 
+        // The air itself, appended last so the wing and lines keep their
+        // own vertex ranges. Centred on the pilot when there is one: he
+        // is the thing that travels, and the canopy swings about him.
+        const int sceneFloats = static_cast<int>(vertexScratch_.size());
+        appendAirMotes(topo_.pilotNode != noConstraint
+                               && topo_.pilotNode < nodes.size()
+                           ? nodes[topo_.pilotNode]
+                           : target_);
+
         program_->bind();
         QOpenGLVertexArrayObject::Binder vaoBinder(&vao_);
         program_->setUniformValue("mvp", mvp);
@@ -1590,8 +1953,17 @@ protected:
             "color", QVector4D(0.55F, 0.62F, 0.55F, 1.0F));
         glDrawArrays(GL_LINES,
                      skinFloats / 9,
-                     (static_cast<int>(vertexScratch_.size()) - skinFloats)
-                         / 9);
+                     (sceneFloats - skinFloats) / 9);
+
+        if (static_cast<int>(vertexScratch_.size()) > sceneFloats) {
+            glPointSize(2.0F);
+            program_->setUniformValue("lit", false);
+            program_->setUniformValue("useTint", true);
+            glDrawArrays(
+                GL_POINTS,
+                sceneFloats / 9,
+                (static_cast<int>(vertexScratch_.size()) - sceneFloats) / 9);
+        }
         buffer_.release();
         program_->release();
 
@@ -1883,6 +2255,106 @@ private:
         return std::max(stressFullScale_ * 1.0e4, 1.0);
     }
 
+    // One deterministic pseudo-random number per lattice cell and channel.
+    // Integer coordinates in, a repeatable fraction out: no state, no
+    // sequence, no seed to carry — which is what lets the mote field be a
+    // pure function of where you are rather than a thing that has to be
+    // spawned, stored and aged.
+    static float moteHash(int x, int y, int z, int channel)
+    {
+        std::uint32_t value =
+            static_cast<std::uint32_t>(x) * 0x8DA6B343u
+            ^ static_cast<std::uint32_t>(y) * 0xD8163841u
+            ^ static_cast<std::uint32_t>(z) * 0xCB1AB31Fu
+            ^ static_cast<std::uint32_t>(channel) * 0x165667B1u;
+        value ^= value >> 15;
+        value *= 0x2C1B3C6Du;
+        value ^= value >> 12;
+        value *= 0x297A2D39u;
+        value ^= value >> 15;
+        return static_cast<float>(value & 0xFFFFFFu)
+               / static_cast<float>(0x1000000u);
+    }
+
+    // Motes of air hanging in the world, so the wing's travel through it
+    // is visible. The field is an infinite lattice with one mote per cell,
+    // offset inside its cell by the hash of the cell's own coordinates: a
+    // mote therefore sits at exactly the same world point every frame no
+    // matter how the wing moves, which is the whole trick — the eye reads
+    // the wing sliding past fixed things as speed, and a field that was
+    // respawned or jittered per frame would read as noise instead. Only
+    // the cells near the pilot are visited, so an unbounded field costs a
+    // fixed amount.
+    void appendAirMotes(const QVector3D &centre)
+    {
+        if (airSpacingMetres_ <= 0.0F) {
+            return;
+        }
+        const float spacing = airSpacingMetres_;
+        const float radius = kAirMoteRadiusMetres;
+        const int reach = std::min(
+            24, static_cast<int>(std::ceil(radius / spacing)));
+        // The lattice is anchored to the AIR, not to the world: both
+        // flight modes hold the wing at the origin (the tunnel by
+        // tethering it, free flight by re-centring the system every
+        // frame), so a world-anchored field is a field that never moves.
+        // Motes are laid out around where the wing sits in AIR
+        // coordinates and drawn shifted back by the same travel, which is
+        // what makes them stream past at the speed the wing is flying.
+        const QVector3D travel = front_.airTravel;
+        const QVector3D anchor = centre - travel;
+        const auto cellOf = [spacing](float value) {
+            return static_cast<int>(std::floor(value / spacing));
+        };
+        const int baseX = cellOf(anchor.x());
+        const int baseY = cellOf(anchor.y());
+        const int baseZ = cellOf(anchor.z());
+        const QVector3D background(0.10F, 0.11F, 0.13F);
+        const QVector3D lit(0.62F, 0.70F, 0.82F);
+        for (int i = -reach; i <= reach; ++i) {
+            for (int j = -reach; j <= reach; ++j) {
+                for (int k = -reach; k <= reach; ++k) {
+                    const int x = baseX + i;
+                    const int y = baseY + j;
+                    const int z = baseZ + k;
+                    // Laid out in AIR coordinates, then carried back into
+                    // the wing's frame by the travel. Both halves matter:
+                    // the lattice is what makes a mote hold still in the
+                    // air, and the shift is what makes it stream past the
+                    // wing.
+                    const QVector3D mote =
+                        QVector3D(
+                            (static_cast<float>(x) + moteHash(x, y, z, 0))
+                                * spacing,
+                            (static_cast<float>(y) + moteHash(x, y, z, 1))
+                                * spacing,
+                            (static_cast<float>(z) + moteHash(x, y, z, 2))
+                                * spacing)
+                        + travel;
+                    const float distance = (mote - centre).length();
+                    if (distance >= radius) {
+                        continue;
+                    }
+                    // Faded into the background toward the edge of the
+                    // sphere, so motes arrive and leave instead of
+                    // popping at a hard boundary.
+                    const float near = 1.0F - distance / radius;
+                    const QVector3D tint =
+                        background + (lit - background) * (near * near);
+                    vertexScratch_.push_back(mote.x());
+                    vertexScratch_.push_back(mote.y());
+                    vertexScratch_.push_back(mote.z());
+                    vertexScratch_.push_back(0.0F);
+                    vertexScratch_.push_back(0.0F);
+                    vertexScratch_.push_back(1.0F);
+                    vertexScratch_.push_back(tint.x());
+                    vertexScratch_.push_back(tint.y());
+                    vertexScratch_.push_back(tint.z());
+                }
+            }
+        }
+    }
+
     QMatrix4x4 viewMatrix() const
     {
         QMatrix4x4 view;
@@ -1991,6 +2463,12 @@ private:
     QOpenGLVertexArrayObject vao_;
     QOpenGLBuffer buffer_{QOpenGLBuffer::VertexBuffer};
     QVector3D target_;
+    // Where the flying system was last frame, so the orbit target can be
+    // carried along with it (see followSystem).
+    QVector3D followAnchor_;
+    bool haveFollowAnchor_ = false;
+    // Lattice spacing of the air motes, metres; 0 turns the field off.
+    float airSpacingMetres_ = 0.0F;
     float distance_ = 10.0F;
     float yaw_ = 30.0F;
     float pitch_ = -60.0F;
@@ -2139,6 +2617,25 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     lift_ = makeSlider(15, 6);
     leftBrake_ = makeSlider(100, 0);
     rightBrake_ = makeSlider(100, 0);
+    // 1 is the cross-port area the design declares; the rest of the range
+    // is a deliberate lie, so the one path that re-feeds a sealed cell can
+    // be turned up until its effect is visible.
+    crossPortGain_ = new QSlider(Qt::Horizontal, this);
+    crossPortGain_->setRange(1, 10);
+    crossPortGain_->setValue(1);
+    crossPortGain_->setToolTip(QStringLiteral(
+        "Multiplies the flow through the rib cross-port holes — the only "
+        "way air reaches a cell whose own intake has folded shut. 1 is "
+        "the hole area the design actually has; above that the model is "
+        "knowingly generous."));
+    // Motes of air at fixed points in the world. They exist only to make
+    // the wing's own travel legible: gliding, sinking and surging all
+    // look alike against an empty background.
+    airDensity_ = makeSlider(100, 0);
+    airDensity_->setToolTip(QStringLiteral(
+        "Draws motes of air at fixed points in space. They do not touch "
+        "the physics — they are there so the wing's movement through the "
+        "air can be seen, which an empty background hides."));
     runButton_ = new QPushButton(QStringLiteral("Pause"), this);
     runButton_->setCheckable(true);
     resetButton_ = new QPushButton(QStringLiteral("Reset"), this);
@@ -2262,6 +2759,8 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     angleLabel_ = new QLabel(this);
     leftBrakeLabel_ = new QLabel(this);
     rightBrakeLabel_ = new QLabel(this);
+    crossPortLabel_ = new QLabel(this);
+    airLabel_ = new QLabel(this);
     alphaDial_ = new AngleOfAttackDial(this);
     alphaDial_->setSetAngleProvider(
         [this] { return static_cast<double>(lift_->value()); });
@@ -2283,10 +2782,21 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             QStringLiteral("Right brake %1 cm")
                 .arg(std::lround(rightBrake_->value() / 100.0
                                  * maximumBrakeTravelMetres * 100.0)));
+        crossPortLabel_->setText(
+            crossPortGain_->value() == 1
+                ? QStringLiteral("Neighbour reinflation ×1 (as designed)")
+                : QStringLiteral("Neighbour reinflation ×%1")
+                      .arg(crossPortGain_->value()));
+        airLabel_->setText(
+            airDensity_->value() == 0
+                ? QStringLiteral("Air motes off")
+                : QStringLiteral("Air motes · %1 m apart")
+                      .arg(airSpacingFor(airDensity_->value()), 0, 'f', 1));
     };
     refreshControlReadouts();
     for (QSlider *slider :
-         {pressure_, lift_, leftBrake_, rightBrake_}) {
+         {pressure_, lift_, leftBrake_, rightBrake_, crossPortGain_,
+          airDensity_}) {
         connect(slider, &QSlider::valueChanged, this,
                 [refreshControlReadouts] { refreshControlReadouts(); });
     }
@@ -2347,6 +2857,10 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     panelLayout->addWidget(leftBrake_);
     panelLayout->addWidget(rightBrakeLabel_);
     panelLayout->addWidget(rightBrake_);
+    panelLayout->addWidget(crossPortLabel_);
+    panelLayout->addWidget(crossPortGain_);
+    panelLayout->addWidget(airLabel_);
+    panelLayout->addWidget(airDensity_);
     auto *runRow = new QHBoxLayout;
     runRow->addWidget(runButton_, 1);
     runRow->addWidget(resetButton_, 1);
@@ -2608,6 +3122,18 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     };
     connect(leftBrake_, &QSlider::valueChanged, this, pushBrakes);
     connect(rightBrake_, &QSlider::valueChanged, this, pushBrakes);
+    connect(crossPortGain_, &QSlider::valueChanged, this,
+            [this, notePausedControls](int value) {
+                if (view_ != nullptr) {
+                    view_->setCrossPortGain(static_cast<double>(value));
+                }
+                notePausedControls();
+            });
+    connect(airDensity_, &QSlider::valueChanged, this, [this](int value) {
+        if (view_ != nullptr) {
+            view_->setAirSpacing(value == 0 ? 0.0 : airSpacingFor(value));
+        }
+    });
     connect(runButton_, &QPushButton::toggled, this, [this](bool paused) {
         if (view_ != nullptr) {
             view_->setRunning(!paused);
@@ -2617,7 +3143,20 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         updateShapeTimer();
     });
     connect(resetButton_, &QPushButton::clicked, this, [this] {
+        // Hands up first. The brake input outlives the body it was
+        // pulling: fly mode reads the pull off the cursor, and the cursor
+        // has to leave the view to reach this button, so the last pull
+        // stays in the controls (and mirrored on the sliders). A wing
+        // rebuilt at its rest pose with 60 cm of brake still on folds
+        // again within a few frames, which reads — correctly — as "Reset
+        // did not reset".
+        leftBrake_->setValue(0);
+        rightBrake_->setValue(0);
         if (view_ != nullptr) {
+            // Directly too: the sliders only push when their integer
+            // value actually changes, and a pull under half a percent of
+            // travel rounds to a slider that was already at zero.
+            view_->setBrakePull(0.0, 0.0);
             view_->resetSimulation();
         }
         // The rebuilt body is running; the Pause button must say so.

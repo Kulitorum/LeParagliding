@@ -49,6 +49,30 @@ constexpr double kCellSectionRatioFloor = 0.05;
 // Per-frame stability clamp on the explicit relaxation step: no cell may
 // close more than this fraction of its pressure gap in one frame.
 constexpr double kCellMaxRateStep = 0.5;
+// Bluff-body coefficient on the frontal area a deformed canopy presents
+// beyond its designed shape. A flat plate broadside runs 1.1-1.2; 1.0
+// allows for the layers a fold stacks in each other's wake, which the
+// area sum counts twice and the air does not. On a fully collapsed wing
+// this lands the terminal descent at 13-15 m/s, which is where a real
+// collapsed canopy falls — free fall, the model's old answer, is 3x that.
+constexpr double kFabricDragCoefficient = 1.0;
+// Deadband, as a multiple of the rest frontal area. A loaded canopy
+// balloons, so its live silhouette runs a little over the drawing's even
+// when nothing is wrong — measured at 7-20% on the Swoop — and charging
+// that as bluff-body drag cost the trimmed glide a sixth of its L/D.
+// Below this the term is exactly zero and the calibration is exactly the
+// old one; a fold clears it several times over.
+constexpr double kFabricDragOnset = 1.25;
+// Ceiling on the wind a section's own rotation may add to or subtract
+// from the wing's, as a multiple of the wing's airspeed. At 1.0 a section
+// can have its wind doubled or cancelled but never reversed, which keeps
+// a tumbling transient from inventing loads nothing in the model bounds.
+constexpr double kMaximumSpinWindRatio = 1.0;
+// Chord station of the per-rib attitude reference node (see
+// RibChord::referenceNode). Must match the station used when the node is
+// picked at build time: the measured line is scaled by 1/this so the
+// wing-level angle keeps reading in whole-chord terms.
+constexpr double kAttitudeReferenceStation = 0.40;
 // Zero-lift drag referred to the projected planform: canopy profile drag
 // with its cell openings and seams, plus the line cascade. Together with
 // the induced term below this puts the polar's best glide around 7–8,
@@ -578,6 +602,21 @@ SimBody buildSimBody(const SimMesh &mesh,
     }
     sim.skinTriangleCount = triangles.size();
 
+    // The designed skin as area vectors, kept for the fabric-drag
+    // reference: half the sum of |A.w| over a closed surface is its
+    // frontal area along w, so these give the frontal area the wing WOULD
+    // have if it still had its designed shape, for any wind direction.
+    // The live wing's excess over that is the bluff-body area its
+    // deformation has created — which is the whole of the term.
+    sim.restFaceAreas.clear();
+    sim.restFaceAreas.reserve(triangles.size());
+    for (const auto &tri : triangles) {
+        const softwing::Vec3 &a = mesh.nodes[static_cast<std::size_t>(tri[0])];
+        const softwing::Vec3 &b = mesh.nodes[static_cast<std::size_t>(tri[1])];
+        const softwing::Vec3 &c = mesh.nodes[static_cast<std::size_t>(tri[2])];
+        sim.restFaceAreas.push_back(0.5 * cross(b - a, c - a));
+    }
+
     // Upward-facing faces in the rest pose form the "top surface":
     // fake lift is applied there as extra outward pressure, mimicking
     // upper-surface suction. The cosine falloff toward the tips comes
@@ -800,6 +839,51 @@ SimBody buildSimBody(const SimMesh &mesh,
                 planeNormal.x < 0.0 ? -1.0 * planeNormal : planeNormal;
             chord.restChordLength = length(mesh.nodes[chord.trailingNode]
                                            - mesh.nodes[chord.leadingNode]);
+
+            // The attitude reference: the outline node nearest 40% chord,
+            // on the side the leading-edge-to-trailing-edge line puts the
+            // extrados. Pulling a brake rotates the LE->TE line, and
+            // measuring the wing's angle of attack off that line makes a
+            // brake pull read as the whole wing pitching up — which the
+            // polar answers with more lift, more induced drag, less speed,
+            // and therefore MORE angle. That loop is what stalled the wing
+            // a few seconds after a 20 cm pull (session log, 2026-07-31:
+            // alpha kept climbing 20.9 -> 23.1 -> 29.4 -> 76 with the hand
+            // held still). Forward of the flap the fabric cannot be moved
+            // by the brake, so LE->this node carries the wing's real
+            // attitude and nothing of the pilot's input.
+            const softwing::Vec3 leading = mesh.nodes[chord.leadingNode];
+            const softwing::Vec3 chordVector =
+                mesh.nodes[chord.trailingNode] - leading;
+            const double chordSquared = lengthSquared(chordVector);
+            if (chordSquared > 0.0) {
+                const softwing::Vec3 up =
+                    normalized(cross(chord.spanAxis, chordVector));
+                // The same station sampleWingAero scales the measured
+                // line back by; one constant, so the two cannot drift.
+                constexpr double kReferenceStation =
+                    kAttitudeReferenceStation;
+                double best = std::numeric_limits<double>::max();
+                std::size_t bestNode = chord.leadingNode;
+                for (const int index : loop) {
+                    const auto node = static_cast<std::size_t>(index);
+                    const softwing::Vec3 offset = mesh.nodes[node] - leading;
+                    const double station =
+                        dot(offset, chordVector) / chordSquared;
+                    if (dot(offset, up) < 0.0) {
+                        continue;
+                    }
+                    const double distance =
+                        std::abs(station - kReferenceStation);
+                    if (distance < best) {
+                        best = distance;
+                        bestNode = node;
+                    }
+                }
+                chord.referenceNode = bestNode;
+            } else {
+                chord.referenceNode = chord.leadingNode;
+            }
             sim.ribChords.push_back(chord);
             ribMeshIndex.push_back(ribIndex);
             // The shape instrumentation fits each rest section onto the
@@ -1083,16 +1167,43 @@ SimBody buildSimBody(const SimMesh &mesh,
 
         softwing::Vec3 meanChord;
         softwing::Vec3 meanSpan;
+        softwing::Vec3 meanAttitude;
         for (const RibChord &rib : sim.ribChords) {
             meanChord += normalized(mesh.nodes[rib.trailingNode]
                                     - mesh.nodes[rib.leadingNode]);
             meanSpan += rib.spanAxis;
+            const softwing::Vec3 attitude =
+                mesh.nodes[rib.referenceNode] - mesh.nodes[rib.leadingNode];
+            if (length(attitude) > 0.0) {
+                meanAttitude += normalized(attitude);
+            }
         }
         if (length(meanChord) > 0.0) {
             sim.restChordDirection = normalized(meanChord);
         }
         if (length(meanSpan) > 0.0) {
             sim.restSpanAxis = normalized(meanSpan);
+        }
+
+        // Calibrate the attitude line against the chord it stands in for.
+        // Both flattened into the plane the pitch is measured in, and the
+        // angle between them stored so the live measurement can be rotated
+        // back onto the chord: the reference node rides on the extrados,
+        // tens of degrees above the chord line, and without this the whole
+        // stability stack would be reading an angle offset by the
+        // aerofoil's thickness.
+        if (length(meanAttitude) > 0.0 && length(meanChord) > 0.0) {
+            const softwing::Vec3 axis = sim.restSpanAxis;
+            const softwing::Vec3 chordFlat =
+                normalized(sim.restChordDirection
+                           - dot(sim.restChordDirection, axis) * axis);
+            const softwing::Vec3 attitudeFlat = normalized(
+                meanAttitude - dot(meanAttitude, axis) * axis);
+            if (length(chordFlat) > 0.0 && length(attitudeFlat) > 0.0) {
+                sim.attitudeOffsetRadians = std::atan2(
+                    dot(cross(attitudeFlat, chordFlat), axis),
+                    dot(attitudeFlat, chordFlat));
+            }
         }
 
         // The two ribs furthest out along the rest span axis. The live span
@@ -1200,6 +1311,7 @@ SimBody buildSimBody(const SimMesh &mesh,
                 (controls.freeFlight ? 0.0
                                      : controls.angleOfAttackDegrees)
                     * kDegreesToRadians);
+            std::vector<softwing::Vec3> restMouth(sim.cells.size());
             for (std::size_t face = 0; face < triangles.size(); ++face) {
                 FaceAero &aero = sim.faceAero[face];
                 const RibChord &rib = sim.ribChords[aero.rib];
@@ -1226,19 +1338,25 @@ SimBody buildSimBody(const SimMesh &mesh,
                         mesh.nodes[static_cast<std::size_t>(tri[1])];
                     const softwing::Vec3 &c =
                         mesh.nodes[static_cast<std::size_t>(tri[2])];
-                    record.restVentArea +=
-                        0.5 * length(cross(b - a, c - a));
+                    const softwing::Vec3 area = 0.5 * cross(b - a, c - a);
+                    record.restVentArea += length(area);
                     // Vent faces are wound outward, so at rest the area
                     // vector opposes the build-time airflow; the dot
-                    // against -wind is the projection the live opening
-                    // fraction is normalised by.
-                    record.restVentProjection += dot(
-                        0.5 * cross(b - a, c - a), -1.0 * buildWind);
+                    // against -wind is the scoop the live one is
+                    // normalised by. The vector itself accumulates
+                    // separately — its length is the mouth's opening,
+                    // which is what a fold takes away.
+                    record.restVentProjection +=
+                        dot(area, -1.0 * buildWind);
+                    restMouth[cell] += area;
                 }
             }
-            for (SimCell &record : sim.cells) {
+            for (std::size_t cell = 0; cell < sim.cells.size(); ++cell) {
+                SimCell &record = sim.cells[cell];
                 record.restVentProjection =
                     std::max(record.restVentProjection, 1.0e-9);
+                record.restVentAperture =
+                    std::max(length(restMouth[cell]), 1.0e-9);
             }
         }
     }
@@ -1703,6 +1821,7 @@ double wingLiftCoefficient(double angleRadians)
 // pressure, and a Cp above 1 would push the lower skin inward.
 // Defined further down, next to the freestream helpers.
 softwing::Vec3 canopyVelocityOf(const SimBody &sim);
+softwing::Vec3 canopySpinOf(const SimBody &sim, softwing::Vec3 &centre);
 double wingLiftCoefficient(double angleRadians);
 
 double externalPressureCoefficient(double chordFraction,
@@ -1734,11 +1853,13 @@ double externalPressureCoefficient(double chordFraction,
 // response. Three effects, all positional and all restoring, so none of
 // them re-opens the closed loops that sank the free-flight attempts:
 //
-//   intake     the cell relaxes toward its section's ram pressure, but
-//              only in proportion to how much of its vent still faces the
-//              oncoming air — a tucked nose seals its own intake, which is
-//              why a tucked cell stops being force-fed the full ram
-//              pressure the old model stamped regardless.
+//   intake     the cell relaxes toward its section's ram pressure at the
+//              speed air actually crosses its mouth — the flux of the
+//              mouth's OWN motion through the air, face by face. A tucked
+//              nose folds its mouth shut and stops being force-fed; a
+//              wing that has pitched, rolled or swung keeps feeding,
+//              because a mouth is fed by where it is going and not by
+//              where the wing as a whole is pointing.
 //   cross-flow neighbouring cells exchange pressure through the rib hole
 //              area the design actually has. This is the re-inflation
 //              path: a collapsed side with a sealed intake is re-fed by
@@ -1751,7 +1872,8 @@ double externalPressureCoefficient(double chordFraction,
 std::vector<double> advanceCellPressures(
     SimBody &sim,
     const std::vector<double> &ribPressure,
-    const softwing::Vec3 &relativeWind)
+    const softwing::Vec3 &airVelocity,
+    double crossPortGain)
 {
     const std::size_t count = sim.cells.size();
     std::vector<double> target(count, 0.0);
@@ -1788,9 +1910,6 @@ std::vector<double> advanceCellPressures(
 
     const auto &nodes = sim.body->nodes();
     const auto &triangles = sim.body->triangles();
-    const double windSpeed = length(relativeWind);
-    const softwing::Vec3 windDirection =
-        windSpeed > 1.0e-6 ? relativeWind / windSpeed : softwing::Vec3{};
 
     std::vector<double> rate(count, 0.0);
     std::vector<double> change(count, 0.0);
@@ -1799,31 +1918,61 @@ std::vector<double> advanceCellPressures(
         if (record.restVentArea <= 0.0) {
             continue;
         }
-        // How much of the intake still faces the oncoming air. Vent
-        // faces are wound outward, so a vent taking ram air has its
-        // live area vector AGAINST the downstream wind direction.
-        double opening = 0.0;
-        if (windSpeed > 1.0e-6) {
-            softwing::Vec3 ventArea;
-            for (const std::size_t face : record.ventFaces) {
-                const auto &tri = triangles[face];
-                ventArea += 0.5
-                            * cross(nodes[tri.b].position
-                                        - nodes[tri.a].position,
-                                    nodes[tri.c].position
-                                        - nodes[tri.a].position);
-            }
-            opening = std::clamp(dot(ventArea, -1.0 * windDirection)
-                                     / record.restVentProjection,
-                                 0.0, 1.0);
+        // The mouth as the live fabric has it. Vent faces are wound
+        // outward, so air enters where the mouth advances into the air it
+        // sits in: the scoop is the flux of the RELATIVE velocity through
+        // the opening, taken face by face with each face's own motion.
+        // That is the whole point — a mouth is fed by where IT is going,
+        // not by whether the wing as a whole still points into the wind.
+        // Measuring against one bulk wind direction instead made a wing
+        // that had pitched, rolled or swung read as sealed everywhere at
+        // once, and since it could still empty, it never came back.
+        softwing::Vec3 mouth;
+        softwing::Vec3 mouthWind;
+        double mouthArea = 0.0;
+        double scoop = 0.0;
+        for (const std::size_t face : record.ventFaces) {
+            const auto &tri = triangles[face];
+            const softwing::Vec3 area =
+                0.5
+                * cross(nodes[tri.b].position - nodes[tri.a].position,
+                        nodes[tri.c].position - nodes[tri.a].position);
+            const softwing::Vec3 relative =
+                airVelocity
+                - (nodes[tri.a].velocity + nodes[tri.b].velocity
+                   + nodes[tri.c].velocity)
+                      / 3.0;
+            const double magnitude = length(area);
+            mouth += area;
+            mouthWind += magnitude * relative;
+            mouthArea += magnitude;
+            scoop -= dot(relative, area);
         }
-        // Scooping air IN needs the vent to face the wind; venting OUT
-        // does not — an over-pressured cell exhausts through its mouth
-        // whichever way that mouth points, including in dead air.
-        const double gate =
-            sim.cellPressure[cell] > target[cell] ? 1.0 : opening;
-        const double intakeRate = gate * kCellFlowDischarge
-                                  * record.restVentArea * speed[cell]
+        // The speed air enters at, normalised against the scoop the
+        // DESIGNED mouth makes, so the rest pose counts as fully open and
+        // no intake is charged for the cosine it was drawn with. Capped at
+        // the speed the air actually reaches the mouth: nothing flows in
+        // faster than it arrives, and the cap is what stops a mouth with a
+        // small rest projection — a tip cell on an arced wing points half
+        // sideways — from amplifying its own fabric noise.
+        const double approach =
+            mouthArea > 0.0 ? length(mouthWind) / mouthArea : 0.0;
+        const double intakeSpeed =
+            std::min(std::max(0.0, scoop) / record.restVentProjection,
+                     approach);
+        // Blowing OUT is driven by the cell's own pressure, so it does not
+        // need the mouth to meet the air — but it does need the mouth to
+        // be OPEN, which is the one thing a fold takes away. Ungated the
+        // model ratchets: every cell dumps its air the moment the wing
+        // slows down, and a mouth that has since turned away can never
+        // take it back.
+        const double aperture = std::clamp(
+            length(mouth) / record.restVentAperture, 0.0, 1.0);
+        const double exhaustSpeed = sim.cellPressure[cell] > target[cell]
+                                        ? aperture * speed[cell]
+                                        : 0.0;
+        const double intakeRate = kCellFlowDischarge * record.restVentArea
+                                  * std::max(intakeSpeed, exhaustSpeed)
                                   / record.restVolume;
         rate[cell] += intakeRate;
         change[cell] +=
@@ -1834,8 +1983,9 @@ std::vector<double> advanceCellPressures(
         if (record.portAreaToNext <= 0.0) {
             continue;
         }
-        const double flow = kCellFlowDischarge * record.portAreaToNext
-                            * 0.5 * (speed[cell] + speed[cell + 1]);
+        const double flow = crossPortGain * kCellFlowDischarge
+                            * record.portAreaToNext * 0.5
+                            * (speed[cell] + speed[cell + 1]);
         const double difference =
             sim.cellPressure[cell + 1] - sim.cellPressure[cell];
         const double rateHere = flow / record.restVolume;
@@ -1947,8 +2097,11 @@ void applyPressure(SimBody &sim, const SimControls &controls)
     // free-flight term only, and with it off the field is exactly the fixed
     // freestream it was verified against.
     softwing::Vec3 systemVelocity;
+    softwing::Vec3 spinRate;
+    softwing::Vec3 spinCentre;
     if (controls.freeFlight) {
         systemVelocity = canopyVelocityOf(sim);
+        spinRate = canopySpinOf(sim, spinCentre);
     }
 
     sim.ribLiftCoefficient.assign(sim.ribChords.size(), 0.0);
@@ -1961,7 +2114,37 @@ void applyPressure(SimBody &sim, const SimControls &controls)
         if (length(chord) <= 0.0) {
             continue;
         }
-        const softwing::Vec3 relativeWind = freestream - systemVelocity;
+        // The wind THIS section meets, not the wind the wing as a whole
+        // meets. A rolling wing has one tip descending into the air and
+        // the other rising out of it; a yawing one has a tip running
+        // forward and a tip running back. Both give the outer sections a
+        // different angle AND a different speed from the inner ones, and
+        // that difference is the entirety of a wing's roll and yaw
+        // damping — without it an asymmetric input diverges instead of
+        // settling into a turn, which is what folded the wing at the same
+        // station every time a brake was held.
+        //
+        // Taken from the canopy's rigid-body spin (see canopySpinOf), so
+        // it carries the wing's rotation and nothing of the fabric's own
+        // motion. The pressure field's net force and pitch moment are
+        // both cancelled downstream by the polar pass; its ROLL and YAW
+        // moments are deliberately not — so this reaches the wing as
+        // exactly the damping it was missing and cannot disturb the
+        // trimmed force balance.
+        const softwing::Vec3 station =
+            nodes[rib.leadingNode].position + 0.25 * chord;
+        softwing::Vec3 spin = cross(spinRate, station - spinCentre);
+        // A tumbling transient must not hand a section a wind of its own
+        // invention: capped at the airspeed the wing is flying at, so a
+        // section can at most double or cancel its own wind.
+        const double spinSpeed = length(spin);
+        const double spinLimit =
+            kMaximumSpinWindRatio * length(freestream - systemVelocity);
+        if (spinSpeed > spinLimit && spinSpeed > 0.0) {
+            spin = (spinLimit / spinSpeed) * spin;
+        }
+        const softwing::Vec3 relativeWind =
+            freestream - systemVelocity - spin;
 
         // Both vectors flattened into the section's own plane, so the angle
         // measured is pitch and not some part of the wing's sweep or arc.
@@ -2009,8 +2192,16 @@ void applyPressure(SimBody &sim, const SimControls &controls)
         controls.cellPressureModel && !sim.cells.empty();
     std::vector<double> interior;
     if (cellsActive) {
-        interior = advanceCellPressures(sim, ribPressure,
-                                        freestream - systemVelocity);
+        // The air itself, not the bulk relative wind: the intakes subtract
+        // each vent face's own velocity, which is how a nose sweeping
+        // backwards through a pitch-up still rams itself full. That is a
+        // flow rate toward a target, not a load, so it does not re-open
+        // the per-node feedback the pressure field has to stay clear of.
+        interior = advanceCellPressures(
+            sim,
+            ribPressure,
+            freestream,
+            std::max(0.0, controls.crossPortGain));
     }
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const FaceAero &aero = sim.faceAero[face];
@@ -2084,6 +2275,103 @@ softwing::Vec3 canopyVelocityOf(const SimBody &sim)
     return mass > 0.0 ? velocity / mass : velocity;
 }
 
+// The canopy's rotation rate, fitted as if it were a RIGID body: solve
+// I·omega = L for the angular momentum L and inertia I of the canopy
+// nodes about their own centroid. That the fit is rigid is the whole
+// safety argument for using it: a rigid body has no breathing mode, so
+// none of the fabric's own motion reaches the pressure field through it,
+// and the per-node feedback that once talked the canopy flat (span 10.4 m
+// to 5.2 m, measured) cannot come back this way. What DOES reach it is
+// the part a wing must have — a rolling wing's tips move opposite ways
+// through the air, and that is where roll and yaw damping come from.
+softwing::Vec3 canopySpinOf(const SimBody &sim, softwing::Vec3 &centre)
+{
+    const auto &nodes = sim.body->nodes();
+    const std::size_t count =
+        sim.canopyNodeCount > 0 ? sim.canopyNodeCount : nodes.size();
+    softwing::Vec3 middle;
+    softwing::Vec3 mean;
+    double mass = 0.0;
+    for (std::size_t index = 0; index < count; ++index) {
+        const softwing::Node &node = nodes[index];
+        if (node.inverseMass <= 0.0) {
+            continue;
+        }
+        const double nodeMass = 1.0 / node.inverseMass;
+        middle += nodeMass * node.position;
+        mean += nodeMass * node.velocity;
+        mass += nodeMass;
+    }
+    if (mass <= 0.0) {
+        centre = {};
+        return {};
+    }
+    middle = middle / mass;
+    mean = mean / mass;
+    centre = middle;
+
+    softwing::Vec3 momentum;
+    double inertia[3][3] = {};
+    for (std::size_t index = 0; index < count; ++index) {
+        const softwing::Node &node = nodes[index];
+        if (node.inverseMass <= 0.0) {
+            continue;
+        }
+        const double nodeMass = 1.0 / node.inverseMass;
+        const softwing::Vec3 arm = node.position - middle;
+        momentum += nodeMass * cross(arm, node.velocity - mean);
+        const double armSquared = lengthSquared(arm);
+        const double component[3] = {arm.x, arm.y, arm.z};
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                inertia[row][column] +=
+                    nodeMass
+                    * ((row == column ? armSquared : 0.0)
+                       - component[row] * component[column]);
+            }
+        }
+    }
+
+    // Cramer, with a determinant guard: a canopy squashed into a plane
+    // has a singular inertia tensor and no defined rotation about the
+    // degenerate axis.
+    const double determinant =
+        inertia[0][0]
+            * (inertia[1][1] * inertia[2][2] - inertia[1][2] * inertia[2][1])
+        - inertia[0][1]
+              * (inertia[1][0] * inertia[2][2] - inertia[1][2] * inertia[2][0])
+        + inertia[0][2]
+              * (inertia[1][0] * inertia[2][1] - inertia[1][1] * inertia[2][0]);
+    const double scale = std::abs(inertia[0][0]) + std::abs(inertia[1][1])
+                         + std::abs(inertia[2][2]);
+    if (std::abs(determinant) <= 1.0e-9 * scale * scale * scale) {
+        return {};
+    }
+    const double right[3] = {momentum.x, momentum.y, momentum.z};
+    double solution[3] = {};
+    for (int axis = 0; axis < 3; ++axis) {
+        double swapped[3][3];
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                swapped[row][column] = column == axis ? right[row]
+                                                      : inertia[row][column];
+            }
+        }
+        solution[axis] =
+            (swapped[0][0]
+                 * (swapped[1][1] * swapped[2][2]
+                    - swapped[1][2] * swapped[2][1])
+             - swapped[0][1]
+                   * (swapped[1][0] * swapped[2][2]
+                      - swapped[1][2] * swapped[2][0])
+             + swapped[0][2]
+                   * (swapped[1][0] * swapped[2][1]
+                      - swapped[1][1] * swapped[2][0]))
+            / determinant;
+    }
+    return {solution[0], solution[1], solution[2]};
+}
+
 }  // namespace
 
 WingAeroSample sampleWingAero(const SimBody &sim,
@@ -2136,16 +2424,37 @@ WingAeroSample sampleWingAero(const SimBody &sim,
     }
     sample.spanAxis = spanAxis;
 
-    // Mean live chord, length-weighted so a tip rib flapping about cannot
-    // steer the whole wing's angle, flattened into the plane normal to the
-    // span so sweep and arc do not contaminate the pitch measurement.
+    // Mean live attitude line, length-weighted so a tip rib flapping about
+    // cannot steer the whole wing's angle, flattened into the plane normal
+    // to the span so sweep and arc do not contaminate the pitch
+    // measurement.
+    //
+    // Measured leading edge to the 40%-chord reference node, NOT to the
+    // trailing edge. A brake pulls the trailing edge down; off the full
+    // chord that reads as the whole wing pitching up, and the polar
+    // answers with more lift, more induced drag, less airspeed and
+    // therefore a still higher angle — a loop that stalled the wing a few
+    // seconds after a 20 cm pull with the pilot's hand held still. The
+    // forward 40% is fabric the brake cannot move, so this line carries
+    // the wing's attitude and none of the input. The brake's real effect
+    // — camber and drag, at essentially unchanged angle of attack —
+    // arrives through the polar's own brake terms.
     softwing::Vec3 chordSum;
     for (const RibChord &rib : sim.ribChords) {
-        chordSum += nodes[rib.trailingNode].position
-                    - nodes[rib.leadingNode].position;
+        // Scaled back to a full chord so the angle is unchanged but the
+        // length weighting still favours the big central ribs.
+        chordSum += (nodes[rib.referenceNode].position
+                     - nodes[rib.leadingNode].position)
+                    / kAttitudeReferenceStation;
     }
-    const softwing::Vec3 chordInPlane =
-        chordSum - dot(chordSum, spanAxis) * spanAxis;
+    // Rotated back onto the chord by the rest-pose offset between the two
+    // lines, so this reads the same angle the full chord read in the rest
+    // pose — and keeps reading the wing's attitude, not the pilot's hand,
+    // once a brake is pulled.
+    const softwing::Vec3 chordInPlane = rotateAbout(
+        chordSum - dot(chordSum, spanAxis) * spanAxis,
+        spanAxis,
+        sim.attitudeOffsetRadians);
     const softwing::Vec3 windInPlane =
         relative - dot(relative, spanAxis) * spanAxis;
     if (length(chordInPlane) <= 1.0e-6 || length(windInPlane) <= 1.0e-6) {
@@ -2285,10 +2594,107 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
 
     const double q = sample.dynamicPressure;
     const double area = sim.planformArea;
+
+    const auto &nodes = sim.body->nodes();
+    const auto &triangles = sim.body->triangles();
+
+    // FABRIC DRAG. The polar above is the force of a WING: one angle of
+    // attack, the rest planform, a lift and a drag coefficient drawn from
+    // an aerofoil. A canopy that has folded is not a wing and has no
+    // meaningful angle — but it is still several square metres of cloth
+    // being dragged through the air edge-on to nothing, and without this
+    // term the model gives it none of that. Measured on the Swoop: after
+    // an asymmetric fold the risers carried 321 N of a 927 N system, the
+    // whole machine fell at two thirds of g, and in a fall that steep the
+    // pilot has no apparent weight left to tension the lines with — so
+    // nothing pulled the wing back into shape and the collapse was
+    // permanent by construction.
+    //
+    // Half the sum of |A.w| over a closed surface is its frontal area
+    // along w. Taking the LIVE surface's frontal area minus the frontal
+    // area the DESIGNED surface would present at the same attitude leaves
+    // exactly the bluff-body area the deformation created: identically
+    // zero on a wing holding its shape, so the tunnel calibration and the
+    // trimmed glide are untouched, and square metres once it is a bag.
+    // Directed along the wind, so it is pure dissipation — it can slow
+    // the system down and can never drive it, which is what keeps it out
+    // of the velocity loops the rest of the stability stack avoids.
+    double fabricDrag = 0.0;
+    if (!sim.restFaceAreas.empty()
+        && sim.restFaceAreas.size() >= sim.skinTriangleCount) {
+        double liveFrontal = 0.0;
+        for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+            const softwing::Triangle &tri = triangles[face];
+            const softwing::Vec3 areaVector =
+                0.5
+                * cross(nodes[tri.b].position - nodes[tri.a].position,
+                        nodes[tri.c].position - nodes[tri.a].position);
+            liveFrontal += std::abs(dot(areaVector, sample.windDirection));
+        }
+        liveFrontal *= 0.5;
+
+        // The same wind, written in the rest pose's own frame, so the
+        // reference follows the wing's attitude instead of being frozen
+        // at the angle it was built at.
+        double restFrontal = 0.0;
+        const softwing::Vec3 liveChordAxis = normalized(
+            sample.windDirection
+            - dot(sample.windDirection, sample.spanAxis) * sample.spanAxis);
+        if (length(liveChordAxis) > 0.0) {
+            const softwing::Vec3 restChordAxis = normalized(
+                sim.restChordDirection
+                - dot(sim.restChordDirection, sim.restSpanAxis)
+                      * sim.restSpanAxis);
+            const softwing::Vec3 liveUp =
+                cross(sample.spanAxis, liveChordAxis);
+            const softwing::Vec3 restUp =
+                cross(sim.restSpanAxis, restChordAxis);
+            const softwing::Vec3 restWind =
+                dot(sample.windDirection, sample.spanAxis) * sim.restSpanAxis
+                + dot(sample.windDirection, liveChordAxis) * restChordAxis
+                + dot(sample.windDirection, liveUp) * restUp;
+            for (const softwing::Vec3 &areaVector : sim.restFaceAreas) {
+                restFrontal += std::abs(dot(areaVector, restWind));
+            }
+            restFrontal *= 0.5;
+        }
+        // A fold stacks fabric in its own wake, and the area sum counts
+        // every layer where the air only meets the first — measured at
+        // 9.1 m2 on a wing whose entire planform is 15. Capped at the
+        // planform, which is the largest silhouette a canopy has.
+        liveFrontal = std::min(liveFrontal, area);
+        sim.lastExcessFrontalArea =
+            std::max(0.0, liveFrontal - kFabricDragOnset * restFrontal);
+        fabricDrag =
+            q * kFabricDragCoefficient * sim.lastExcessFrontalArea;
+
+        // Drag decelerates; it does not propel. Bounded by the impulse
+        // that would bring the system to rest against the air within this
+        // frame, so however wrong the area estimate goes, the force can
+        // null the relative motion and never reverse it. Without this the
+        // term pushed a collapsed wing UPWARD — 2900 N of "drag" against
+        // 927 N of weight, which is not a drag any more.
+        double systemMass = 0.0;
+        for (const softwing::Node &node : nodes) {
+            if (node.inverseMass > 0.0) {
+                systemMass += 1.0 / node.inverseMass;
+            }
+        }
+        const double stoppingForce =
+            systemMass * sample.airspeed / simulationTimeStep;
+        if (fabricDrag > stoppingForce) {
+            fabricDrag = stoppingForce;
+            sim.lastExcessFrontalArea =
+                q > 0.0 ? fabricDrag / (q * kFabricDragCoefficient) : 0.0;
+        }
+    }
+    sim.lastFabricDragNewtons = fabricDrag;
+
     const softwing::Vec3 wingForce =
         q * area
-        * (sample.liftCoefficient * sample.liftDirection
-           + sample.dragCoefficient * sample.windDirection);
+              * (sample.liftCoefficient * sample.liftDirection
+                 + sample.dragCoefficient * sample.windDirection)
+        + fabricDrag * sample.windDirection;
 
     // What the polar wants minus what the pressure field already made: the
     // pressure resultant is cancelled in full — its lift is unrealistically
@@ -2296,10 +2702,10 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     // cannot be fixed independently — and the polar's force imposed in its
     // place. Spread by area so the local fabric loads, which are the
     // pressure field's actual job, are disturbed as little as possible.
+    // The fabric drag rides in here too: everything the pressure field
+    // makes is cancelled, so a term that stayed out of wingForce would be
+    // cancelled along with it and reach the system as nothing at all.
     const softwing::Vec3 correction = wingForce - aerodynamicForce(sim);
-
-    const auto &nodes = sim.body->nodes();
-    const auto &triangles = sim.body->triangles();
 
     // Where the total resultant must act: the hang-line-derived fraction
     // of the live mean chord. The line geometry was drawn for a wing whose
@@ -3347,6 +3753,17 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
     if (controls.freeFlight) {
         recentreSystem(sim);
     }
+
+    // Carry the air past the wing. In the wing's own frame — the one the
+    // camera shows — a parcel of air moves at the relative wind, so this
+    // integrates exactly that: the glide and the sink in free flight, the
+    // tunnel's own airflow when the wing is pinned. Nothing else in the
+    // model records that the wing is travelling, because both modes keep
+    // it at the origin.
+    sim.airTravel += simulationTimeStep
+                     * (freestreamVelocity(sim, controls)
+                        - (controls.freeFlight ? canopyVelocityOf(sim)
+                                               : softwing::Vec3{}));
 }
 
 bool beginGrab(SimBody &sim, std::size_t junctionNode)

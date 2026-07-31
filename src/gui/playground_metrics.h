@@ -241,6 +241,45 @@ void nodeStrainFields(const SimBody &sim,
                                               const SimControls &controls,
                                               std::size_t constraint);
 
+// Three collapse diagnostics, shared by the bench and the Playground's
+// session log so a number seen on screen can be reproduced headless.
+//
+// The cell that has lost most of its section. "The same place every time"
+// is a claim about a span station, so the answer has to name one.
+struct WeakCellReport
+{
+    std::size_t index = 0;
+    double x = 0.0;             // mesh x of the bay's leading edge, m
+    double sectionRatio = 1.0;  // live / rest section area
+    double pressurePascal = 0.0;
+};
+[[nodiscard]] WeakCellReport weakestCell(const SimBody &sim);
+
+// The sharpest bend in the leading edge. A wing whose cells all keep
+// their section but whose span has halved has not deflated, it has
+// folded — and this says where the hinge is.
+struct KinkReport
+{
+    std::size_t rib = 0;
+    double degrees = 0.0;
+    double x = 0.0;
+    double spanFraction = 0.0;   // 0..1 along the span-ordered ribs
+};
+[[nodiscard]] KinkReport sharpestKink(const SimBody &sim);
+
+// What the lines are carrying. In flight the risers hold the pilot up, so
+// riserNewtons sits at his weight; far below it means the system is
+// falling faster than the canopy can hold it and nothing is pulling the
+// wing back into shape.
+struct LineLoadReport
+{
+    double riserNewtons = 0.0;
+    std::size_t slackSegments = 0;
+    std::size_t totalSegments = 0;
+};
+[[nodiscard]] LineLoadReport lineLoads(const SimBody &sim,
+                                       const SimControls &controls);
+
 // Step until the measurement converges (quiescent, or stationary in
 // agitation and resultant) or maxSeconds of simulated time has passed,
 // then measure. Shared by the GUI sweep and the bench so any reported

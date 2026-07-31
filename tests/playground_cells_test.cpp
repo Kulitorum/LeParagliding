@@ -274,8 +274,8 @@ void testVentGating()
         node.position.y = 0.8 - node.position.y;
         node.position.z = -node.position.z;
     }
-    // A cell below its target must stay empty: a reversed mouth cannot
-    // scoop ram air.
+    // A cell below its target must stay empty: this mouth is moving
+    // backwards through the air it sits in, and nothing enters that way.
     sim.cellPressure = {0.0, 0.0};
     for (int frame = 0; frame < 60; ++frame) {
         pg::applyPressure(sim, controls);
@@ -287,6 +287,78 @@ void testVentGating()
     pg::applyPressure(sim, controls);
     check(sim.cellPressure[0] < 160.0,
           "an over-pressured cell exhausts even facing away");
+}
+
+// The other half of that rule: what feeds a mouth is ITS OWN travel
+// through the air, whatever direction the mouth happens to point. Same
+// wing pitched dead away from the airflow as above, but now the whole
+// thing is being carried downwind faster than the air moves, so every
+// mouth is going mouth-first through it. It must fill — a wing that has
+// pitched, rolled or swung has not stopped flying, and reading its
+// intakes against one bulk wind direction is what left a tilted wing
+// unable to take its air back.
+void testMovingMouthFeeds()
+{
+    pg::SimBody sim = build(true);
+    pg::SimControls controls;
+    for (softwing::Node &node : sim.body->nodes()) {
+        node.position.y = 0.8 - node.position.y;
+        node.position.z = -node.position.z;
+    }
+    const double airspeed =
+        std::sqrt(2.0 * controls.pressurePascal / 1.225);
+    for (softwing::Node &node : sim.body->nodes()) {
+        node.velocity = Vec3{0.0, 2.0 * airspeed, 0.0};
+    }
+    sim.cellPressure = {0.0, 0.0};
+    for (int frame = 0; frame < 600; ++frame) {
+        pg::applyPressure(sim, controls);
+    }
+    check(sim.cellPressure[0] > 0.7 * controls.pressurePascal
+              && sim.cellPressure[1] > 0.7 * controls.pressurePascal,
+          "a mouth travelling mouth-first through the air fills its cell");
+}
+
+// A mouth folded shut is shut BOTH ways. Letting a cell blow its air out
+// through an opening it can no longer take air in through is a ratchet:
+// one slow moment empties the wing and nothing can ever refill it.
+void testPinchedMouthHoldsAir()
+{
+    pg::SimBody sim = build(true);
+    pg::SimControls controls;
+    pg::applyPressure(sim, controls);
+    const double charged = sim.cellPressure[0];
+    check(charged > 1.0, "the cells start charged");
+
+    // Every vent node in the wing onto one point, so no mouth has any
+    // opening left for air to cross.
+    std::vector<std::size_t> ventNodes;
+    for (const pg::SimCell &cell : sim.cells) {
+        for (const std::size_t face : cell.ventFaces) {
+            const auto &tri = sim.body->triangles()[face];
+            ventNodes.push_back(tri.a);
+            ventNodes.push_back(tri.b);
+            ventNodes.push_back(tri.c);
+        }
+    }
+    Vec3 centre;
+    for (const std::size_t node : ventNodes) {
+        centre += sim.body->nodes()[node].position;
+    }
+    centre = centre / static_cast<double>(ventNodes.size());
+    for (const std::size_t node : ventNodes) {
+        sim.body->nodes()[node].position = centre;
+    }
+
+    // The tunnel off would empty an open mouth (testTunnelOffDeflates);
+    // a shut one has to hold what it has.
+    controls.pressurePascal = 0.0;
+    for (int frame = 0; frame < 300; ++frame) {
+        pg::applyPressure(sim, controls);
+    }
+    check(sim.cellPressure[0] > 0.9 * charged
+              && sim.cellPressure[1] > 0.9 * charged,
+          "a mouth folded shut cannot dump the cell's air either");
 }
 
 void testTunnelOffDeflates()
@@ -363,6 +435,8 @@ int main()
     testSqueezeResponse();
     testIntakeRelaxation();
     testVentGating();
+    testMovingMouthFeeds();
+    testPinchedMouthHoldsAir();
     testTunnelOffDeflates();
     testRateClamp();
     testSqueezeCap();

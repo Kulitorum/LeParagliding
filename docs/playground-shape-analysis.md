@@ -104,6 +104,60 @@ false` reproduces the old stamp bit for bit; the bench takes
 −6° excursion the old model parks permanently deflated while the cell
 model re-pressurises every section back to rest volume.
 
+### What the wing meets, and what a brake does
+
+Three corrections to the free-flight force model, all measured against
+sessions where a wing folded and never came back.
+
+**Intakes are fed by their own motion.** Each vent face's inflow is the
+flux of the relative wind through that face — `Σ (v_air − v_fabric)·A⃗`,
+normalised against the scoop the designed mouth makes, so the rest pose
+counts as fully open. It replaces a gate that projected the mouth onto
+one bulk wind direction for the whole wing: a wing that had pitched,
+rolled or swung then read as sealed everywhere at once, and since it
+could still empty, it never came back. Exhaust is gated on the mouth's
+live *aperture* (`|Σ A⃗|` over its rest value) rather than its direction,
+so a folded mouth cannot dump air it can no longer take back.
+
+**Deformed fabric has drag.** Half the sum of `|A⃗·ŵ|` over a closed
+surface is its frontal area along ŵ; the live skin's, minus 1.25× the
+designed skin's at the same attitude, is the bluff-body area the
+deformation created — zero on a wing holding its shape (a loaded canopy
+balloons 7–20% over the drawing, hence the deadband), square metres once
+it is a bag. Directed downwind, so it is pure dissipation. Without it a
+folded canopy made almost no force at all: the risers carried 321 N of a
+927 N system, the whole machine fell at two thirds of g, and in a fall
+that steep the pilot has no apparent weight left to tension the lines
+with — so nothing pulled the wing back into shape. Two bounds keep it
+honest: the live frontal area is capped at the planform (a fold stacks
+layers the area sum counts and the air does not — 9.1 m² on a 15 m²
+wing), and the force at the impulse that would null the relative motion
+within one frame, without which it pushed a collapsed wing *upward*.
+
+**Each rib meets its own wind, and a brake is not a pitch input.** The
+per-rib relative wind now includes the canopy's rigid-body spin (`I·ω =
+L` over the canopy nodes about their centroid), which is where roll and
+yaw damping come from — a rolling wing has one tip descending into the
+air and the other rising out of it. The fit is rigid on purpose: a rigid
+body has no breathing mode, so none of the fabric's own motion reaches
+the pressure field through it. And the wing-level angle of attack is
+measured from the leading edge to a **40%-chord extrados node**
+(`RibChord::referenceNode`), rotated back onto the chord by a rest-pose
+offset (`SimBody::attitudeOffsetRadians`) — that calibration is not
+optional, since the reference node rides tens of degrees above the chord
+on the aerofoil's own thickness. Measured off the full chord, a brake
+pull rotated the LE→TE line and read as the whole wing pitching up; the
+polar answered with more lift, more induced drag, less airspeed and
+therefore a still higher angle. With a hand held still at 20 cm, α ran
+20.9 → 23.1 → 29.4 → 76°. It now goes 13.2 → 15.5 → 16.4°.
+
+Known remaining gap: the polar has no per-side split. One brake still
+enters it as `(left + right)/2` — a symmetric half-pull — so the turn is
+left entirely to the pressure distribution, and a one-sided pull still
+departs after several seconds. Absolute tunnel loads moved with the α
+reference (gnuC2: 1406 → 1278 N lift, L/D 7.79 → 7.66); settle time,
+span, area, volume and flags did not.
+
 ### Fabric contact
 
 Without contact, folded fabric passes freely through itself and through

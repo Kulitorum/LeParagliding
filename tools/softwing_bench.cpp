@@ -12,6 +12,7 @@
 //   softwing-bench <lep-sim.json> [--subdiv N] [--detailed-ribs]
 //                  [--frames N] [--warmup N] [--threads N]
 //                  [--substeps N] [--iterations N] [--csv]
+//                  [--glide N] [--brake CM] [--release SECONDS]
 //                  [--shape [SECONDS]] [--shape-sweep FROM:TO:STEP]
 //                  [--tuck [PULL_CM]] [--dive [DEGREES]] [--no-cells]
 //                  [--contact] [--no-flight-load]
@@ -67,6 +68,15 @@ struct Options
     bool swing = false;
     bool polar = false;
     double brakeMetres = 0.0;
+    // Per-side pulls, in the SOLVER's sense (left = negative mesh x).
+    // Used instead of brakeMetres when either was given.
+    double brakeLeftMetres = 0.0;
+    double brakeRightMetres = 0.0;
+    bool asymmetricBrake = false;
+    // Frames the pull is eased on over, 0 for a step.
+    int rampFrames = 0;
+    // Frame the brakes come back up on, 0 for "never let go".
+    int releaseFrames = 0;
     int glideFrames = 0;
     bool freeFlight = false;
     bool shape = false;
@@ -137,6 +147,28 @@ struct Options
             int centimetres = 0;
             if (!value(centimetres)) return false;
             options.brakeMetres = centimetres / 100.0;
+        } else if (argument == "--brake-left"
+                   || argument == "--brake-right") {
+            // One brake only: an asymmetric pull is a different animal
+            // from a symmetric one, and it is the one that turns a wing.
+            int centimetres = 0;
+            if (!value(centimetres)) return false;
+            (argument == "--brake-left" ? options.brakeLeftMetres
+                                        : options.brakeRightMetres) =
+                centimetres / 100.0;
+            options.asymmetricBrake = true;
+        } else if (argument == "--release") {
+            int seconds = 0;
+            if (!value(seconds)) return false;
+            options.releaseFrames = seconds * 60;
+        } else if (argument == "--ramp") {
+            // A hand does not step a brake on. Ramping matters: a step to
+            // 30 cm tumbles a wing that survives the same pull applied
+            // over a few seconds, so a step cannot reproduce what a pilot
+            // reports feeling.
+            int seconds = 0;
+            if (!value(seconds)) return false;
+            options.rampFrames = seconds * 60;
         } else if (argument == "--glide") {
             options.glideFrames = 1800;
             if (index + 1 < argc && argv[index + 1][0] != '-') {
@@ -476,7 +508,8 @@ int main(int argc, char **argv)
                      "[--gpu|--gpu-jacobi] [--csv] "
                      "[--shape [SECONDS]] [--shape-sweep FROM:TO:STEP] "
                      "[--tuck [PULL_CM]] [--dive [DEGREES]] [--no-cells] "
-                     "[--contact] [--no-flight-load]\n");
+                     "[--contact] [--no-flight-load] "
+                     "[--glide N] [--brake CM] [--release SECONDS]\n");
         return 2;
     }
 
@@ -548,6 +581,101 @@ int main(int argc, char **argv)
         std::chrono::duration<double>(std::chrono::steady_clock::now()
                                       - buildStart)
             .count();
+
+    // The cross-ports: the only path back into a cell whose own mouth
+    // has folded shut, so a run of bays with no port is a run that
+    // cannot re-inflate from its neighbours at all.
+    if (!sim.cells.empty()) {
+        std::size_t ported = 0;
+        double smallest = 1e30;
+        double largest = 0.0;
+        std::size_t run = 0;
+        std::size_t worstRun = 0;
+        std::size_t worstEnd = 0;
+        for (std::size_t cell = 0; cell + 1 < sim.cells.size(); ++cell) {
+            const double area = sim.cells[cell].portAreaToNext;
+            if (area > 0.0) {
+                ++ported;
+                smallest = std::min(smallest, area);
+                largest = std::max(largest, area);
+                run = 0;
+            } else {
+                ++run;
+                if (run > worstRun) {
+                    worstRun = run;
+                    worstEnd = cell;
+                }
+            }
+        }
+        std::printf("cross-ports     %zu of %zu rib crossings ported, "
+                    "%.4f..%.4f m2",
+                    ported,
+                    sim.cells.size() - 1,
+                    ported > 0 ? smallest : 0.0,
+                    largest);
+        if (worstRun > 0) {
+            std::printf("; longest unported run %zu at bays %zu..%zu",
+                        worstRun,
+                        worstEnd + 1 - worstRun,
+                        worstEnd);
+        }
+        std::printf("\n");
+    }
+
+    // Where along the span the canopy actually has lines on it. A wing
+    // folds where nothing holds it, so the longest run of bays with no
+    // attachment is the first thing to check against a hinge that keeps
+    // appearing at the same station.
+    if (!sim.cells.empty() && !sim.lineAttachmentNodes.empty()) {
+        std::vector<std::size_t> order;
+        order.push_back(sim.cells.front().ribs[0]);
+        for (const pg::SimCell &cell : sim.cells) {
+            order.push_back(cell.ribs[1]);
+        }
+        std::vector<double> station(order.size(), 0.0);
+        for (std::size_t index = 0; index < order.size(); ++index) {
+            station[index] =
+                sim.body->nodes()[sim.ribChords[order[index]].leadingNode]
+                    .position.x;
+        }
+        std::vector<bool> supported(sim.cells.size(), false);
+        for (const std::size_t node : sim.lineAttachmentNodes) {
+            const double x = sim.body->nodes()[node].position.x;
+            for (std::size_t bay = 0; bay < sim.cells.size(); ++bay) {
+                const double low = std::min(station[bay], station[bay + 1]);
+                const double high = std::max(station[bay], station[bay + 1]);
+                if (x >= low && x <= high) {
+                    supported[bay] = true;
+                }
+            }
+        }
+        std::size_t run = 0;
+        std::size_t worstRun = 0;
+        std::size_t worstEnd = 0;
+        for (std::size_t bay = 0; bay < supported.size(); ++bay) {
+            run = supported[bay] ? 0 : run + 1;
+            if (run > worstRun) {
+                worstRun = run;
+                worstEnd = bay;
+            }
+        }
+        std::printf("line support    %zu of %zu bays carry an attachment; "
+                    "longest gap %zu bays",
+                    static_cast<std::size_t>(
+                        std::count(supported.begin(), supported.end(), true)),
+                    supported.size(),
+                    worstRun);
+        if (worstRun > 0) {
+            std::printf(" at span %.2f..%.2f (x %+.2f..%+.2f m)",
+                        static_cast<double>(worstEnd + 1 - worstRun)
+                            / static_cast<double>(supported.size()),
+                        static_cast<double>(worstEnd + 1)
+                            / static_cast<double>(supported.size()),
+                        station[worstEnd + 1 - worstRun],
+                        station[worstEnd + 1]);
+        }
+        std::printf("\n");
+    }
 
     // The designed shape, before any pressure has acted on it: the yardstick
     // for how far the solver lets the fabric balloon.
@@ -875,9 +1003,33 @@ int main(int argc, char **argv)
         };
         for (int frame = 0; frame < options.glideFrames; ++frame) {
             // Brakes come on after two seconds of hands-up flight, so the
-            // trim settles first and the brake response is legible.
-            controls.brakeLeft = controls.brakeRight =
-                frame >= 120 ? options.brakeMetres : 0.0;
+            // trim settles first and the brake response is legible, and go
+            // off again at --release. Releasing is the half of a hard pull
+            // that a wing has to survive: hands up, a real canopy surges
+            // and flies away, so a run that never lets go cannot tell a
+            // recoverable stall from a permanent one.
+            const bool pulling =
+                frame >= 120
+                && (options.releaseFrames <= 0
+                    || frame < options.releaseFrames);
+            const double reach =
+                options.rampFrames > 0
+                    ? std::min(1.0,
+                               static_cast<double>(frame - 120)
+                                   / options.rampFrames)
+                    : 1.0;
+            controls.brakeLeft =
+                pulling ? reach
+                              * (options.asymmetricBrake
+                                     ? options.brakeLeftMetres
+                                     : options.brakeMetres)
+                        : 0.0;
+            controls.brakeRight =
+                pulling ? reach
+                              * (options.asymmetricBrake
+                                     ? options.brakeRightMetres
+                                     : options.brakeMetres)
+                        : 0.0;
             pg::stepSimulation(sim, controls);
             // Finer cadence over the first second, where launch transients
             // live.
@@ -948,16 +1100,76 @@ int main(int argc, char **argv)
                     ++tailCount;
                 }
             }
+            // The cell states, low..high: a wing that has stopped feeding
+            // its intakes shows up here long before the shape does.
+            double cellLow = 0.0;
+            double cellHigh = 0.0;
+            if (!sim.cellPressure.empty()) {
+                cellLow = 1e30;
+                cellHigh = -1e30;
+                for (const double pressure : sim.cellPressure) {
+                    cellLow = std::min(cellLow, pressure);
+                    cellHigh = std::max(cellHigh, pressure);
+                }
+            }
             std::printf("           residual F (%.0f %.0f %.0f) N,"
                         "  pitch M %.0f N.m, chord pitch %+.1f deg,"
-                        "  LE dp %.0f Pa, TE dp %.0f Pa\n",
+                        "  LE dp %.0f Pa, TE dp %.0f Pa,"
+                        "  cells %.0f..%.0f Pa\n",
                         sim.lastForceResidual.x,
                         sim.lastForceResidual.y,
                         sim.lastForceResidual.z,
                         sim.lastPitchResidual,
                         pitchOf(trailingMean - leadingMean),
                         noseCount > 0 ? nosePressure / noseCount : 0.0,
-                        tailCount > 0 ? tailPressure / tailCount : 0.0);
+                        tailCount > 0 ? tailPressure / tailCount : 0.0,
+                        cellLow,
+                        cellHigh);
+            // What the lines are actually carrying. A flying wing holds
+            // the pilot up, so this has to sit at his weight; anything
+            // far below it means the system is falling faster than the
+            // canopy can hold it and the lines have gone slack — at
+            // which point nothing is pulling the wing into shape.
+            double riserLoad = 0.0;
+            std::size_t slackSegments = 0;
+            for (const pg::LineSegment &segment : sim.lineSegments) {
+                const double tension = pg::constraintTensionNewtons(
+                    sim, controls, segment.constraint);
+                if (tension < 1.0) {
+                    ++slackSegments;
+                }
+                for (const std::size_t carabiner : sim.carabinerNodes) {
+                    if (segment.a == carabiner || segment.b == carabiner) {
+                        riserLoad += tension;
+                        break;
+                    }
+                }
+            }
+            const pg::WeakCellReport weak = pg::weakestCell(sim);
+            const pg::KinkReport kink = pg::sharpestKink(sim);
+            std::printf("           risers %6.0f N of %.0f N weight,"
+                        "  %zu of %zu line segments slack,"
+                        "  fabric drag %5.0f N over %.1f m2\n",
+                        riserLoad,
+                        (sim.pilotMass
+                         + pg::fabricArealDensity * sim.planformArea)
+                            * 9.80665,
+                        slackSegments,
+                        sim.lineSegments.size(),
+                        sim.lastFabricDragNewtons,
+                        sim.lastExcessFrontalArea);
+            std::printf("           weakest cell #%zu at x %+.2f m: "
+                        "section %.0f%% of rest, %.0f Pa;"
+                        "  kink %.0f deg at rib %zu"
+                        " (span %.2f, x %+.2f m)\n",
+                        weak.index,
+                        weak.x,
+                        100.0 * weak.sectionRatio,
+                        weak.pressurePascal,
+                        kink.degrees,
+                        kink.rib,
+                        kink.spanFraction,
+                        kink.x);
         }
         return 0;
     }

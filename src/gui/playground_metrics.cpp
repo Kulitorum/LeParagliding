@@ -456,6 +456,109 @@ double constraintTensionNewtons(const SimBody &sim,
                : tension;
 }
 
+WeakCellReport weakestCell(const SimBody &sim)
+{
+    WeakCellReport worst;
+    if (!sim.body) {
+        return worst;
+    }
+    const auto &nodes = sim.body->nodes();
+    for (std::size_t index = 0; index < sim.cells.size(); ++index) {
+        const SimCell &cell = sim.cells[index];
+        if (cell.restSectionArea <= 0.0) {
+            continue;
+        }
+        double area = 0.0;
+        for (const std::size_t rib : cell.ribs) {
+            softwing::Vec3 sum;
+            const auto &loop = sim.ribLoopNodes[rib];
+            for (std::size_t node = 0; node < loop.size(); ++node) {
+                sum += cross(nodes[loop[node]].position,
+                             nodes[loop[(node + 1) % loop.size()]].position);
+            }
+            area += 0.5 * length(sum);
+        }
+        const double ratio = 0.5 * area / cell.restSectionArea;
+        if (ratio < worst.sectionRatio) {
+            worst.index = index;
+            worst.sectionRatio = ratio;
+            worst.x =
+                0.5
+                * (nodes[sim.ribChords[cell.ribs[0]].leadingNode].position.x
+                   + nodes[sim.ribChords[cell.ribs[1]].leadingNode]
+                         .position.x);
+            worst.pressurePascal = index < sim.cellPressure.size()
+                                       ? sim.cellPressure[index]
+                                       : 0.0;
+        }
+    }
+    return worst;
+}
+
+KinkReport sharpestKink(const SimBody &sim)
+{
+    KinkReport worst;
+    if (!sim.body || sim.cells.empty()) {
+        return worst;
+    }
+    // Span order comes off the cells: they were built from ribs sorted
+    // along the rest span axis, adjacent pairs in order.
+    std::vector<std::size_t> order;
+    order.push_back(sim.cells.front().ribs[0]);
+    for (const SimCell &cell : sim.cells) {
+        order.push_back(cell.ribs[1]);
+    }
+    const auto &nodes = sim.body->nodes();
+    for (std::size_t index = 1; index + 1 < order.size(); ++index) {
+        const softwing::Vec3 before =
+            nodes[sim.ribChords[order[index]].leadingNode].position
+            - nodes[sim.ribChords[order[index - 1]].leadingNode].position;
+        const softwing::Vec3 after =
+            nodes[sim.ribChords[order[index + 1]].leadingNode].position
+            - nodes[sim.ribChords[order[index]].leadingNode].position;
+        if (length(before) <= 0.0 || length(after) <= 0.0) {
+            continue;
+        }
+        const double cosine =
+            std::clamp(dot(before, after) / (length(before) * length(after)),
+                       -1.0,
+                       1.0);
+        const double degrees = std::acos(cosine) * 180.0 / kPi;
+        if (degrees > worst.degrees) {
+            worst.rib = order[index];
+            worst.degrees = degrees;
+            worst.x =
+                nodes[sim.ribChords[order[index]].leadingNode].position.x;
+            worst.spanFraction = static_cast<double>(index)
+                                 / static_cast<double>(order.size() - 1);
+        }
+    }
+    return worst;
+}
+
+LineLoadReport lineLoads(const SimBody &sim, const SimControls &controls)
+{
+    LineLoadReport report;
+    if (!sim.body) {
+        return report;
+    }
+    report.totalSegments = sim.lineSegments.size();
+    for (const LineSegment &segment : sim.lineSegments) {
+        const double tension =
+            constraintTensionNewtons(sim, controls, segment.constraint);
+        if (tension < 1.0) {
+            ++report.slackSegments;
+        }
+        for (const std::size_t carabiner : sim.carabinerNodes) {
+            if (segment.a == carabiner || segment.b == carabiner) {
+                report.riserNewtons += tension;
+                break;
+            }
+        }
+    }
+    return report;
+}
+
 ShapeReport measureShape(const SimBody &sim,
                          const SimControls &controls,
                          const ShapeBaseline &baseline)

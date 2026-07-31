@@ -177,6 +177,13 @@ struct RibChord
 {
     std::size_t leadingNode = 0;
     std::size_t trailingNode = 0;
+    // A skin node at ~40% chord on the extrados: forward of the flap, so
+    // no brake pull can move it. leadingNode->referenceNode is therefore
+    // an attitude line the pilot's hands cannot rotate, which is what the
+    // wing-level angle of attack is measured from. The full chord still
+    // sets the chordwise pressure distribution and the section's own
+    // shape — it is only the ANGLE that must not follow the flap.
+    std::size_t referenceNode = 0;
     // Rib plane normal at rest, i.e. the local span direction. The section's
     // angle of attack is measured in the plane perpendicular to it.
     softwing::Vec3 spanAxis;
@@ -214,11 +221,18 @@ struct SimCell
     std::vector<std::size_t> ventFaces;
     // Rest magnitudes the live signals are measured against.
     double restVentArea = 0.0;      // m², sum of vent face areas
-    // The vent's rest-pose projection onto the build-time airflow, m².
-    // The live projection over this one is the intake's opening fraction:
-    // the designed pose counts as fully open, and the fraction falls as
-    // the nose rotates the intake away from the wind.
+    // The volume of air the designed mouth scoops per metre of travel, m²
+    // — its rest-pose area vector projected on the build-time airflow. The
+    // live scoop over this one is the speed air enters at, so the designed
+    // pose counts as fully open and no mouth is charged for the cosine it
+    // was drawn with.
     double restVentProjection = 0.0;
+    // The mouth's rest-pose opening, m²: the LENGTH of its summed area
+    // vector, which for any patch is the area of the flat opening its rim
+    // bounds. Rotating the wing cannot change it and folding the mouth
+    // shut takes it to zero, which is exactly the difference between "the
+    // mouth points somewhere else now" and "the mouth is closed".
+    double restVentAperture = 0.0;
     double restSectionArea = 0.0;   // m², mean of the two rib loop areas
     double restVolume = 0.0;        // m³, section area × rib spacing
     // Cross-port area through the rib shared with the NEXT cell in span
@@ -316,6 +330,11 @@ struct SimBody
     // system-level forces onto the fabric instead was measured denting the
     // nose and folding the tips. Empty when the mesh has no lines.
     std::vector<std::size_t> lineAttachmentNodes;
+    // The designed skin's face area vectors, parallel to the first
+    // skinTriangleCount triangles. Half the sum of |A.w| over a closed
+    // surface is its frontal area along w, so these are the reference the
+    // fabric-drag term measures the live shape's excess against.
+    std::vector<softwing::Vec3> restFaceAreas;
     // The two ribs whose leading edges sit furthest out along the rest span
     // axis. The live span axis is read between them, so the wing-level angle
     // of attack follows the wing's real attitude rather than its rest one.
@@ -375,9 +394,28 @@ struct SimBody
     softwing::Vec3 lastAeroForce;
     double lastLift = 0.0;
     double lastDrag = 0.0;
+    // The fabric-drag resultant this frame, and the extra frontal area it
+    // came from. Zero on a wing holding its designed shape; it is what a
+    // folded canopy has that a flying one does not.
+    double lastFabricDragNewtons = 0.0;
+    double lastExcessFrontalArea = 0.0;
     double lastGlideRatio = 0.0;
     double lastAlphaDegrees = 0.0;
     double lastAirspeed = 0.0;
+    // How far the AIR has travelled past the wing since the build, in the
+    // wing's own frame. Free flight re-centres the whole system on the
+    // origin every frame and the tunnel never moves at all, so neither
+    // mode leaves any trace of travel in the node positions — this is the
+    // only record that the wing is going anywhere, and it is what the air
+    // motes are drawn against.
+    softwing::Vec3 airTravel;
+    // Rest-pose angle from the leading-edge-to-40%-extrados attitude line
+    // to the true chord line, radians. The reference node sits above the
+    // chord by the aerofoil's own thickness and camber, so the two lines
+    // are tens of degrees apart; subtracting this makes the measured
+    // angle of attack read exactly as it did off the full chord in the
+    // rest pose, while still being immune to what a brake does aft of it.
+    double attitudeOffsetRadians = 0.0;
     // Rest-pose mean chord and span directions, used to place the airflow.
     softwing::Vec3 restChordDirection{0.0, 1.0, 0.0};
     softwing::Vec3 restSpanAxis{1.0, 0.0, 0.0};
@@ -433,6 +471,12 @@ struct SimControls
     // its own intake, a collapsed side is re-fed by its neighbours). Off
     // reproduces the old blanket ram-pressure stamp bit for bit.
     bool cellPressureModel = true;
+    // Multiplier on the rib cross-port flow — the path by which an
+    // inflated cell re-feeds a collapsed neighbour. 1 is the area the
+    // design actually declares; higher is deliberately unphysical, a
+    // hand on the one mechanism that re-inflates a sealed cell so its
+    // effect can be seen rather than argued about.
+    double crossPortGain = 1.0;
     // Fabric self-contact plus fabric-versus-line contact, as a runtime
     // option: folded fabric stops passing through itself and through the
     // suspension lines, which is what lets a cravat clear. This is the

@@ -101,6 +101,10 @@ private:
     QPushButton *flyButton_ = nullptr;
     QCheckBox *showExtrados_ = nullptr;
     QCheckBox *showVent_ = nullptr;
+    QSlider *crossPortGain_ = nullptr;
+    QSlider *airDensity_ = nullptr;
+    QLabel *crossPortLabel_ = nullptr;
+    QLabel *airLabel_ = nullptr;
     QCheckBox *showIntrados_ = nullptr;
     QCheckBox *showRibs_ = nullptr;
     QCheckBox *showStraps_ = nullptr;
