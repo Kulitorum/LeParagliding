@@ -12,7 +12,7 @@ endif()
 
 project(
     LEparagliding
-    VERSION 0.3.5
+    VERSION 0.4.0
     DESCRIPTION "Qt C++ port of LEparagliding 3.28"
     LANGUAGES C CXX
 )
@@ -273,12 +273,15 @@ add_executable(leparagliding-engine
     src/engine/input_migration.cpp
     src/engine/input_migration.h
     src/engine/main.cpp
+    src/flatparts/flat_capture.cpp
+    src/flatparts/flat_capture.h
     src/legacy/leparagliding_core.cpp
     src/model/nurbs_model.cpp
     src/model/nurbs_model.h
 )
 target_include_directories(leparagliding-engine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/engine"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/flatparts"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/model"
 )
 target_link_libraries(leparagliding-engine PRIVATE f2c_runtime lep_occt)
@@ -294,6 +297,21 @@ else()
         COMPILE_OPTIONS "-w"
     )
 endif()
+
+# Flat-part model and nester, shared by the Print tab and the nesting bench.
+add_library(flatparts STATIC
+    src/flatparts/flat_parts.cpp
+    src/flatparts/flat_parts.h
+    src/flatparts/nesting.cpp
+    src/flatparts/nesting.h
+)
+target_link_libraries(flatparts PUBLIC Qt6::Gui)
+target_include_directories(flatparts PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/flatparts"
+)
+
+add_executable(nesting-bench tests/nesting_bench.cpp)
+target_link_libraries(nesting-bench PRIVATE flatparts)
 
 add_executable(reference-report-compare
     tests/reference_report_compare.cpp
@@ -360,6 +378,8 @@ qt_add_executable(LEparagliding WIN32
     src/gui/airfoil_file.h
     src/gui/airfoil_panel.cpp
     src/gui/airfoil_panel.h
+    src/gui/flat_parts_view.cpp
+    src/gui/flat_parts_view.h
     src/gui/design_document.cpp
     src/gui/design_document.h
     src/gui/geometry_preprocessor.cpp
@@ -382,6 +402,10 @@ qt_add_executable(LEparagliding WIN32
     src/gui/playground_analysis.h
     src/gui/playground_page.cpp
     src/gui/playground_page.h
+    src/gui/nest_worker.cpp
+    src/gui/nest_worker.h
+    src/gui/print_page.cpp
+    src/gui/print_page.h
     src/gui/preset_catalog.cpp
     src/gui/preset_catalog.h
     src/gui/section1_curve_panel.cpp
@@ -404,7 +428,7 @@ qt_add_executable(LEparagliding WIN32
 set_target_properties(LEparagliding PROPERTIES AUTORCC ON AUTOMOC ON)
 target_link_libraries(LEparagliding PRIVATE
     Qt6::Widgets Qt6::OpenGLWidgets lep_occt xflr5core softwing_core
-    playground_sim)
+    playground_sim flatparts)
 add_dependencies(LEparagliding leparagliding-engine)
 
 # Headless timing harness for the Playground's XPBD solve. Developer tool,

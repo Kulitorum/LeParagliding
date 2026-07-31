@@ -6,6 +6,7 @@
 #include "holes_panel.h"
 #include "paraglider_view.h"
 #include "playground_page.h"
+#include "print_page.h"
 #include "section1_curve_panel.h"
 #include "section_help.h"
 #include "section_specs.h"
@@ -791,6 +792,9 @@ void MainWindow::buildInterface()
     xflr5Layout->setContentsMargins(0, 0, 0, 0);
     xflr5Layout->setSpacing(0);
     workspaceTabs_->addTab(xflr5Page_, QStringLiteral("Aerodynamics (XFLR5)"));
+
+    printPage_ = new PrintPage(workspaceTabs_);
+    workspaceTabs_->addTab(printPage_, QStringLiteral("Print/Cut"));
 
     playgroundPage_ = new PlaygroundPage(workspaceTabs_);
     workspaceTabs_->addTab(playgroundPage_, QStringLiteral("Playground"));
@@ -2635,6 +2639,12 @@ void MainWindow::calculationFinished(int exitCode, QProcess::ExitStatus exitStat
         QDir(completedOutput).filePath(QStringLiteral("lep-sim.json"));
     if (engineSucceeded && QFileInfo::exists(simMeshPath)) {
         playgroundPage_->setSimMeshPath(simMeshPath);
+    }
+
+    const QString flatPartsPath =
+        QDir(completedOutput).filePath(QStringLiteral("lep-2d-parts.json"));
+    if (engineSucceeded) {
+        printPage_->setPartsPath(flatPartsPath);
     }
 
     if (completedMode == CalculationMode::Preview) {

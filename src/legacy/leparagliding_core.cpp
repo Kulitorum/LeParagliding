@@ -19,6 +19,7 @@ extern "C" {
 #endif
 #include "f2c.h"
 #include "engine_paths.h"
+#include "flat_capture.h"
 
 /*
  * OCCT model boundary. The translated numerical core still calculates the
@@ -2698,6 +2699,7 @@ L1:
     s_rsle(&io___38);
     do_lio(&c__5, &c__1, (char *)&xkf, (ftnlen)sizeof(doublereal));
     e_rsle();
+    lep_flat_set_design(xkf, wname, 50);
     s_rsle(&io___40);
     e_rsle();
     s_rsle(&io___41);
@@ -7938,6 +7940,7 @@ L12:
 	sepy = sepyy + sepriy * 1.f * (real) ky;
 	sepxjo = sepxx + sepjox * (real) kx;
 	sepyjo = sepyy + sepjoy * 1.f * (real) ky;
+	lep_flat_begin_part("rib", 3, i__, 0, sepx, sepy, 1, 2);
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      Numering ribs */
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
@@ -8467,6 +8470,10 @@ L12:
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      6.12.6 Print joncs */
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
+/*      Each rod is drawn twice: pjoncs_b12__ marks it onto the rib itself
+        (box 1-2, so it stays with the rib part) and pjoncs_b17__ draws the
+        pocket as its own part in box 1-7, offset by an internal xad7 = 6300.
+        Only the latter is bracketed as a rod-pocket. */
 /*      SOLVE INTERFERENCE BETWEEN BLOCS!!!! */
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      6.12.6.1 First) Iterate in blocs type 1 */
@@ -8500,8 +8507,11 @@ L12:
 				atp, np, (ftnlen)2);
 			pjoncs_b12__(&i__, xjonc, &npo, sjo, &sepx, &sepy,
 				rib, &xkf);
+			lep_flat_begin_part("rod-pocket", 11, i__, 0,
+				sepxjo + xkf * 6300., sepyjo, 1, 7);
 			pjoncs_b17__(&i__, xjonc, &npo, sjo, &sepxjo, &sepyjo,
 				 rib, &xkf);
+			lep_flat_resume_at("rib", 3, sepx, sepy);
 			joncf[i__ + (m + (ng + 200) * 20) * 101 - 204121] =
 				rib[i__ + 16766];
 /*       end if */
@@ -8568,8 +8578,11 @@ L12:
 				npo, atp, np, (ftnlen)2);
 			pjoncs_b12__(&i__, xjonc, &npo, sjo, &sepx, &sepy,
 				rib, &xkf);
+			lep_flat_begin_part("rod-pocket", 11, i__, 0,
+				sepxjo + xkf * 6300., sepyjo, 1, 7);
 			pjoncs_b17__(&i__, xjonc, &npo, sjo, &sepxjo, &sepyjo,
 				 rib, &xkf);
+			lep_flat_resume_at("rib", 3, sepx, sepy);
 			joncf[i__ + (m + (ng + 200) * 20) * 101 - 204121] =
 				rib[i__ + 16766];
 /*      Lower rod */
@@ -8581,8 +8594,11 @@ L12:
 				rib, &xkf);
 /*      Draw lower jonc in box (1,7) */
 			sepyjo += xwf * 50. * jonc_i_coe__;
+			lep_flat_begin_part("rod-pocket", 11, i__, 0,
+				sepxjo + xkf * 6300., sepyjo, 1, 7);
 			pjoncs_b17__(&i__, xjonc, &npo, sjo, &sepxjo, &sepyjo,
 				 rib, &xkf);
+			lep_flat_resume_at("rib", 3, sepx, sepy);
 			joncf[i__ + (m + (ng + 300) * 20) * 101 - 204121] =
 				rib[i__ + 16766];
 /* Jonc lenght */
@@ -8598,11 +8614,14 @@ L12:
 /*      6.12.7 Print mylars */
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /* bloc m */
+	lep_flat_begin_part("nose-mylar", 10, i__, 0, sepx + xkf * 6300., sepy,
+		1, 7);
 	if (rib[i__ + 16867] != 0.) {
 	    mylars_(&i__, u, v, &sepx, &sepy, rib, xmy, np, &xkf, atp, (
 		    ftnlen)2);
 	}
 /*      Change airfoil loction */
+	lep_flat_end_part();
 	kx = (integer) ((real) i__ / 6.f);
 	ky = i__ - kx * 6;
 	++kyy;
@@ -12873,6 +12892,9 @@ L12:
 	for (i__ = 1; i__ <= i__1; ++i__) {
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * 1.f * (real) ky;
+/*      This loop draws the miniribs, which sit beside their rib in box 1-2 but
+        are separate pieces of fabric, not marks on the rib. */
+	    lep_flat_begin_part("mini-rib", 8, i__, 0, sepx, sepy, 1, 2);
 	    sepxjo = sepxx + sepjox * (real) kx;
 	    sepyjo = sepyy + sepjoy * 1.f * (real) ky;
 /*       if (i.eq.3) then */
@@ -13490,6 +13512,7 @@ L12:
 		itxt_(&d__1, &y1, &c_b2356, &c_b1889, &i__, &c__7);
 	    }
 /* bottom surface */
+	    lep_flat_end_part();
 	    kx = (integer) ((real) i__ / 6.f);
 	    ky = i__ - kx * 6;
 	    ++kyy;
@@ -14690,6 +14713,9 @@ L12:
 /* vent type */
 	    psep = xkf * 1970.f + seppix[i__] * 1.;
 	    psey = xyshift * xkf - xyextra * 890.95f * xkf;
+	    i__2 = i__ + 1;
+	    lep_flat_begin_part("extrados-panel", 14, i__2, 0, psep, psey, 1,
+		    3);
 /*      REDEFINITION (!) for proper printing */
 /* remove 890.95 to set BOX (1 */
 	    ng = (integer) rib[i__ + 16969];
@@ -15258,6 +15284,7 @@ L12:
 		ysaut = -ysautt;
 	    }
 /* 2 extrados cuts */
+	    lep_flat_end_part();
 	}
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      8.6.2 Intrados */
@@ -15277,6 +15304,9 @@ L12:
 /* vent type */
 		psep = xkf * 1970.f + seppix[i__] * 1.;
 		psey = xyshift * xkf - xyintra * 890.95f * xkf;
+		i__2 = i__ + 1;
+		lep_flat_begin_part("intrados-panel", 14, i__2, 0, psep, psey,
+			2, 3);
 /*      REDEFINITION (!) for proper printing */
 /* remove 890.95 to set BOX (1 */
 		ng = (integer) rib[i__ + 16969];
@@ -15652,6 +15682,7 @@ L12:
 		    }
 		}
 /* lowcuts=1 */
+		lep_flat_end_part();
 	    }
 /* i */
 	}
@@ -15785,6 +15816,7 @@ L12:
     for (i__ = 1; i__ <= i__1; ++i__) {
 	sepx = sepxx + seprix * (real) kx;
 	sepy = sepyy + sepriy * (real) ky;
+	lep_flat_resume_at("rib", 3, sepx, sepy);
 /*      Normal points A,B,C,D,E,F */
 	for (j = 1; j <= 6; ++j) {
 /*      Added case points brakes F j=6 (request from Eric Fontaine) */
@@ -16092,6 +16124,7 @@ L12:
     for (i__ = 1; i__ <= i__1; ++i__) {
 	sepx = sepxx + seprix * (real) kx;
 	sepy = sepyy + sepriy * 1.f * (real) ky;
+	lep_flat_begin_part("middle-rib", 10, i__, 0, sepx, sepy, 0, 0);
 /*      Detect complete unloaded rib */
 	if (rib[i__ + 5555] == 100. && s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2)
 		!= 0) {
@@ -16680,6 +16713,7 @@ L12:
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 	}
 /* Calcule and draw rib i */
+	lep_flat_end_part();
 	kx = (integer) ((real) i__ / 6.f);
 	ky = i__ - kx * 6;
 	++kyy;
@@ -17362,6 +17396,7 @@ L12:
     for (i__ = 1; i__ <= i__1; ++i__) {
 	sepx = sepxx + seprix * (real) kx;
 	sepy = sepyy + sepriy * (real) ky;
+	lep_flat_resume_at("rib", 3, sepx, sepy);
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      Punt TE */
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
@@ -17743,6 +17778,7 @@ L12:
 /* vent type */
 	    psep = xkf * 1970.f + seppix[i__] * 1.;
 	    psey = xyshift * xkf - xyextra * 890.95f * xkf;
+	    lep_flat_resume_at("extrados-panel", 14, psep, psey);
 /*      REDEFINITION (!) for proper printing */
 /* remove 890.95 to set BOX (1 */
 	    ng = (integer) rib[i__ + 16969];
@@ -17819,6 +17855,7 @@ L12:
 /* vent type */
 		psep = xkf * 1970.f + seppix[i__] * 1.;
 		psey = xyshift * xkf - xyintra * 890.95f * xkf;
+		lep_flat_resume_at("intrados-panel", 14, psep, psey);
 /*      REDEFINITION (!) for proper printing */
 /* remove 890.95 to set BOX (1 */
 		ng = (integer) rib[i__ + 16969];
@@ -21599,6 +21636,7 @@ L12:
 /*      Drawing in 2D model */
 		psep = xkf * 3300.f + xrsep * (real) i__;
 		psey = xkf * 800.f + yrsep * (real) ii + sepri1_y__;
+		lep_flat_begin_part("h-rib", 5, k, 0, psep, psey, 2, 4);
 /*       write (*,*) i,ii,psep,psey */
 		j = 1;
 		d__1 = psep + pl1x[i__ + j * 101 - 101];
@@ -22426,6 +22464,7 @@ L12:
 /*      Drawing in 2D model */
 	    psep = xkf * 3300.f + xrsep * (real) i__;
 	    psey = xkf * 800.f + yrsep * (real) ii;
+	    lep_flat_begin_part("v-rib-type2", 11, k, 1, psep, psey, 2, 4);
 	    if (hvr[k + 804] == 1.) {
 		j = 1;
 /*      Costat vora atac */
@@ -22692,6 +22731,7 @@ L12:
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 	    psep = xkf * 3300.f + xrsep * (real) i__;
 	    psey = xkf * 800.f + yrsep * (real) ii;
+	    lep_flat_begin_part("v-rib-type2", 11, k, 2, psep, psey, 2, 4);
 	    if (hvr[k + 1005] == 1.) {
 		j = 1;
 /*      Costat vora d'atac */
@@ -22883,6 +22923,7 @@ L12:
 	    ky = i__ - 1 - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 	    if (hvr[k + 804] == 1.) {
 /*      Segment */
 		d__1 = sepx + ucnt[i__ - 1 + (ii + 60) * 501 - 5511];
@@ -22936,6 +22977,7 @@ L12:
 	    ky = i__ - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 	    d__1 = sepx + ucnt[i__ + (ii + 20) * 501 - 5511];
 	    d__2 = -vcnt[i__ + (ii + 20) * 501 - 5511] + sepy;
 	    d__3 = sepx + ucnt[i__ + (ii + 40) * 501 - 5511];
@@ -22946,6 +22988,7 @@ L12:
 	    ky = i__ + 1 - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 	    if (hvr[k + 1005] == 1.) {
 /*      Segment */
 		d__1 = sepx + ucnt[i__ + 1 + (ii + 60) * 501 - 5511];
@@ -23594,6 +23637,7 @@ L12:
 /*      Drawing in 2D model */
 	    psep = xkf * 3300.f + xrsep * (real) i__;
 	    psey = xkf * 800.f + yrsep * (real) ii;
+	    lep_flat_begin_part("v-rib-type3", 11, k, 1, psep, psey, 2, 4);
 	    if (hvr[k + 804] == 1.) {
 		j = 1;
 /*      Costat vora atac */
@@ -23858,6 +23902,7 @@ L12:
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 	    psep = xkf * 3300.f + xrsep * (real) i__;
 	    psey = xkf * 800.f + yrsep * (real) ii;
+	    lep_flat_begin_part("v-rib-type3", 11, k, 2, psep, psey, 2, 4);
 	    if (hvr[k + 1005] == 1.) {
 		j = 1;
 /*      Costat vora d'atac */
@@ -24047,6 +24092,7 @@ L12:
 	    ky = i__ - 1 - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 	    if (hvr[k + 804] == 1.) {
 		d__1 = sepx + ucnt[i__ - 1 + (ii + 90) * 501 - 5511];
 		d__2 = -vcnt[i__ - 1 + (ii + 90) * 501 - 5511] + sepy;
@@ -24142,6 +24188,7 @@ L12:
 	    ky = i__ - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 	    d__1 = sepx + ucnt[i__ + (ii + 20) * 501 - 5511];
 	    d__2 = -vcnt[i__ + (ii + 20) * 501 - 5511] + sepy;
 	    d__3 = sepx + ucnt[i__ + (ii + 40) * 501 - 5511];
@@ -24152,6 +24199,7 @@ L12:
 	    ky = i__ + 1 - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 	    if (hvr[k + 1005] == 1.) {
 		d__1 = sepx + ucnt[i__ + 1 + (ii + 90) * 501 - 5511];
 		d__2 = -vcnt[i__ + 1 + (ii + 90) * 501 - 5511] + sepy;
@@ -25255,6 +25303,7 @@ L12:
 /*      Drawing in 2D model (BOX 2,7) */
 		    psep = xkf * 5820.f + xrsep * 1.6f * (real) i__ - 150;
 		    psey = xkf * 800.f + yrsep * (real) ii - 500.f;
+		    lep_flat_begin_part("v-rib-type5", 11, k, 1, psep, psey, 2, 6);
 		    if (hvr[k + 804] == 1.) {
 /*      Draw basic contour, left and right */
 			for (j = 1; j <= 120; ++j) {
@@ -26026,6 +26075,7 @@ L12:
 		    psep = xkf * 5820.f + xrsep * 1.6f * (real) (i__ - 1) +
 			    xsegment * 1.5f - 150;
 		    psey = xkf * 800.f + yrsep * (real) ii - 500.f;
+		    lep_flat_begin_part("v-rib-type5", 11, k, 2, psep, psey, 2, 6);
 		    if (hvr[k + 1005] == 1.) {
 /*      Draw basic contour */
 			for (j = 1; j <= 120; ++j) {
@@ -26729,6 +26779,7 @@ L12:
 		ky = i__ - kx * 6;
 		sepx = sepxx + seprix * (real) kx;
 		sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 		for (klz = 1; klz <= 3; ++klz) {
 		    alpha = -atan((xtv9[i__ - 2] - vcnt[i__ + 5009]) / (xtu9[
 			    i__ - 2] - ucnt[i__ + 5009]));
@@ -26776,6 +26827,7 @@ L12:
 		    ky = i__ - 1 - kx * 6;
 		    sepx = sepxx + seprix * (real) kx;
 		    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 		    if (hvr[k + 804] == 1.) {
 			d__1 = sepx + xtu9[i__ - 2];
 			d__2 = -xtv9[i__ - 2] + sepy;
@@ -26830,6 +26882,7 @@ L12:
 		    ky = i__ + 1 - kx * 6;
 		    sepx = sepxx + seprix * (real) kx;
 		    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 		    if (hvr[k + 1005] == 1.) {
 			d__1 = sepx + xtu9[i__];
 			d__2 = -xtv9[i__] + sepy;
@@ -27728,6 +27781,7 @@ L12:
 /*      Drawing in 2D model */
 	    psep = xkf * 3300.f + xrsep * (real) i__;
 	    psey = xkf * 800.f + yrsep * (real) ii;
+	    lep_flat_begin_part("vh-rib", 6, k, 1, psep, psey, 2, 4);
 	    if (hvr[k + 804] == 1.) {
 		j = 1;
 		d__1 = psep + pl1x[i__ + j * 101 - 101];
@@ -28007,6 +28061,7 @@ L12:
 /*      Drawing in 2D model */
 	    psep = xkf * 3300.f + xrsep * (real) i__;
 	    psey = xkf * 800.f + yrsep * (real) ii;
+	    lep_flat_begin_part("vh-rib", 6, k, 2, psep, psey, 2, 4);
 	    if (hvr[k + 1005] == 1.) {
 		j = 1;
 		d__1 = psep + pl1x[i__ + j * 101 - 101];
@@ -28282,6 +28337,7 @@ L12:
 /*      Drawing in 2D model */
 	    psep = xkf * 3300.f + xrsep * (real) i__;
 	    psey = xkf * 800.f + yrsep * (real) ii;
+	    lep_flat_begin_part("vh-rib", 6, k, 3, psep, psey, 2, 4);
 	    j = 1;
 	    d__1 = psep + pl1x[i__ + j * 101 - 101];
 	    d__2 = psey + pl1y[i__ + j * 101 - 101];
@@ -28467,6 +28523,7 @@ L12:
 	    ky = i__ - 1 - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 /*       write (*,*) "i,kx,ky ",i,kx,ky,sepx,sepy */
 	    if (hvr[k + 804] == 1.) {
 /*      Segment */
@@ -28548,6 +28605,7 @@ L12:
 	    ky = i__ - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 /*      Segment */
 	    d__1 = sepx + ucnt[i__ + (ii + 60) * 501 - 5511];
 	    d__2 = -vcnt[i__ + (ii + 60) * 501 - 5511] + sepy;
@@ -28612,6 +28670,7 @@ L12:
 	    ky = i__ + 1 - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 	    if (hvr[k + 1005] == 1.) {
 /*      Segment */
 		d__1 = sepx + ucnt[i__ + 1 + (ii + 60) * 501 - 5511];
@@ -28680,6 +28739,7 @@ L12:
 	    ky = i__ + 2 - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 	    if (hvr[k + 1005] == 1.) {
 /*      Segment */
 		d__1 = sepx + ucnt[i__ + 2 + (ii + 20) * 501 - 5511];
@@ -29315,9 +29375,11 @@ L12:
 /*      Drawing Type-6 in 2D model */
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      Draw in BOX(2,6) */
+/*      Stale comment: 5820 / 1790.85 puts this in box 3-6, "V-rib type-6". */
 	    psep = xkf * 5820.f + xrsep * (real) i__;
 	    psey = xkf * 1790.8499999999999f + (hvr[k + 603] + hvr[k + 1608])
 		    * .5f * rib[(integer) hvr[k + 402] + 404] * 3.f / 100.f;
+	    lep_flat_begin_part("v-rib-type6", 11, k, 0, psep, psey, 3, 6);
 /*       write (*,*) "i,ii ",i,ii */
 	    j = 1;
 /*      Costat vora d'atac */
@@ -29501,6 +29563,7 @@ L12:
 			&rvcx[i__ + (j + 1) * 500 - 501], &rvcy[i__ + (j + 1)
 			* 500 - 501], &c__1);
 	    }
+	    lep_flat_end_part();
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      16.6.5 Drawing V-ribs marks in 2D ribs */
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
@@ -29517,6 +29580,7 @@ L12:
 	    ky = i__ - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      Case h1=0. */
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
@@ -29723,6 +29787,7 @@ L12:
 	    ky = i__ + 1 - kx * 6;
 	    sepx = sepxx + seprix * (real) kx;
 	    sepy = sepyy + sepriy * (real) (ky - 1);
+	    lep_flat_resume_at("rib", 3, sepx, sepy);
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
 /*      Case h2=0. */
 /* cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
@@ -30925,6 +30990,7 @@ L12:
     do_lio(&c__9, &c__1, "-------------------------------------------------",
 	    (ftnlen)49);
     e_wsle();
+    lep_flat_set_areas(farea, parea);
     s_wsfe(&io___1518);
     do_fio(&c__1, "Flat area = ", (ftnlen)12);
     do_fio(&c__1, (char *)&farea, (ftnlen)sizeof(doublereal));
@@ -38209,6 +38275,7 @@ L12:
 /*      23. END OF MAIN PROGRAM */
 /* ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc */
     dxfend_(&c__20);
+    lep_flat_write(lep_output_path("lep-2d-parts.json"));
     for (i__ = 1; i__ <= 2; ++i__) {
 	j = valu2[i__ - 1];
 	io___2426.ciunit = j;
@@ -38657,6 +38724,7 @@ L12:
 
 
 /*      Circle radius radc in layer gname */
+    lep_flat_capture_circle(*x1, *y1, *radc, *pointcolor);
     s_wsfe(&io___2480);
     do_fio(&c__1, "CIRCLE", (ftnlen)6);
     do_fio(&c__1, (char *)&c__8, (ftnlen)sizeof(integer));
@@ -38999,6 +39067,7 @@ L12:
 
 
 /*      line P1-P2 */
+    lep_flat_capture_line(*p1x, *p1y, *p2x, *p2y, *linecolor);
     s_wsfe(&io___2529);
     do_fio(&c__1, "LINE", (ftnlen)4);
     do_fio(&c__1, (char *)&c__8, (ftnlen)sizeof(integer));
@@ -39377,6 +39446,7 @@ L12:
 
 
 /*      line P1-P2 */
+    lep_flat_capture_text(*p1x, *p1y, *htext, xtext, (int)xtext_len);
     s_wsfe(&io___2567);
     do_fio(&c__1, "TEXT", (ftnlen)4);
     do_fio(&c__1, (char *)&c__5, (ftnlen)sizeof(integer));
@@ -39446,6 +39516,7 @@ L12:
 
 
 /*      line P1-P2 */
+    lep_flat_capture_integer_text(*p1x, *p1y, *htext, (int)(*itext));
     s_wsfe(&io___2576);
     do_fio(&c__1, "TEXT", (ftnlen)4);
     do_fio(&c__1, (char *)&c__5, (ftnlen)sizeof(integer));
@@ -39516,6 +39587,7 @@ L12:
 
 
 /*      line P1-P2 */
+    lep_flat_capture_integer_text(*p1x, *p1y, *htext, (int)(*itext));
     s_wsfe(&io___2585);
     do_fio(&c__1, "TEXT", (ftnlen)4);
     do_fio(&c__1, (char *)&c__5, (ftnlen)sizeof(integer));

@@ -633,6 +633,9 @@ int main(int argc, char *argv[])
     if (parser.isSet(playgroundTab)) {
         window.showPlaygroundTab(parser.value(playgroundTab));
     }
-    window.show();
+    // Maximised rather than true full screen: the design tabs, the part tree
+    // and the 2D preview all want the space, but a CAD-style tool still needs
+    // its title bar and the rest of the desktop reachable.
+    window.showMaximized();
     return application.exec();
 }

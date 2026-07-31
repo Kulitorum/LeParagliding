@@ -85,6 +85,17 @@ structured section (see below). The retired grid's rib-count cross-check
 - A whole-design "pre-flight" summary: run all section validators and list
   every problem in one place before Build.
 
+## Fabric orientation of flat parts
+
+The exported flat parts carry no fabric-grain information — the core lays each
+part out to fill its drawing boxes and never records which way the weave should
+run, so the Print tab's nester is preserving an orientation that means nothing.
+Ripstop stretches on the bias, so this is an aerodynamic issue, not a finish
+one. Deliberately not solved for now; the nester assumes the input is oriented
+correctly. Requirements for the C++ port, the options for deriving the
+direction, and a proposed "draw the fibre vector on each piece" editor are
+written up in `docs/flat-part-orientation.md`.
+
 ## Smaller ideas
 
 - Optional auto-rebuild of the 3D preview after a curve commit (debounced),

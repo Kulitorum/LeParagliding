@@ -33,6 +33,7 @@ class QTemporaryDir;
 class ParagliderView;
 class MainFrame; // XFLR5's main window (third_party/xflr5), hosted as a tab
 class PlaygroundPage;
+class PrintPage;
 
 class MainWindow final : public QMainWindow
 {
@@ -152,6 +153,7 @@ private:
     QTabWidget *diagnosticsTabs_ = nullptr;
     QTabWidget *workspaceTabs_ = nullptr;
     PlaygroundPage *playgroundPage_ = nullptr;
+    PrintPage *printPage_ = nullptr;
     QWidget *xflr5Page_ = nullptr;
     MainFrame *xflr5Frame_ = nullptr;
     QByteArray xflr5TransferredHash_;
