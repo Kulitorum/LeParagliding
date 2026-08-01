@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -349,6 +350,56 @@ struct SimBody
     // Per-rib section lift coefficient from the most recent load stamp;
     // shapes the chordwise pressure distribution.
     std::vector<double> ribLiftCoefficient;
+    // Which half-span each rib belongs to, fixed at build time from its
+    // rest station along restSpanAxis: 0 is the low-span (negative mesh x)
+    // half, which is the solver's LEFT and the side SimControls::brakeLeft
+    // acts on. Skin faces inherit their nearest rib's half, so the
+    // partition is a property of the DESIGN and never migrates: a face
+    // jittering across the centreline would otherwise swap which brake's
+    // polar loads it, several times a second.
+    std::vector<std::uint8_t> ribHalf;
+    // Rest-pose projected planform of each half, m². Its sum is
+    // planformArea, so two half-passes at equal coefficients impose
+    // exactly what the single wing-level pass imposed.
+    std::array<double, 2> halfPlanformArea{0.0, 0.0};
+    // Low-passed departure of each half's angle of attack from the
+    // wing-level one, radians, and each half's dynamic pressure as a
+    // ratio of the wing's. Both come from the canopy's rigid-body spin,
+    // and between them they are a free-flying wing's whole roll and yaw
+    // damping: a rolling wing has one half descending into the air and
+    // the other rising out of it, a yawing one has a tip running forward
+    // and a tip running back, and until the polar was split per half
+    // nothing in the imposed force knew either. Both are 0 and 1 on a
+    // wing that is not rotating, so a symmetric case is untouched.
+    std::array<double, 2> alphaHalfDeviationRadians{0.0, 0.0};
+    std::array<double, 2> halfDynamicPressureRatio{1.0, 1.0};
+    // The pull the WING has, left then right, as against the pull
+    // SimControls asks for. A hand has a finite speed, and the two are
+    // not the same thing here for a reason worth spelling out: the
+    // controls are sampled in WALL-CLOCK time and the wing lives in
+    // SIMULATED time, and on a real wing at 30x2 those run two to three
+    // times apart. A brake movement the pilot makes over three quarters
+    // of a second therefore reaches the wing as a third of a second of
+    // input — a snatch the pilot never made, and one that surges the
+    // wing hard enough to collapse it. Rate-limiting the pull in
+    // simulated time is what puts the two back on one clock.
+    //
+    // Deliberately in simulated time rather than off the measured frame
+    // rate: a limiter that read the wall clock would make the physics
+    // depend on how busy the machine is, and the headless bench would
+    // stop reproducing the GUI.
+    std::array<double, 2> brakeApplied{0.0, 0.0};
+    // And the pull the POLAR sees, low-passed. The geometric side of a
+    // brake is immediate — the line shortens, the trailing edge comes
+    // down, the solver carries it — but the aerodynamic side is not: a
+    // deflected trailing edge changes the section's circulation only as
+    // fast as the wake can adjust, which is the same lag the wing-level
+    // angle of attack already runs on. Without it the turning couple was
+    // internally inconsistent, its camber difference following the
+    // pilot's hand instantly while the rotation-derived differences it
+    // is balanced against lagged by a quarter second — so a fast release
+    // reversed the couple's sign for exactly that quarter second.
+    std::array<double, 2> brakeFilteredMetres{0.0, 0.0};
     // The pneumatic cells in span order, and their internal gauge pressure
     // in pascals — the state applyPressure integrates each frame. Empty
     // until the first stamp initialises it (cells pre-inflated to their

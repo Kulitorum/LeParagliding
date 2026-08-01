@@ -46,6 +46,19 @@ constexpr double kCellSqueezeGain = 1.5;
 // ram target: a cell that has actually lost its air cannot push back.
 constexpr double kCellSqueezeCapRatio = 3.0;
 constexpr double kCellSectionRatioFloor = 0.05;
+// The collapse vent (see advanceCellPressures). Live/rest bay VOLUME at
+// which a bay stops counting as a squeezed cell and starts counting as a
+// bag, and the ratio at which the vent reaches full rate. A healthy
+// settled wing's worst bay sits at 97-98% of its rest volume on both
+// reference meshes, and a collapsed one's goes to 5-9%, so the deadband
+// between them is most of the range.
+constexpr double kCellCollapseThreshold = 0.55;
+constexpr double kCellCollapseFloor = 0.20;
+// Full-rate vent, 1/s. A fully folded bay loses its air on roughly the
+// timescale a healthy intake fills one (a quarter to half a second on
+// gnuC2-sized cells), so a section that has genuinely folded empties
+// while a section that is deformed but still being rammed does not.
+constexpr double kCellCollapseVentRate = 2.0;
 // Per-frame stability clamp on the explicit relaxation step: no cell may
 // close more than this fraction of its pressure gap in one frame.
 constexpr double kCellMaxRateStep = 0.5;
@@ -141,6 +154,20 @@ constexpr double kFlatPlateNormal = 1.2;
 // it. Full pull is taken as the swing test's 35 cm.
 constexpr double kBrakeFullPullMetres = 0.35;
 constexpr double kBrakeDragCoefficient = 0.12;
+// Fastest a hand moves a brake, metres per second of SIMULATED time (see
+// SimBody::brakeApplied). Full travel in a little over half a second: a
+// pilot can snatch a brake faster than that, but a pilot flying does
+// not, and every input above this rate was an artefact of the controls
+// being sampled on the wall clock while the wing runs on its own.
+constexpr double kBrakeHandSpeed = 0.6;
+// Ceiling on how far one half-span's measured angle of attack may depart
+// from the wing's, for the per-half polar. The departure is real and is
+// where the wing's roll damping comes from — a rolling wing genuinely has
+// one half descending into the air and the other rising out of it — but
+// it is read off live fabric, and a tip that has folded can report almost
+// anything. Bounded, a fold costs that half its damping; unbounded it
+// hands a force with kilonewtons of authority an angle nothing measured.
+constexpr double kHalfAlphaLimitRadians = 10.0 * kDegreesToRadians;
 // Free travel before a tunnel brake engages (see stepSimulation). Sized
 // to cover the trailing edge's excursion across the sweep's attitude
 // range; real wings rig 10-20 cm for the same reason.
@@ -1212,6 +1239,65 @@ SimBody buildSimBody(const SimMesh &mesh,
             }
         }
 
+        // The half-span partition, taken once here from the REST pose and
+        // never recomputed. Everything the free-flight force pass does per
+        // half — its angle of attack, its brake, its polar, its anchor,
+        // its share of the planform — indexes through this, so it has to
+        // be a property of the design rather than of the current pose: a
+        // face wandering across the centreline as the wing deforms would
+        // change which brake's polar loads it, frame by frame.
+        //
+        // The centre is the mean of the two tip ribs' stations rather than
+        // zero, so a mesh drawn off the origin still splits down its own
+        // middle.
+        {
+            double stationLow = std::numeric_limits<double>::max();
+            double stationHigh = std::numeric_limits<double>::lowest();
+            std::vector<double> ribStation(sim.ribChords.size(), 0.0);
+            for (std::size_t index = 0; index < sim.ribChords.size();
+                 ++index) {
+                ribStation[index] =
+                    dot(mesh.nodes[sim.ribChords[index].leadingNode],
+                        sim.restSpanAxis);
+                stationLow = std::min(stationLow, ribStation[index]);
+                stationHigh = std::max(stationHigh, ribStation[index]);
+            }
+            const double middle = 0.5 * (stationLow + stationHigh);
+            sim.ribHalf.assign(sim.ribChords.size(), 0);
+            for (std::size_t index = 0; index < sim.ribChords.size();
+                 ++index) {
+                sim.ribHalf[index] =
+                    ribStation[index] < middle ? 0 : 1;
+            }
+            // Each half's share of the projected planform, from the same
+            // upper-surface shadow the wing-level figure is summed from.
+            sim.halfPlanformArea = {0.0, 0.0};
+            for (std::size_t face = 0; face < triangles.size(); ++face) {
+                if (!sim.faceAero[face].upperSurface) {
+                    continue;
+                }
+                const auto &tri = triangles[face];
+                const softwing::Vec3 &a =
+                    mesh.nodes[static_cast<std::size_t>(tri[0])];
+                const softwing::Vec3 &b =
+                    mesh.nodes[static_cast<std::size_t>(tri[1])];
+                const softwing::Vec3 &c =
+                    mesh.nodes[static_cast<std::size_t>(tri[2])];
+                sim.halfPlanformArea[sim.ribHalf[sim.faceAero[face].rib]] +=
+                    std::max(0.0, 0.5 * cross(b - a, c - a).z);
+            }
+            // Rescaled to sum to the wing-level figure exactly, so two
+            // half-passes at equal coefficients impose the same total
+            // force the single pass did rather than one a rounding apart.
+            const double halfSum =
+                sim.halfPlanformArea[0] + sim.halfPlanformArea[1];
+            if (halfSum > 0.0) {
+                const double scale = sim.planformArea / halfSum;
+                sim.halfPlanformArea[0] *= scale;
+                sim.halfPlanformArea[1] *= scale;
+            }
+        }
+
         // The two ribs furthest out along the rest span axis. The live span
         // axis is read between their leading edges each frame, which is
         // what lets the wing-level angle of attack follow a rolled or
@@ -1917,6 +2003,52 @@ std::vector<double> advanceCellPressures(
     const auto &nodes = sim.body->nodes();
     const auto &triangles = sim.body->triangles();
 
+    // What each bay has left of its designed shape, in two measures.
+    //
+    // SECTION: the mean of its two rib loops' VECTOR areas over the rest
+    // ones. A loop that has folded over on itself has its edge cross
+    // products cancel and reads small, which is what makes this a
+    // collapse signal rather than a deformation one. The squeeze
+    // response at the end of this function is driven from it.
+    //
+    // VOLUME: that section times the live spacing between the two ribs,
+    // over the rest volume. The collapse vent is driven from THIS, and
+    // the difference is not academic — measured through the standing
+    // front-tuck case on gnuC2, the wing lost 31% of its enclosed volume
+    // and half its span while no rib loop ever fell below 67% of its own
+    // rest section. This canopy does not collapse by flattening its
+    // sections; it collapses by concertinaing its ribs together, and a
+    // section-area signal never fires at all. Bays there go to 5-9% of
+    // their rest volume, against 97-98% on a healthy settled wing, so
+    // the two are cleanly separated.
+    std::vector<double> liveRibArea(sim.ribLoopNodes.size(), 0.0);
+    for (std::size_t rib = 0; rib < sim.ribLoopNodes.size(); ++rib) {
+        softwing::Vec3 sum;
+        const auto &loop = sim.ribLoopNodes[rib];
+        for (std::size_t index = 0; index < loop.size(); ++index) {
+            sum += cross(nodes[loop[index]].position,
+                         nodes[loop[(index + 1) % loop.size()]].position);
+        }
+        liveRibArea[rib] = 0.5 * length(sum);
+    }
+    std::vector<double> sectionRatio(count, 1.0);
+    std::vector<double> volumeRatio(count, 1.0);
+    for (std::size_t cell = 0; cell < count; ++cell) {
+        const SimCell &record = sim.cells[cell];
+        if (record.restSectionArea <= 0.0 || record.restVolume <= 0.0) {
+            continue;
+        }
+        const double live = 0.5
+                            * (liveRibArea[record.ribs[0]]
+                               + liveRibArea[record.ribs[1]]);
+        sectionRatio[cell] = std::max(live / record.restSectionArea,
+                                      kCellSectionRatioFloor);
+        const double spacing = length(
+            nodes[sim.ribChords[record.ribs[1]].leadingNode].position
+            - nodes[sim.ribChords[record.ribs[0]].leadingNode].position);
+        volumeRatio[cell] = live * spacing / record.restVolume;
+    }
+
     std::vector<double> rate(count, 0.0);
     std::vector<double> change(count, 0.0);
     for (std::size_t cell = 0; cell < count; ++cell) {
@@ -2001,6 +2133,46 @@ std::vector<double> advanceCellPressures(
         rate[cell + 1] += rateNext;
         change[cell + 1] -= rateNext * difference;
     }
+    // THE COLLAPSE VENT. A bay that has folded is not a cell any more, it
+    // is a bag: its rib loops have lost most of their section and nothing
+    // around it is carrying load. Until this term existed the model
+    // force-fed such a bay exactly as hard as a flying one — ribPressure
+    // is half-rho-v-squared from the rib's own relative wind, whether
+    // that rib is in clean air or buried inside a fold — so the folded
+    // cell and its healthy neighbour BOTH sat at ram, there was no
+    // gradient across the rib holes for the cross-ports to work on, and
+    // the whole re-inflation path was inert. That is why turning the
+    // neighbour-reinflation gain to x10 changed nothing: ten times a zero
+    // gradient is still zero. Measured through a departure, the cell
+    // states went UP — 28 Pa to 90-129 — while the wing was folding.
+    //
+    // So a folded section is vented toward AMBIENT, at a rate rising with
+    // how far its section has gone. It is a LEAK, deliberately, and not a
+    // reduced target: the intake keeps its own ram target and its own
+    // rate, so a folded bay whose mouth still meets the airflow rams
+    // itself back open exactly as before. Reducing the target instead
+    // would have taken that away and made a collapse permanent by
+    // construction, which is the failure this model was built to escape.
+    //
+    // Positional and restoring, with no velocity feedback anywhere in it,
+    // so it stays clear of the loops that talked the canopy flat. And
+    // deadbanded like everything else here: a healthy loaded wing sits
+    // between 100% and 106% of its rest section, far above the threshold,
+    // so on a flying wing this is exactly zero and the calibration does
+    // not move.
+    for (std::size_t cell = 0; cell < count; ++cell) {
+        const double collapse = std::clamp(
+            (kCellCollapseThreshold - volumeRatio[cell])
+                / (kCellCollapseThreshold - kCellCollapseFloor),
+            0.0,
+            1.0);
+        if (collapse <= 0.0) {
+            continue;
+        }
+        const double vent = kCellCollapseVentRate * collapse;
+        rate[cell] += vent;
+        change[cell] += vent * (0.0 - sim.cellPressure[cell]);
+    }
     for (std::size_t cell = 0; cell < count; ++cell) {
         const double step = rate[cell] * simulationTimeStep;
         const double scale =
@@ -2009,28 +2181,13 @@ std::vector<double> advanceCellPressures(
             change[cell] * simulationTimeStep * scale;
     }
 
-    // The squeeze response, from the live rib loop vector areas.
-    std::vector<double> liveRibArea(sim.ribLoopNodes.size(), 0.0);
-    for (std::size_t rib = 0; rib < sim.ribLoopNodes.size(); ++rib) {
-        softwing::Vec3 sum;
-        const auto &loop = sim.ribLoopNodes[rib];
-        for (std::size_t index = 0; index < loop.size(); ++index) {
-            sum += cross(nodes[loop[index]].position,
-                         nodes[loop[(index + 1) % loop.size()]].position);
-        }
-        liveRibArea[rib] = 0.5 * length(sum);
-    }
+    // The squeeze response, from the same live section ratios.
     std::vector<double> stamp(count, 0.0);
     for (std::size_t cell = 0; cell < count; ++cell) {
         const SimCell &record = sim.cells[cell];
         double boost = 0.0;
         if (record.restSectionArea > 0.0) {
-            const double live = 0.5
-                                * (liveRibArea[record.ribs[0]]
-                                   + liveRibArea[record.ribs[1]]);
-            const double ratio =
-                std::max(live / record.restSectionArea,
-                         kCellSectionRatioFloor);
+            const double ratio = sectionRatio[cell];
             if (ratio < kCellSqueezeThreshold) {
                 boost = std::min(
                     sim.cellPressure[cell] * kCellSqueezeGain
@@ -2504,6 +2661,25 @@ WingAeroSample sampleWingAero(const SimBody &sim,
     return sample;
 }
 
+namespace {
+
+// One half-span, as the differential pass sees it: the point on its OWN
+// mean chord where its share of the turning couple acts, and the 4x4
+// system that lays that couple onto its own fabric as pressure.
+struct HalfPass
+{
+    bool valid = false;
+    // The half's measured angle, WITHOUT the brake's camber: the anchor
+    // travel models where the centre of pressure sits at a given
+    // attitude, and a pulled brake is an input, not an attitude.
+    double alphaRadians = 0.0;
+    softwing::Vec3 anchor;
+    softwing::Vec3 chordDirection;
+    double matrix[4][5] = {};
+};
+
+}  // namespace
+
 void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
 {
     if (!sim.body) {
@@ -2569,13 +2745,170 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                   + (controls.angleOfAttackDegrees
                      - sim.builtAngleOfAttackDegrees)
                         * kDegreesToRadians;
+
+    // ------------------------------------------------------------------
+    // The half-span split. Everything below runs twice, once per half,
+    // over that half's own fabric — and the wing's roll and yaw moments
+    // then EMERGE from two correctly placed resultants instead of being
+    // imposed on top of one. Two earlier attempts bolted a couple onto a
+    // wing-level resultant and both failed: as a fifth row in the solve
+    // it rebuilt the whole increment field and wrecked the symmetric
+    // glide (airspeed 9 -> 14.5 m/s with zero brake), and layered on
+    // afterwards as a spanwise pressure gradient it loaded the tips
+    // hardest and folded the wing at 4 s against a 9 s baseline. A
+    // brake's moment has to arrive where the brake acts: on the aft
+    // fabric of its own half.
+    //
+    // The split is off when the mesh gives no usable partition, and then
+    // half 0 is the whole wing at the wing-level mean pair — which is
+    // exactly the single pass this replaced.
+    // ------------------------------------------------------------------
+    const bool split = sim.ribHalf.size() == sim.ribChords.size()
+                       && sim.halfPlanformArea[0] > 0.0
+                       && sim.halfPlanformArea[1] > 0.0;
+    const int halfCount = split ? 2 : 1;
+
+    // Each half's angle, as a low-passed DEPARTURE from the wing's. The
+    // departure is KINEMATIC: a rolling wing has one half descending into
+    // the air and the other rising out of it, and a yawing one has a tip
+    // running forward and a tip running back, so the two halves meet the
+    // air at different angles. That difference is the entirety of a
+    // wing's roll and yaw damping. The wing-level polar could not see it,
+    // and the hands-up glide grew a lateral oscillation until it folded.
+    //
+    // Taken from the canopy's RIGID-body spin, for exactly the reason the
+    // per-rib pressure wind is (see canopySpinOf): a rigid fit has no
+    // breathing mode, so none of the fabric's own motion can reach a
+    // force with kilonewtons of authority through it. It is also written
+    // as a departure from the wing's own angle, so a wing that is not
+    // rotating gets exactly zero and flies the trajectory it always did.
+    //
+    // Measuring each half's own CHORD line instead was tried first and is
+    // wrong twice over: a rigid roll does not move the chords relative to
+    // each other, so it produced no damping at all, and what it did
+    // measure — differential twist — is positive feedback, since a half
+    // that has twisted nose-up is handed more lift and twists further.
+    // Measured on the Swoop it took the glide's sideways drift from 5 to
+    // 9 m/s and brought the departure forward from 17 s to 13.
+    //
+    // The tunnel does not close this loop at all: its load is prescribed
+    // open-loop for the reasons above, so both halves fly at the
+    // prescribed angle there and the split changes nothing but where each
+    // half's share of the force is placed.
+    if (!split || !controls.freeFlight || !(sample.airspeed > 1.0e-6)) {
+        sim.alphaHalfDeviationRadians = {0.0, 0.0};
+        sim.halfDynamicPressureRatio = {1.0, 1.0};
+    } else {
+        const auto &canopy = sim.body->nodes();
+        const softwing::Vec3 &axis = sample.spanAxis;
+        const softwing::Vec3 windInPlane =
+            sample.windDirection
+            - dot(sample.windDirection, axis) * axis;
+        softwing::Vec3 spinCentre;
+        const softwing::Vec3 spin = canopySpinOf(sim, spinCentre);
+        double raw[2] = {0.0, 0.0};
+        double rawRatio[2] = {1.0, 1.0};
+        bool measured = length(windInPlane) > 1.0e-6;
+        if (measured) {
+            const softwing::Vec3 windPlane = normalized(windInPlane);
+            for (int half = 0; half < 2 && measured; ++half) {
+                softwing::Vec3 centre;
+                std::size_t counted = 0;
+                for (std::size_t index = 0; index < sim.ribChords.size();
+                     ++index) {
+                    if (sim.ribHalf[index]
+                        != static_cast<std::uint8_t>(half)) {
+                        continue;
+                    }
+                    const RibChord &rib = sim.ribChords[index];
+                    centre +=
+                        canopy[rib.leadingNode].position
+                        + 0.25
+                              * (canopy[rib.trailingNode].position
+                                 - canopy[rib.leadingNode].position);
+                    ++counted;
+                }
+                if (counted == 0) {
+                    measured = false;
+                    break;
+                }
+                centre /= static_cast<double>(counted);
+                // The wind this half meets: the wing's, less the velocity
+                // its own quarter-chord station has from the canopy's
+                // rotation. Capped like the per-rib wind is, so a
+                // tumbling transient cannot hand a half a wind of its own
+                // invention.
+                softwing::Vec3 local = cross(spin, centre - spinCentre);
+                const double speed = length(local);
+                const double limit =
+                    kMaximumSpinWindRatio * sample.airspeed;
+                if (speed > limit && speed > 0.0) {
+                    local = (limit / speed) * local;
+                }
+                const softwing::Vec3 halfWind =
+                    sample.airspeed * sample.windDirection - local;
+                // And the SPEED it meets it at, as a ratio of the wing's
+                // dynamic pressure. This is the other half of the yaw
+                // story and it is what makes a brake turn the right way
+                // round: the braked half drags, the wing yaws toward it,
+                // that half is then the retreating one, its dynamic
+                // pressure falls, it loses lift and it drops — which is
+                // the bank. With one dynamic pressure shared by both
+                // halves the only thing a brake could do was camber its
+                // own half into MORE lift, and the wing banked away from
+                // the turn it was making.
+                rawRatio[half] =
+                    lengthSquared(halfWind)
+                    / (sample.airspeed * sample.airspeed);
+                const softwing::Vec3 halfInPlane =
+                    halfWind - dot(halfWind, axis) * axis;
+                if (length(halfInPlane) <= 1.0e-6) {
+                    measured = false;
+                    break;
+                }
+                const softwing::Vec3 halfPlane = normalized(halfInPlane);
+                // The rotation from the wing's wind to this half's, about
+                // the span: the same sign convention the angle of attack
+                // itself uses, so a descending half reads higher.
+                raw[half] =
+                    std::atan2(dot(cross(windPlane, halfPlane), axis),
+                               dot(windPlane, halfPlane));
+            }
+        }
+        if (measured) {
+            // Filtered on the same wake timescale as the wing-level
+            // angle, so it damps a roll without becoming a fast loop of
+            // its own, and clamped, because a canopy mid-tumble can spin
+            // fast enough to ask for anything.
+            const double blend =
+                std::min(1.0, simulationTimeStep / alphaFilterSeconds);
+            for (int half = 0; half < 2; ++half) {
+                double &state = sim.alphaHalfDeviationRadians[half];
+                state += (raw[half] - state) * blend;
+                state = std::clamp(state,
+                                   -kHalfAlphaLimitRadians,
+                                   kHalfAlphaLimitRadians);
+                double &ratio = sim.halfDynamicPressureRatio[half];
+                ratio += (rawRatio[half] - ratio) * blend;
+                // The spin wind is already capped at the wing's own
+                // airspeed, which bounds this at 4; the clamp is the
+                // belt to that brace.
+                ratio = std::clamp(ratio, 0.0, 4.0);
+            }
+        }
+    }
+    const std::array<double, 2> halfAlpha{
+        sample.alphaRadians + sim.alphaHalfDeviationRadians[0],
+        sample.alphaRadians + sim.alphaHalfDeviationRadians[1]};
+
     // The polar, evaluated for ONE half of the wing at its own brake
-    // setting. A brake is a flap: it cambers and drags its own half, and
-    // the difference between the halves is what turns a paraglider.
-    // Averaging the two pulls into a single wing-level coefficient — what
-    // this did — made a one-sided pull aerodynamically identical to a
-    // symmetric half-pull, so the polar produced no turning moment at all
-    // and the entire response was left to the pressure distribution.
+    // setting and its own measured angle. A brake is a flap: it cambers
+    // and drags its own half, and the difference between the halves is
+    // what turns a paraglider. Averaging the two pulls into a single
+    // wing-level coefficient — what this did — made a one-sided pull
+    // aerodynamically identical to a symmetric half-pull, so the polar
+    // produced no turning moment at all and the entire response was left
+    // to the pressure distribution.
     //
     // The camber enters as an effective angle rather than a bare lift
     // increment, so the braked half also reaches the stall blend earlier:
@@ -2587,11 +2920,10 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         double lift = 0.0;
         double drag = 0.0;
     };
-    const auto polarFor = [&](double brakeMetres) {
+    const auto polarFor = [&](double brakeMetres, double alphaBase) {
         const double pull =
             std::clamp(brakeMetres / kBrakeFullPullMetres, 0.0, 1.0);
-        const double alpha =
-            sample.alphaRadians + pull * kBrakeCamberRadians;
+        const double alpha = alphaBase + pull * kBrakeCamberRadians;
         SidePolar side;
         const double attachedLift = std::max(
             kMinimumLiftCoefficient,
@@ -2616,10 +2948,36 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                     + postStall * plateNormal * sinAlpha;
         return side;
     };
+    // The brake as the WAKE sees it, not as the hand does. The geometry
+    // of a brake pull is immediate and the solver already carries it —
+    // the line shortens, the trailing edge comes down, the fabric
+    // answers. The circulation it produces is not: a section's lift
+    // follows a change of camber only as fast as its wake can adjust,
+    // which is the lag the wing-level angle of attack already runs on,
+    // so the brake runs on it too.
+    //
+    // That the two now share a timescale is the point. The camber
+    // difference between the halves is balanced against differences that
+    // come from the wing's rotation, and those are low-passed; with the
+    // camber unfiltered, a fast release dropped it instantly while the
+    // rotation terms lagged, and the turning couple pointed the wrong
+    // way for a quarter of a second at exactly the moment the wing was
+    // surging.
+    {
+        const double blend =
+            std::min(1.0, simulationTimeStep / alphaFilterSeconds);
+        for (int side = 0; side < 2; ++side) {
+            sim.brakeFilteredMetres[side] +=
+                (sim.brakeApplied[side] - sim.brakeFilteredMetres[side])
+                * blend;
+        }
+    }
     // "Left" is the solver's left — the negative-span-station half, the
-    // same convention SimBody::brakeLines uses.
-    const SidePolar leftSide = polarFor(controls.brakeLeft);
-    const SidePolar rightSide = polarFor(controls.brakeRight);
+    // same convention SimBody::brakeLines and SimBody::ribHalf use.
+    const SidePolar leftSide =
+        polarFor(sim.brakeFilteredMetres[0], halfAlpha[0]);
+    const SidePolar rightSide =
+        polarFor(sim.brakeFilteredMetres[1], halfAlpha[1]);
     // The wing-level pair stays the mean, so every reported number and
     // every symmetric case is bit-for-bit what it was.
     sample.liftCoefficient = 0.5 * (leftSide.lift + rightSide.lift);
@@ -2630,6 +2988,12 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
 
     const auto &nodes = sim.body->nodes();
     const auto &triangles = sim.body->triangles();
+
+    const auto halfOf = [&](std::size_t face) {
+        return halfCount == 2
+                   ? static_cast<int>(sim.ribHalf[sim.faceAero[face].rib])
+                   : 0;
+    };
 
     // FABRIC DRAG. The polar above is the force of a WING: one angle of
     // attack, the rest planform, a lift and a drag coefficient drawn from
@@ -2652,6 +3016,14 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     // Directed along the wind, so it is pure dissipation — it can slow
     // the system down and can never drive it, which is what keeps it out
     // of the velocity loops the rest of the stability stack avoids.
+    //
+    // Deliberately NOT split per half, though the machinery below would
+    // take it. It is a wing-level bluff-body estimate, and on a healthy
+    // wing the two halves differ only by the mesh's own asymmetry — which
+    // is millimetres, and which turning into a yawing moment moved the
+    // tunnel calibration for no physical reason. A one-sided collapse's
+    // yaw has to come from something better conditioned than the
+    // difference of two deadbanded area sums.
     double fabricDrag = 0.0;
     if (!sim.restFaceAreas.empty()
         && sim.restFaceAreas.size() >= sim.skinTriangleCount) {
@@ -2662,7 +3034,8 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                 0.5
                 * cross(nodes[tri.b].position - nodes[tri.a].position,
                         nodes[tri.c].position - nodes[tri.a].position);
-            liveFrontal += std::abs(dot(areaVector, sample.windDirection));
+            liveFrontal +=
+                std::abs(dot(areaVector, sample.windDirection));
         }
         liveFrontal *= 0.5;
 
@@ -2686,8 +3059,8 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                 dot(sample.windDirection, sample.spanAxis) * sim.restSpanAxis
                 + dot(sample.windDirection, liveChordAxis) * restChordAxis
                 + dot(sample.windDirection, liveUp) * restUp;
-            for (const softwing::Vec3 &areaVector : sim.restFaceAreas) {
-                restFrontal += std::abs(dot(areaVector, restWind));
+            for (const softwing::Vec3 &restArea : sim.restFaceAreas) {
+                restFrontal += std::abs(dot(restArea, restWind));
             }
             restFrontal *= 0.5;
         }
@@ -2739,6 +3112,34 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     // makes is cancelled, so a term that stayed out of wingForce would be
     // cancelled along with it and reach the system as nothing at all.
     const softwing::Vec3 correction = wingForce - aerodynamicForce(sim);
+
+    // THE HALVES DISAGREE, and that disagreement is the turn. Each half
+    // has its own brake, its own measured angle and therefore its own
+    // coefficients; half their difference, carried on one half and taken
+    // off the other, is a pure couple. Referred to the MEAN half planform
+    // rather than to each half's own, so a mesh that is not perfectly
+    // mirror-symmetric contributes its asymmetry to the shared pass
+    // (which has always carried it) and not to the couple — with equal
+    // brakes and equal angles this is then exactly zero, and a symmetric
+    // case stays bit-for-bit what it was.
+    const double halfArea =
+        halfCount == 2
+            ? 0.5 * (sim.halfPlanformArea[0] + sim.halfPlanformArea[1])
+            : 0.0;
+    // Each half at its OWN dynamic pressure, so the difference carries
+    // both the coefficients the brakes and the angles set and the speeds
+    // the wing's rotation gives the two halves. On a wing that is neither
+    // rotating nor braked the ratios are 1, the coefficients are equal,
+    // and this is exactly the zero vector — which is what keeps the
+    // tunnel calibration and the symmetric glide untouched.
+    const double leftQ = q * sim.halfDynamicPressureRatio[0];
+    const double rightQ = q * sim.halfDynamicPressureRatio[1];
+    const softwing::Vec3 sideDifference =
+        halfArea * 0.5
+        * ((leftQ * leftSide.lift - rightQ * rightSide.lift)
+               * sample.liftDirection
+           + (leftQ * leftSide.drag - rightQ * rightSide.drag)
+                 * sample.windDirection);
 
     // Where the total resultant must act: the hang-line-derived fraction
     // of the live mean chord. The line geometry was drawn for a wing whose
@@ -2802,6 +3203,67 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
             cross((a + b + c) / 3.0 - anchor, pressureForce);
     }
 
+    // Each half's own anchor, on its own mean chord at the same
+    // hang-line fraction. This is where the couple lands, and placing it
+    // here is the whole of the change: the two anchors sit at the halves'
+    // real span stations, so the couple has the wing's real lever arm and
+    // arrives on the fabric of the half whose brake made it. It costs
+    // nothing in pitch — the offset between the two anchors is spanwise,
+    // and a spanwise arm crossed with any force has no span-axis
+    // component — so the trim is exactly where the shared pass puts it.
+    //
+    // The angle each anchor travels with is that half's MEASURED angle,
+    // without the brake's camber. Adding the camber — the flap's
+    // centre-of-pressure travel, which is real — was tried: it halves the
+    // wrong-way bank discussed below without fixing its sign, and it
+    // brought the departure under a one-sided pull forward by a second
+    // and a half. It is not worth having for that. The rate term stays
+    // wing-level, like the filter it comes from.
+    std::array<HalfPass, 2> halves;
+    if (halfCount == 2) {
+        for (int half = 0; half < 2; ++half) {
+            HalfPass &pass = halves[half];
+            pass.alphaRadians = halfAlpha[half];
+            softwing::Vec3 halfLeading;
+            softwing::Vec3 halfTrailing;
+            std::size_t counted = 0;
+            for (std::size_t index = 0; index < sim.ribChords.size();
+                 ++index) {
+                if (sim.ribHalf[index] != static_cast<std::uint8_t>(half)) {
+                    continue;
+                }
+                halfLeading +=
+                    nodes[sim.ribChords[index].leadingNode].position;
+                halfTrailing +=
+                    nodes[sim.ribChords[index].trailingNode].position;
+                ++counted;
+            }
+            if (counted == 0) {
+                continue;
+            }
+            halfLeading /= static_cast<double>(counted);
+            halfTrailing /= static_cast<double>(counted);
+            const softwing::Vec3 halfChord = halfTrailing - halfLeading;
+            if (lengthSquared(halfChord) <= 1.0e-9) {
+                continue;
+            }
+            const double fraction = std::clamp(
+                sim.resultantChordFraction
+                    + kAnchorTravelPerRadian
+                          * (pass.alphaRadians - sim.alphaTrimRadians)
+                    + std::clamp(
+                          kAnchorRateSeconds
+                              * sim.alphaRateRadiansPerSecond,
+                          -kAnchorRateLimit,
+                          kAnchorRateLimit),
+                0.10,
+                0.70);
+            pass.anchor = halfLeading + fraction * halfChord;
+            pass.chordDirection = normalized(halfChord);
+            pass.valid = true;
+        }
+    }
+
     // The correction enters the canopy the only way fabric carries load
     // gracefully: as pressure. Every other application was measured
     // failing structurally — point loads at the line attachments dented
@@ -2813,8 +3275,8 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     // total pitch moment about the anchor is zero. s_i is the chordwise
     // station, so μ is a linear chordwise pressure gradient — the
     // pressure-native form of a pitch couple. Roll and yaw moments are
-    // deliberately left to the base pressure field: they are how brakes
-    // steer.
+    // deliberately left to the base pressure field and to the
+    // differential pass below.
     static const bool noCouple =
         qEnvironmentVariableIsSet("LEP_AERO_NO_COUPLE");
     static const bool noCorrection =
@@ -2823,7 +3285,8 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     std::vector<softwing::Vec3> areaVector(sim.skinTriangleCount);
     std::vector<softwing::Vec3> faceCentre(sim.skinTriangleCount);
     std::vector<double> station(sim.skinTriangleCount, 0.0);
-    std::vector<double> spanStation(sim.skinTriangleCount, 0.0);
+    std::vector<double> halfStation(sim.skinTriangleCount, 0.0);
+    std::vector<std::uint8_t> faceHalf(sim.skinTriangleCount, 0);
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const softwing::Triangle &tri = triangles[face];
         const softwing::Vec3 &a = nodes[tri.a].position;
@@ -2832,55 +3295,13 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         areaVector[face] = 0.5 * cross(b - a, c - a);
         faceCentre[face] = (a + b + c) / 3.0;
         station[face] = dot(faceCentre[face] - anchor, chordDirection);
-        spanStation[face] = dot(faceCentre[face] - anchor, sample.spanAxis);
+        faceHalf[face] = static_cast<std::uint8_t>(halfOf(face));
     }
 
-    // The turning couple the two halves' polars disagree about. Each half
-    // carries half the area at its own coefficients, so the difference is
-    // a pure couple — the summed force is unchanged, which is why a
-    // symmetric pull leaves everything below exactly as it was. Applied
-    // at each half's own area-weighted centre, so the lever arm is the
-    // wing's real one rather than a nominal semi-span.
-    softwing::Vec3 leftCentre;
-    softwing::Vec3 rightCentre;
-    double leftArea = 0.0;
-    double rightArea = 0.0;
-    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
-        const double areaLength = length(areaVector[face]);
-        if (spanStation[face] < 0.0) {
-            leftCentre += areaLength * faceCentre[face];
-            leftArea += areaLength;
-        } else {
-            rightCentre += areaLength * faceCentre[face];
-            rightArea += areaLength;
-        }
-    }
-    double rollTarget = 0.0;
-    // The roll axis is the direction of flight: a wing rolls about the
-    // air it is going through.
-    const softwing::Vec3 rollAxis = sample.windDirection;
-    if (leftArea > 0.0 && rightArea > 0.0) {
-        leftCentre = leftCentre / leftArea;
-        rightCentre = rightCentre / rightArea;
-        const softwing::Vec3 sideDifference =
-            q * 0.5 * area * 0.5
-            * ((leftSide.lift - rightSide.lift) * sample.liftDirection
-               + (leftSide.drag - rightSide.drag) * sample.windDirection);
-        rollTarget =
-            dot(cross(leftCentre - rightCentre, sideDifference), rollAxis);
-    }
-
-    // Assemble the 5x5 system: columns are (v.x, v.y, v.z, μ, ν), rows are
-    // the three force components, the span-axis moment (pitch) and the
-    // wind-axis moment (roll). ν multiplies the SPANWISE station, making
-    // it a spanwise pressure gradient — the pressure-native form of a
-    // roll couple, exactly as μ's chordwise gradient is of a pitch one.
-    //
-    // The pitch row cancels the pressure field's own pitch moment; the
-    // roll row does NOT cancel the field's roll, it ADDS the couple the
-    // two halves' polars disagree about. The field's roll and yaw are
-    // still how the deflected fabric steers — this supplies the part the
-    // wing-level polar was silent about.
+    // Assemble the 4x4 system: columns are (v.x, v.y, v.z, μ), rows are
+    // the three force components and the span-axis moment (pitch). The
+    // same geometry is assembled for each half about its own anchor and
+    // its own chord, ready for the differential pass.
     double system[4][5] = {};
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const softwing::Vec3 &areaN = areaVector[face];
@@ -2900,6 +3321,23 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
             system[3][column] +=
                 basis[column] * dot(momentArm, sample.spanAxis);
         }
+        HalfPass &pass = halves[faceHalf[face]];
+        if (!pass.valid) {
+            continue;
+        }
+        halfStation[face] =
+            dot(faceCentre[face] - pass.anchor, pass.chordDirection);
+        const softwing::Vec3 halfArm =
+            cross(faceCentre[face] - pass.anchor, areaN);
+        const double halfBasis[4] = {normal.x, normal.y, normal.z,
+                                     halfStation[face]};
+        for (int column = 0; column < 4; ++column) {
+            pass.matrix[0][column] += halfBasis[column] * areaN.x;
+            pass.matrix[1][column] += halfBasis[column] * areaN.y;
+            pass.matrix[2][column] += halfBasis[column] * areaN.z;
+            pass.matrix[3][column] +=
+                halfBasis[column] * dot(halfArm, sample.spanAxis);
+        }
     }
     system[0][4] = noCorrection ? 0.0 : correction.x;
     system[1][4] = noCorrection ? 0.0 : correction.y;
@@ -2909,122 +3347,142 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
 
     // Gaussian elimination with partial pivoting; a singular system (a
     // degenerate skin) just skips the retrim.
-    bool solved = true;
-    for (int pivot = 0; pivot < 4 && solved; ++pivot) {
-        int best = pivot;
-        for (int row = pivot + 1; row < 4; ++row) {
-            if (std::abs(system[row][pivot])
-                > std::abs(system[best][pivot])) {
-                best = row;
+    const auto solve4x4 = [](double matrix[4][5], double solution[4]) {
+        for (int pivot = 0; pivot < 4; ++pivot) {
+            int best = pivot;
+            for (int row = pivot + 1; row < 4; ++row) {
+                if (std::abs(matrix[row][pivot])
+                    > std::abs(matrix[best][pivot])) {
+                    best = row;
+                }
+            }
+            if (std::abs(matrix[best][pivot]) < 1.0e-9) {
+                return false;
+            }
+            if (best != pivot) {
+                for (int column = 0; column < 5; ++column) {
+                    std::swap(matrix[pivot][column], matrix[best][column]);
+                }
+            }
+            for (int row = pivot + 1; row < 4; ++row) {
+                const double factor =
+                    matrix[row][pivot] / matrix[pivot][pivot];
+                for (int column = pivot; column < 5; ++column) {
+                    matrix[row][column] -= factor * matrix[pivot][column];
+                }
             }
         }
-        if (std::abs(system[best][pivot]) < 1.0e-9) {
-            solved = false;
-            break;
-        }
-        if (best != pivot) {
-            for (int column = 0; column < 5; ++column) {
-                std::swap(system[pivot][column], system[best][column]);
-            }
-        }
-        for (int row = pivot + 1; row < 4; ++row) {
-            const double factor =
-                system[row][pivot] / system[pivot][pivot];
-            for (int column = pivot; column < 5; ++column) {
-                system[row][column] -= factor * system[pivot][column];
-            }
-        }
-    }
-    if (solved) {
-        double solution[4] = {};
         for (int row = 3; row >= 0; --row) {
-            double value = system[row][4];
+            double value = matrix[row][4];
             for (int column = row + 1; column < 4; ++column) {
-                value -= system[row][column] * solution[column];
+                value -= matrix[row][column] * solution[column];
             }
-            solution[row] = value / system[row][row];
+            solution[row] = value / matrix[row][row];
         }
+        return true;
+    };
+
+    const double ceiling =
+        kMaximumDynamicPressureRatio
+        * std::max(q, std::max(0.0, controls.pressurePascal));
+    double solution[4] = {};
+    if (solve4x4(system, solution)) {
         const softwing::Vec3 gradient{solution[0], solution[1],
                                       solution[2]};
         const double couple = solution[3];
-        // The differential couple the two halves' polars disagree about,
-        // added as a spanwise-linear pressure increment on top of the
-        // solved field rather than as a fifth constraint inside it.
-        // Constraining the solve to a prescribed roll moment was tried
-        // and is wrong: the extra row rebuilds the whole increment field
-        // to satisfy it, and it wrecked the SYMMETRIC glide (airspeed 9
-        // -> 14.5 m/s, sink -1.3 -> -3.2, before any brake was pulled)
-        // because forcing the increment's own roll moment to zero is not
-        // a no-op. Layered on afterwards, a symmetric wing gets exactly
-        // zero and the field it flies on is untouched.
-        //
-        // Layering it on afterwards is stable where the fifth row was not,
-        // but it is still WRONG, so it is off unless asked for: driving
-        // the couple through a spanwise pressure gradient loads the tips
-        // hardest, and on gnuC2-class fabric that folded the wing at 4 s
-        // against a 9 s baseline (span 8.4 -> 5.4 m in one second). A
-        // brake's turning moment has to arrive where the brake acts — the
-        // aft fabric of its own half — not as a gradient across the whole
-        // span. That is the next attempt, and it needs the polar split
-        // per half-span rather than a couple bolted onto a wing-level
-        // resultant.
-        static const bool brakeRoll =
-            qEnvironmentVariableIsSet("LEP_AERO_BRAKE_ROLL");
-        double rollGradient = 0.0;
-        if (brakeRoll && std::abs(rollTarget) > 0.0) {
-            double rollFromSpan = 0.0;
-            for (std::size_t face = 0; face < sim.skinTriangleCount;
-                 ++face) {
-                rollFromSpan +=
-                    spanStation[face]
-                    * dot(cross(faceCentre[face] - anchor,
-                                areaVector[face]),
-                          rollAxis);
-            }
-            if (std::abs(rollFromSpan) > 1.0e-9) {
-                rollGradient = rollTarget / rollFromSpan;
-            }
-        }
-        for (std::size_t face = 0; face < sim.skinTriangleCount;
-             ++face) {
+        for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
             const double areaLength = length(areaVector[face]);
             if (areaLength <= 0.0) {
                 continue;
             }
             const softwing::Vec3 normal = areaVector[face] / areaLength;
             const double increment = dot(normal, gradient)
-                                     + couple * station[face]
-                                     + rollGradient * spanStation[face];
+                                     + couple * station[face];
             // The base field never pulls a face inward (Cp is capped at
             // stagnation); the retrim may, a little, but a face sucked
             // hard into the cell is how the intrados got dented before,
             // so the combined field is floored just below zero and
             // capped like the base field.
             const double base = triangles[face].pressureDifference;
-            const double combined = std::clamp(
-                base + increment,
-                -0.5 * q,
-                kMaximumDynamicPressureRatio
-                    * std::max(q, std::max(0.0,
-                                           controls.pressurePascal)));
+            const double combined =
+                std::clamp(base + increment, -0.5 * q, ceiling);
             sim.body->setFacePressureDifference(face, combined);
         }
-
-        // What actually got applied, after clamping: the residuals say
-        // whether the solve's promise survived contact with the floor
-        // and the cap.
-        softwing::Vec3 achieved;
-        softwing::Vec3 achievedMoment;
-        for (std::size_t face = 0; face < sim.skinTriangleCount;
-             ++face) {
-            const softwing::Vec3 force =
-                triangles[face].pressureDifference * areaVector[face];
-            achieved += force;
-            achievedMoment += cross(faceCentre[face] - anchor, force);
-        }
-        sim.lastForceResidual = achieved - wingForce;
-        sim.lastPitchResidual = dot(achievedMoment, sample.spanAxis);
     }
+
+    // THE DIFFERENTIAL PASS: the couple, laid on each half's own fabric
+    // through the same machinery, about that half's own anchor and its
+    // own chord. One half is asked for +sideDifference and the other for
+    // -sideDifference, each with no pitch moment of its own, so the
+    // wing's total force and pitch are untouched and what is added is
+    // exactly a roll-and-yaw couple.
+    //
+    // Two earlier attempts put this couple somewhere else and both
+    // failed. As a FIFTH ROW inside the solve above it wrecked the
+    // symmetric glide (airspeed 9 -> 14.5 m/s, sink -1.3 -> -3.2, with
+    // zero brake): constraining that increment's own roll moment is not
+    // a no-op, it rebuilds the entire increment field. Layered on
+    // afterwards as a SPANWISE PRESSURE GRADIENT it was symmetric-safe
+    // but folded the wing at 4 s against a 9 s baseline (span 8.4 -> 5.4
+    // m in one second), because a gradient across the span loads the tips
+    // hardest and the tips are where this fabric is weakest. Running the
+    // whole force pass per half instead — each half cancelling its own
+    // pressure resultant — was tried third and takes the arc's lateral
+    // bracing out of the fabric: the tunnel wing lost 8% of its span and
+    // 18% of its volume and never settled. What is left, and what this
+    // is, is the shared pass exactly as it was plus a couple that lands
+    // where the brake acts.
+    if (lengthSquared(sideDifference) > 0.0 && halves[0].valid
+        && halves[1].valid) {
+        for (int half = 0; half < 2; ++half) {
+            HalfPass &pass = halves[half];
+            const softwing::Vec3 want =
+                half == 0 ? sideDifference : -1.0 * sideDifference;
+            pass.matrix[0][4] = want.x;
+            pass.matrix[1][4] = want.y;
+            pass.matrix[2][4] = want.z;
+            pass.matrix[3][4] = 0.0;
+            double halfSolution[4] = {};
+            if (!solve4x4(pass.matrix, halfSolution)) {
+                continue;
+            }
+            const softwing::Vec3 gradient{halfSolution[0], halfSolution[1],
+                                          halfSolution[2]};
+            const double couple = halfSolution[3];
+            for (std::size_t face = 0; face < sim.skinTriangleCount;
+                 ++face) {
+                if (faceHalf[face] != static_cast<std::uint8_t>(half)) {
+                    continue;
+                }
+                const double areaLength = length(areaVector[face]);
+                if (areaLength <= 0.0) {
+                    continue;
+                }
+                const softwing::Vec3 normal =
+                    areaVector[face] / areaLength;
+                const double increment =
+                    dot(normal, gradient) + couple * halfStation[face];
+                const double base = triangles[face].pressureDifference;
+                const double combined =
+                    std::clamp(base + increment, -0.5 * q, ceiling);
+                sim.body->setFacePressureDifference(face, combined);
+            }
+        }
+    }
+
+    // What actually got applied, after clamping: the residuals say
+    // whether the solve's promise survived contact with the floor and
+    // the cap.
+    softwing::Vec3 achieved;
+    softwing::Vec3 achievedMoment;
+    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+        const softwing::Vec3 force =
+            triangles[face].pressureDifference * areaVector[face];
+        achieved += force;
+        achievedMoment += cross(faceCentre[face] - anchor, force);
+    }
+    sim.lastForceResidual = achieved - wingForce;
+    sim.lastPitchResidual = dot(achievedMoment, sample.spanAxis);
 
     // The pilot as a bluff body, dragged where the mass hangs, against
     // the pilot's own relative wind. Beyond trimming the pendulum lean,
@@ -3774,13 +4232,30 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
         !controls.freeFlight && controls.flightLoad
             ? kTunnelBrakeGapMetres
             : 0.0;
+    // The pull the wing actually gets, chasing the pull the pilot asked
+    // for at no more than a hand's speed IN SIMULATED TIME. See
+    // SimBody::brakeApplied: the controls are sampled on the wall clock
+    // and the wing runs on its own, so without this a hand movement made
+    // over three quarters of a second arrives as a third of a second of
+    // input. It applies to letting go as much as to pulling — a release
+    // is the half of a brake input that surges the wing, and a step
+    // release is not something a hand can do.
+    const double reach = kBrakeHandSpeed * simulationTimeStep;
+    const std::array<double, 2> wanted{controls.brakeLeft,
+                                       controls.brakeRight};
+    for (int side = 0; side < 2; ++side) {
+        sim.brakeApplied[side] +=
+            std::clamp(wanted[side] - sim.brakeApplied[side],
+                       -reach,
+                       reach);
+    }
     auto &constraints = sim.body->constraints();
     for (const BrakeLine &brake : sim.brakeLines) {
         if (brake.constraint >= constraints.size()) {
             continue;
         }
         const double pull =
-            brake.left ? controls.brakeLeft : controls.brakeRight;
+            brake.left ? sim.brakeApplied[0] : sim.brakeApplied[1];
         constraints[brake.constraint].restLength =
             std::max(0.05, brake.restLength + brakeGap - pull);
     }

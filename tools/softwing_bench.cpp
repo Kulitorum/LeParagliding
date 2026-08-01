@@ -27,6 +27,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -353,6 +354,50 @@ double sideSectionRatio(const pg::SimBody &sim,
     return rest > 0.0 ? live / rest : 1.0;
 }
 
+// The single worst bay's live/rest section ratio, and how many bays are
+// far enough below their rest section for the cell model's collapse vent
+// to be doing anything. The side averages in the table hide both: a wing
+// can lose a third of its span with every bay still near its rest
+// section, and then nothing is folded in the sense the vent means.
+struct WorstSection
+{
+    double ratio = 1.0;    // worst live/rest rib section area
+    double volume = 1.0;   // worst live/rest bay volume
+    int vented = 0;        // bays under the cell model's vent threshold
+};
+WorstSection worstSection(const pg::SimBody &sim)
+{
+    const auto &nodes = sim.body->nodes();
+    WorstSection worst;
+    for (const pg::SimCell &cell : sim.cells) {
+        if (cell.restSectionArea <= 0.0 || cell.restVolume <= 0.0) {
+            continue;
+        }
+        double area = 0.0;
+        for (const std::size_t rib : cell.ribs) {
+            softwing::Vec3 sum;
+            const auto &loop = sim.ribLoopNodes[rib];
+            for (std::size_t node = 0; node < loop.size(); ++node) {
+                sum += cross(nodes[loop[node]].position,
+                             nodes[loop[(node + 1) % loop.size()]]
+                                 .position);
+            }
+            area += 0.5 * length(sum);
+        }
+        const double ratio = 0.5 * area / cell.restSectionArea;
+        const double spacing = length(
+            nodes[sim.ribChords[cell.ribs[1]].leadingNode].position
+            - nodes[sim.ribChords[cell.ribs[0]].leadingNode].position);
+        const double volume = 0.5 * area * spacing / cell.restVolume;
+        worst.ratio = std::min(worst.ratio, ratio);
+        worst.volume = std::min(worst.volume, volume);
+        if (volume < 0.55) {
+            ++worst.vented;
+        }
+    }
+    return worst;
+}
+
 // One row of the collapse-experiment tables.
 void printCollapseRow(const pg::SimBody &sim,
                       const std::vector<double> &sides,
@@ -371,8 +416,9 @@ void printCollapseRow(const pg::SimBody &sim,
             cellHigh = std::max(cellHigh, pressure);
         }
     }
+    const WorstSection worst = worstSection(sim);
     std::printf("  %5.1fs   %-5s   %+6.1f   %6.2f   %+5.1f   %+5.1f"
-                "   %4.0f..%-4.0f   %7.0f\n",
+                "   %4.0f..%-4.0f   %4.0f %4.0f %3d   %7.0f\n",
                 timeSeconds,
                 phase,
                 referenceVolume > 0.0
@@ -384,6 +430,9 @@ void printCollapseRow(const pg::SimBody &sim,
                 (sideSectionRatio(sim, sides, +1.0) - 1.0) * 100.0,
                 cellLow,
                 cellHigh,
+                worst.ratio * 100.0,
+                worst.volume * 100.0,
+                worst.vented,
                 trailing);
 }
 
@@ -864,7 +913,7 @@ int main(int argc, char **argv)
         const double settledVolume = enclosedVolume(sim);
         const std::vector<double> sides = cellSides(sim);
         std::printf("   time   phase   volume%%   span m   secL%%   secR%%"
-                    "   cells Pa      grab N\n");
+                    "   cells Pa   sec  vol vnt      grab N\n");
         pg::beginGrab(sim, grabNode);
         const int rampFrames = 60;
         const int holdFrames = 60;
@@ -940,7 +989,7 @@ int main(int argc, char **argv)
         const double settledVolume = enclosedVolume(sim);
         const std::vector<double> sides = cellSides(sim);
         std::printf("   time   phase   volume%%   span m   secL%%   secR%%"
-                    "   cells Pa    alpha deg\n");
+                    "   cells Pa   sec  vol vnt  alpha deg\n");
         pg::SimControls dived = controls;
         dived.angleOfAttackDegrees = options.diveDegrees;
         const int diveFrames = 180;
@@ -988,6 +1037,17 @@ int main(int argc, char **argv)
                     sim.aspectRatio);
         std::printf("   time    airspeed   alpha     L/D    fwd m/s"
                     "   sink m/s   span m   volume    pilot below\n");
+        // Turn instrumentation. A brake's whole job is to steer, and none
+        // of the columns above can see a turn: the system is re-centred on
+        // the origin every frame, so heading lives only in the velocity.
+        // Bank comes from the live span axis (the same one the polar
+        // measures its angle of attack against), heading from the
+        // horizontal flight direction, and the two together are what says
+        // whether a one-sided pull produced a turn or merely a departure.
+        double previousHeading = 0.0;
+        double previousTime = 0.0;
+        double headingTotal = 0.0;
+        bool haveHeading = false;
         const auto systemVelocity = [&sim] {
             softwing::Vec3 velocity;
             double mass = 0.0;
@@ -1170,6 +1230,67 @@ int main(int argc, char **argv)
                         kink.rib,
                         kink.spanFraction,
                         kink.x);
+            // Bank, heading, turn rate and sideslip.
+            //
+            // Heading is taken from the wing's travel THROUGH THE AIR,
+            // not from its ground track. The model flies the wing in an
+            // air mass that is itself moving at the airspeed the pressure
+            // slider sets, so the ground velocity is the difference of
+            // two comparable vectors and its direction says almost
+            // nothing about where the wing is pointing — a 10 degree yaw
+            // can swing it 90.
+            //
+            // Signs are the SOLVER's: the span axis runs toward +x, so a
+            // positive bank has the +x tip high (the side
+            // controls.brakeRight acts on) and a positive turn rate is a
+            // turn from +y toward +x. A wing that answers a left brake
+            // (negative x, the viewer's right) with a turn toward that
+            // side shows a negative bank and a negative turn rate
+            // together; a bank with no turn is a wing falling over rather
+            // than steering, and a turn with no bank is a flat skid.
+            const double time = (frame + 1) / 60.0;
+            const pg::WingAeroSample turnSample =
+                pg::sampleWingAero(sim, controls);
+            double bankDegrees = 0.0;
+            double turnRate = 0.0;
+            double sideslip = 0.0;
+            if (turnSample.valid) {
+                bankDegrees =
+                    std::asin(std::clamp(turnSample.spanAxis.z, -1.0, 1.0))
+                    * 180.0 / 3.14159265358979;
+                // Where the wing is going relative to the air it is in.
+                const softwing::Vec3 travel =
+                    -1.0 * turnSample.windDirection;
+                sideslip = turnSample.airspeed
+                           * dot(travel, turnSample.spanAxis);
+                const double horizontal = std::sqrt(
+                    travel.x * travel.x + travel.y * travel.y);
+                if (horizontal > 1.0e-6) {
+                    const double heading =
+                        std::atan2(travel.x, travel.y);
+                    if (haveHeading && time > previousTime) {
+                        double delta = heading - previousHeading;
+                        while (delta > 3.14159265358979) {
+                            delta -= 2.0 * 3.14159265358979;
+                        }
+                        while (delta < -3.14159265358979) {
+                            delta += 2.0 * 3.14159265358979;
+                        }
+                        headingTotal += delta;
+                        turnRate = delta / (time - previousTime) * 180.0
+                                   / 3.14159265358979;
+                    }
+                    previousHeading = heading;
+                    previousTime = time;
+                    haveHeading = true;
+                }
+            }
+            std::printf("           bank %+6.2f deg,  heading %+7.1f deg,"
+                        "  turn %+6.2f deg/s,  sideslip %+5.2f m/s\n",
+                        bankDegrees,
+                        headingTotal * 180.0 / 3.14159265358979,
+                        turnRate,
+                        sideslip);
         }
         return 0;
     }

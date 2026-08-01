@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <vector>
 
 namespace pg = lep::playground;
@@ -330,8 +331,16 @@ void testPinchedMouthHoldsAir()
     const double charged = sim.cellPressure[0];
     check(charged > 1.0, "the cells start charged");
 
-    // Every vent node in the wing onto one point, so no mouth has any
-    // opening left for air to cross.
+    // Every mouth shut, SECTION BY SECTION: each section's mouth lip
+    // pinched onto its own centroid, so the vent faces between sections
+    // degenerate to lines and no opening is left for air to cross.
+    //
+    // Merging every vent node in the wing onto one point — what this did
+    // — shuts the mouths too, but it also drags the three ribs into each
+    // other, and a bay with no volume left is the one case that IS meant
+    // to lose its air (see testCollapseVent). Pinched per section, the
+    // mouths close and the bays keep their volume, which is the case
+    // this test is about.
     std::vector<std::size_t> ventNodes;
     for (const pg::SimCell &cell : sim.cells) {
         for (const std::size_t face : cell.ventFaces) {
@@ -341,13 +350,21 @@ void testPinchedMouthHoldsAir()
             ventNodes.push_back(tri.c);
         }
     }
-    Vec3 centre;
+    std::map<long long, std::vector<std::size_t>> sections;
     for (const std::size_t node : ventNodes) {
-        centre += sim.body->nodes()[node].position;
+        sections[std::llround(sim.body->nodes()[node].position.x * 1000.0)]
+            .push_back(node);
     }
-    centre = centre / static_cast<double>(ventNodes.size());
-    for (const std::size_t node : ventNodes) {
-        sim.body->nodes()[node].position = centre;
+    for (const auto &[station, group] : sections) {
+        static_cast<void>(station);
+        Vec3 centre;
+        for (const std::size_t node : group) {
+            centre += sim.body->nodes()[node].position;
+        }
+        centre = centre / static_cast<double>(group.size());
+        for (const std::size_t node : group) {
+            sim.body->nodes()[node].position = centre;
+        }
     }
 
     // The tunnel off would empty an open mouth (testTunnelOffDeflates);
@@ -415,14 +432,82 @@ void testSqueezeCap()
     }
     pg::applyPressure(squeezed, onControls);
     pg::applyPressure(legacy, offControls);
+    // The cap is a multiple of whatever state the cell still HAS, not of
+    // the ram target: a cell that has lost its air cannot push back. A
+    // bay crushed this far has also lost essentially all of its volume,
+    // so the collapse vent is draining it (see testCollapseVent) — which
+    // is why the state is read here rather than assumed.
+    const double state = squeezed.cellPressure[0];
     const double diff =
         squeezed.body->triangles()[0].pressureDifference
         - legacy.body->triangles()[0].pressureDifference;
-    check(std::abs(diff - 3.0 * onControls.pressurePascal) < 1e-6,
+    check(std::abs(diff - (4.0 * state - onControls.pressurePascal)) < 1e-6,
           "the squeeze saturates at the cap");
-    check(std::abs(squeezed.cellPressure[0] - onControls.pressurePascal)
-              < 1e-9,
+    check(state <= onControls.pressurePascal + 1e-9,
           "the squeeze is stamp-only; the state does not wind up");
+}
+
+// A bay that has lost its VOLUME must be able to lose its air. Before
+// the collapse vent, a folded bay was force-fed to ram exactly like a
+// flying one — its ribs read half-rho-v-squared whether they were in
+// clean air or buried inside a fold — so the folded cell and its healthy
+// neighbour BOTH sat at target, there was no gradient across the rib
+// holes, and the cross-port re-inflation path could do nothing however
+// hard it was driven. Ten times a zero gradient is still zero.
+void testCollapseVent()
+{
+    pg::SimBody sim = build(true);
+    pg::SimControls controls;
+    pg::applyPressure(sim, controls);
+    const double charged = sim.cellPressure[0];
+    check(charged > 1.0, "the cells start charged");
+
+    // Bay 0 concertinaed: its outboard rib slid in against the middle
+    // one. It keeps its whole section — translating a loop does not
+    // change its vector area — and loses its volume, which is exactly
+    // how this canopy collapses in the standing front-tuck case. Bay 1
+    // is untouched.
+    for (const std::size_t node : sim.ribLoopNodes[0]) {
+        sim.body->nodes()[node].position.x = -0.02;
+    }
+    // Both intakes and the cross-port sealed, so the vent is the only
+    // path either cell has.
+    for (pg::SimCell &cell : sim.cells) {
+        cell.ventFaces.clear();
+        cell.restVentArea = 0.0;
+    }
+    sim.cells[0].portAreaToNext = 0.0;
+    for (int frame = 0; frame < 120; ++frame) {
+        pg::applyPressure(sim, controls);
+    }
+    check(sim.cellPressure[0] < 0.2 * charged,
+          "a bay crushed to a fraction of its volume vents toward ambient");
+    check(sim.cellPressure[1] > 0.99 * charged,
+          "its healthy neighbour keeps every pascal");
+    check(sim.cellPressure[1] - sim.cellPressure[0] > 10.0,
+          "so the cross-ports finally have a gradient to work on");
+}
+
+// And the deadband under it: a wing holding its designed shape must see
+// the vent do nothing at all, or the calibration moves.
+void testHealthyBayIsNotVented()
+{
+    pg::SimBody sim = build(true);
+    pg::SimControls controls;
+    pg::applyPressure(sim, controls);
+    // Both intakes and the port sealed: with the vent silent there is no
+    // path left, so the state must not move by a pascal in ten seconds.
+    for (pg::SimCell &cell : sim.cells) {
+        cell.ventFaces.clear();
+        cell.restVentArea = 0.0;
+    }
+    sim.cells[0].portAreaToNext = 0.0;
+    const double charged = sim.cellPressure[0];
+    for (int frame = 0; frame < 600; ++frame) {
+        pg::applyPressure(sim, controls);
+    }
+    check(sim.cellPressure[0] == charged,
+          "an undeformed bay is not vented at all");
 }
 
 }  // namespace
@@ -440,6 +525,8 @@ int main()
     testTunnelOffDeflates();
     testRateClamp();
     testSqueezeCap();
+    testCollapseVent();
+    testHealthyBayIsNotVented();
     if (failures != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

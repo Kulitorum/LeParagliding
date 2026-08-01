@@ -342,6 +342,134 @@ controls and prints a full report; `--shape-sweep from:to:step` emits the
 sweep as CSV. The GUI and the bench share `settleAndMeasure()`, so a
 number in a report can always be reproduced without a GUI.
 
+## The turning couple, and where it had to go
+
+A one-sided brake used to produce no turning moment at all. The polar was
+evaluated per half at each half's own brake (commit `02edc34`), but the
+two halves' coefficients were then averaged into a single wing-level
+pair, so the difference between them never reached the wing.
+
+Three ways of getting it there were tried, and the first three failed:
+
+1. **A fifth row in the force-distribution solve** — a spanwise pressure
+   gradient `ν` constrained to produce the roll moment. It wrecked the
+   *symmetric* glide: airspeed 9 → 14.5 m/s, sink −1.3 → −3.2, with zero
+   brake. Constraining the increment's own roll moment is not a no-op; the
+   extra row rebuilds the entire increment field.
+2. **The same gradient layered on after the solve.** Symmetric-safe, but
+   it folded the wing at 4 s against a 9 s baseline (span 8.4 → 5.4 m in
+   one second). A spanwise-linear pressure gradient loads the tips
+   hardest, and the tips are where this fabric is weakest.
+3. **The whole force pass run per half-span** — each half cancelling its
+   own pressure resultant, on its own anchor, in its own 4×4. This is the
+   obvious generalisation and it takes the arc's lateral bracing out of
+   the fabric: an arced canopy's two halves lean on each other hard, each
+   half's pressure resultant carries a large spanwise component, and the
+   pair cancels. Asking each half's retrim to cancel its own cost the
+   tunnel wing 8% of its span and 18% of its volume, and it never settled.
+   Sharing the spanwise row out by area instead fixed that but left a
+   twist flag at a tip: giving each half its own `v` still puts a lateral
+   body force on each half that the single solve never had.
+4. **What is in the tree.** The shared pass is left exactly as it was —
+   the wing-level resultant, the wing anchor, one solve over all the skin
+   — and a *differential* pass adds half the coefficient difference to one
+   half and takes it off the other, through the same machinery, about each
+   half's own anchor on its own mean chord. The two anchors are offset
+   spanwise, so the couple has the wing's real lever arm and costs nothing
+   in pitch (a spanwise arm crossed with any force has no span-axis
+   component). With equal brakes and equal angles the difference is
+   *exactly* the zero vector and the pass does not run, so the tunnel
+   calibration is bit-for-bit unchanged — verified by CSV comparison, not
+   by inspection.
+
+### Roll and yaw damping, which had to come first
+
+Before any of that would read, the wing had to stop turning on its own. A
+hands-up symmetric launch drifted 47° of heading in ten seconds and folded
+at 17–18 s: the wing-level polar gave a rolling or yawing wing no
+restoring force whatever, because both halves saw one angle and one
+dynamic pressure.
+
+Both now come from the canopy's **rigid-body spin** (`canopySpinOf`), the
+same fit the per-rib pressure wind uses and for the same reason — a rigid
+fit has no breathing mode, so no fabric motion reaches a kilonewton-scale
+force through it. Each half gets the wind at its own quarter-chord
+station, which yields a low-passed angle departure and a dynamic-pressure
+ratio; both are 0 and 1 on a wing that is not rotating.
+
+Measuring each half's own **chord line** instead was tried first and is
+wrong twice over: a rigid roll does not move the chords relative to each
+other, so it damped nothing, and what it did measure — differential twist
+— is positive feedback, since a half that has twisted nose-up is handed
+more lift and twists further. It took the glide's sideslip from 5 to 9 m/s
+and brought the departure forward from 17 s to 13.
+
+With the kinematic form, the symmetric glide's heading drift over the
+first ten seconds falls from 47° to 11°, sideslip stays inside ±1 m/s to
+12 s, and bank holds inside ±5° to 12 s against ±8° and growing.
+
+### What the brake does now, and what it still does not
+
+A one-sided pull produces a real, mirror-symmetric turn **toward the
+braked side**: 8 cm ramped over 6 s gives −11 °/s for the left brake and
++7 to +27 °/s for the right, against +3 to +11 °/s hands-up.
+
+The **bank is inverted** — the wing skids, banked out of the turn it is
+yawing into. This is honest to the brake model rather than a bug in the
+couple: `polarFor` adds the brake as an effective camber angle, so the
+braked half always makes *more* lift at the wing's operating angle (12° +
+8° of camber at full pull is still short of the 20° stall knee), and a
+real wing banks into the turn because the braked half **slows**. The
+speed loop is present — brake drag yaws the wing, the braked half becomes
+the retreating one, its dynamic pressure falls — but at these turn rates
+it is worth about the same as the camber's lift increment and arrives a
+second later, so the camber wins. Closing that means re-calibrating
+`kBrakeCamberRadians` against a flap-deflected stall angle, which needs
+data this project does not have.
+
+Adding the flap's centre-of-pressure travel (feeding the camber into each
+half's anchor fraction, which is real aerodynamics) halves the wrong-way
+bank without flipping its sign, and brings the departure under a one-sided
+pull forward by 1.5 s. It is not in the tree for that reason.
+
+## How a cell loses its air
+
+`advanceCellPressures` relaxes each cell toward its ribs' ram pressure,
+and `ribPressure` is ½ρv² from the rib's own relative wind **whether that
+rib is flying or buried inside a fold**. A collapsed cell was therefore
+force-fed exactly as hard as a healthy one, both sat at target, and there
+was no gradient across the rib holes for the cross-ports to work on — so
+the Neighbour-reinflation slider was inert by construction. Ten times a
+zero gradient is still zero. Measured through the standing `--dive -6`
+case on gnuC2, the cell states went *up*, 66 → 74–80 Pa, while the wing
+folded.
+
+A folded bay is now **vented toward ambient**, at a rate rising with how
+far it has collapsed. Three details are load-bearing:
+
+- It is a **leak, not a reduced target.** The intake keeps its own ram
+  target and its own rate, so a folded bay whose mouth still meets the
+  airflow rams itself back open exactly as before. Reducing the target —
+  the obvious reading — would take that away and make a collapse
+  permanent by construction, which is the failure the cell model exists
+  to escape.
+- The signal is **bay volume, not section area.** Section area is the
+  natural guess and it never fires: through `--dive -6` the wing lost 31%
+  of its enclosed volume and half its span with no rib loop ever below
+  67% of its own rest section. This canopy does not collapse by
+  flattening its sections, it collapses by concertinaing its ribs
+  together. Bays go to 5–9% of their rest *volume* there, against 97–98%
+  on a healthy settled wing on both reference meshes.
+- It is **deadbanded** on that separation, so a wing holding its shape
+  sees exactly nothing.
+
+`--dive -6` on gnuC2 then ends at −1.4% of its settled volume and 94% of
+its rest span, against −31% and 67% before; mirror error falls from
+2165 mm to 183 mm, the `UnderInflated` flag goes away, and the cell field
+carries a real 53–77 Pa gradient where it used to be a flat 74–80. The
+`--tuck 250` guard on the Swoop at 60×4 is untouched — no bay there ever
+crosses the threshold.
+
 ## Limits, stated
 
 Same boundary as always, now with a sharper edge: the polar is classical

@@ -231,6 +231,14 @@ public:
         double sinkSpeed = 0.0;
         double pilotBelowMetres = 0.0;
         double pilotMassKg = 0.0;
+        // Simulated time since the last build or Reset, seconds. Not wall
+        // clock: the wing runs at its own 60 Hz however long a frame takes
+        // to compute, and at 30x2 on a real wing that is two to three
+        // times slower than the clock on the wall. Without this on screen
+        // there is no way to tell a two-second surge from a five-second
+        // one, and every judgement about how fast the wing answers a
+        // control is made against the wrong clock.
+        double simSeconds = 0.0;
         // How far the air has slid past the wing since the build. The
         // only thing in the model that knows the wing is going anywhere.
         QVector3D airTravel;
@@ -422,10 +430,17 @@ public:
                   const SimControls &controls,
                   double frameSeconds)
     {
-        if (!log_.isOpen() || !sim.body) {
+        if (!sim.body) {
             return;
         }
+        // Counted before the log is consulted, not after: this is also
+        // the HUD's clock now, and a session where the log file could not
+        // be opened would otherwise report the wing frozen at zero
+        // seconds while it flew.
         loggedSeconds_ += lep::playground::simulationTimeStep;
+        if (!log_.isOpen()) {
+            return;
+        }
         // Every control change gets its own line whatever the cadence:
         // what the pilot did is the half of the record that explains the
         // other half.
@@ -891,6 +906,9 @@ private:
                 static_cast<float>(sim.airTravel.z));
             back.glideRatio = sim.lastGlideRatio;
             back.pilotMassKg = sim.pilotMass;
+            // The same counter the session log's first column carries, so
+            // a moment on screen and a row in the log can be lined up.
+            back.simSeconds = loggedSeconds_;
             back.forwardSpeed = 0.0;
             back.sinkSpeed = 0.0;
             back.pilotBelowMetres = 0.0;
@@ -1477,6 +1495,15 @@ public:
         }
         const lep::playground::ShapeReport &report = front_.report;
         QStringList parts;
+        // SIMULATED seconds, and first, because everything after it is
+        // read as a rate. The wing keeps its own 60 Hz clock however long
+        // a frame takes to compute, so on a real wing at 30x2 this runs
+        // two to three times slower than the wall clock — and without it
+        // in view, a surge that took the wing two seconds looks like five
+        // and every judgement about how quickly it answered a control is
+        // made against the wrong one.
+        parts << QStringLiteral("Time %1 s")
+                     .arg(front_.simSeconds, 0, 'f', 1);
         // The polar's numbers only exist when a polar pass runs; the raw
         // pinned pressure field carries no drag model worth quoting.
         if (controls_.flightLoad || controls_.freeFlight) {
@@ -2631,7 +2658,10 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     // Motes of air at fixed points in the world. They exist only to make
     // the wing's own travel legible: gliding, sinking and surging all
     // look alike against an empty background.
-    airDensity_ = makeSlider(100, 0);
+    // On at full by default: gliding, sinking and surging all look alike
+    // against an empty background, and the motes are the only thing in
+    // the view that shows the wing is going anywhere at all.
+    airDensity_ = makeSlider(100, 100);
     airDensity_->setToolTip(QStringLiteral(
         "Draws motes of air at fixed points in space. They do not touch "
         "the physics — they are there so the wing's movement through the "
@@ -3219,6 +3249,13 @@ void PlaygroundPage::ensureView()
     view_->setSurfaceVisible(SimSurface::Strap, showStraps_->isChecked());
     view_->setLinesVisible(showLines_->isChecked());
     view_->setStressFullScale(stressScale_->value() / 10000.0);
+    // The mote field is off in a fresh view and only ever heard about
+    // the slider through valueChanged, so before this the slider's
+    // starting position was silently ignored — motes stayed off until
+    // the slider was touched, whatever it read.
+    view_->setAirSpacing(airDensity_->value() == 0
+                             ? 0.0
+                             : airSpacingFor(airDensity_->value()));
     view_->setColorMode(static_cast<PlaygroundView::ColorMode>(
         colorBy_->currentIndex()));
     view_->setLineFullScale(static_cast<double>(lineScale_->value()));
