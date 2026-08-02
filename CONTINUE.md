@@ -56,8 +56,14 @@ instance you did not start — rename the exe aside and relink, or ask.
 .\build\bin\Release\softwing-bench.exe build\aero\Swoop\lep-sim.json --tuck 250 --substeps 60 --iterations 4
 # expect "recovered: no flags", and 0 bays ever vented
 .\build\bin\Release\softwing-bench.exe build\aero\gnuC2\lep-sim.json --dive -6
-# expect volume back to about -1%, span 94% of rest, cells spread 53..77 Pa
 ```
+
+**`--dive` is CHAOTIC — never read one run of it as a regression.** Swept
+across -5/-6/-7 the outcome is not even monotonic in the disturbance: the
+milder -5 ends with 5.52 m of span against -6's 6.89 m. A reordering that
+changed no physics at all has also moved it substantially. If you need a
+verdict from it, sweep the angle and compare distributions, or use guard 1,
+which is deterministic and bit-comparable.
 
 Guard 1 is genuinely bit-for-bit today — every change below was checked
 against the CSV row and none of them moved a digit. Keep it that way; it
@@ -169,7 +175,7 @@ GUI, not the bench.
 
 ---
 
-## OPEN, and the important one: the retrim exceeds stagnation pressure
+## The retrim exceeding stagnation pressure — DIAGNOSED AND FIXED
 
 ### The report
 
@@ -221,21 +227,28 @@ exchange exactly nothing); the collapse vent is not firing (0 bays vented,
 worst bay 95% of rest volume on a healthy gnuA1); the cell interiors are
 at target throughout.
 
-### What to do
+### The fix that is in
 
-The floor should be the physical one — the exterior cannot exceed
-stagnation, so the net difference cannot fall below `interior −
-ribPressure` — rather than `−0.5·q`.
+`applyPressure` records `SimBody::facePressureFloor` per skin face — that
+face's cell interior minus the local stagnation pressure — and both retrim
+apply sites clamp to it instead of `−0.5·q`. The stamped field already
+satisfied it; only the retrim did not.
 
-Be warned what that costs: on a healthy cell sitting at ram that floor is
-about **zero**, so the retrim would lose the ability to pull any face
-inward, and the pitch solve is *already* saturating. The couple would
-then have to come from moving the centre of pressure — reshaping the
-exterior Cp, which is legitimately chordwise-varying — instead of from a
-gradient added to the net difference. That is a redesign of the
-calibrated stability stack, which is the part of this model that has
-historically cost days. Do it deliberately, on top of a commit, with
-guard 1's CSV row open.
+Measured, gnuA1 free flight: TE dp −29..−33 → **−8..+11 Pa**, LE dp
+1..16 → **23..34 Pa**. Guard 1 (deterministic): agitation 117.1 → **25.3
+mm/s**, slack 23.4 → 20.9%, asymmetry 4.4 → 2.6 mm, worst deviation 14.0
+→ 10.5 mm, rows A 376.8/367.0 → 355.2/356.1, still settled at 3.2 s, still
+no flags, lift/drag/glide unchanged at 1280 N / 167 N / 7.66. The tuck
+guard is untouched. `--dive -6` reads worse, but see the chaos warning
+above — the sweep is not monotonic.
+
+**What it did not fix.** The pitch solve is still saturating (residuals
+19–227 N·m), because the couple still has no physical channel: it is a
+chordwise gradient on the net difference, and with an honest floor there
+is simply less room for one. The couple has to come from moving the
+CENTRE OF PRESSURE — reshaping the exterior Cp, which is legitimately
+chordwise-varying — rather than from a gradient. That is a redesign of the
+calibrated stability stack and is still open.
 
 ### Also true, and probably related
 

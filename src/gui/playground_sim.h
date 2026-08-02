@@ -350,6 +350,22 @@ struct SimBody
     // Per-rib section lift coefficient from the most recent load stamp;
     // shapes the chordwise pressure distribution.
     std::vector<double> ribLiftCoefficient;
+    // The lowest pressure difference each skin face can PHYSICALLY carry,
+    // recorded by applyPressure: its cell's interior pressure minus the
+    // local stagnation pressure. Nothing subsonic pushes on a surface
+    // harder than stagnation, so the difference across a face cannot fall
+    // below this without the model claiming an exterior pressure the air
+    // cannot produce.
+    //
+    // The stamped field satisfies it by construction — externalPressure-
+    // Coefficient caps Cp at 1 for exactly this reason. The retrim
+    // increment did not: its floor was a flat -0.5*q, and on a
+    // low-aspect-ratio wing the chordwise gradient it uses to cancel the
+    // pressure field's pitch moment drove the trailing edge to Cp 1.2-1.5.
+    // That is what a flapping trailing edge and a dimpled nose were: not
+    // fabric left unloaded, fabric pressed inward by a pressure that does
+    // not exist. Empty when the mesh carried no rib chords to stamp from.
+    std::vector<double> facePressureFloor;
     // Which half-span each rib belongs to, fixed at build time from its
     // rest station along restSpanAxis: 0 is the low-span (negative mesh x)
     // half, which is the solver's LEFT and the side SimControls::brakeLeft

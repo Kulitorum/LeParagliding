@@ -2215,6 +2215,9 @@ void applyPressure(SimBody &sim, const SimControls &controls)
         sim.body->setUniformPressureDifference(
             sim.body->surfaceGroup(0, sim.skinTriangleCount),
             dynamicPressure);
+        // Nothing to derive a physical floor from; the retrim falls back
+        // to its own bound.
+        sim.facePressureFloor.clear();
         return;
     }
 
@@ -2366,10 +2369,18 @@ void applyPressure(SimBody &sim, const SimControls &controls)
             freestream,
             std::max(0.0, controls.crossPortGain));
     }
+    sim.facePressureFloor.assign(sim.skinTriangleCount, 0.0);
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const FaceAero &aero = sim.faceAero[face];
         const double coefficient = externalPressureCoefficient(
             aero.chordFraction, aero.upperSurface, ribLift[aero.rib]);
+        // The interior this face has, minus the most the air outside it
+        // can ever push back with. Cp is capped at 1 just above, so the
+        // stamped value below is always at or over this; it is the retrim
+        // that has to be held to it.
+        sim.facePressureFloor[face] =
+            (cellsActive ? interior[aero.cell] : ribPressure[aero.rib])
+            - ribPressure[aero.rib];
         // The outside of the face is q·Cp; only the difference across the
         // fabric loads it, which is why there is no separate ambient
         // anywhere here. The legacy expression is kept verbatim on the
@@ -3385,6 +3396,17 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     const double ceiling =
         kMaximumDynamicPressureRatio
         * std::max(q, std::max(0.0, controls.pressurePascal));
+    // The floor the retrim may not go under, per face: the interior this
+    // face has, less the most the air outside it can push with (see
+    // SimBody::facePressureFloor). A flat -0.5*q was used before, and it
+    // let the pitch gradient drive the trailing edge to Cp 1.2-1.5 — a
+    // pressure above stagnation, which the stamped field forbids itself
+    // one line at a time and the retrim then walked straight through.
+    const auto floorFor = [&](std::size_t face) {
+        return face < sim.facePressureFloor.size()
+                   ? sim.facePressureFloor[face]
+                   : -0.5 * q;
+    };
     double solution[4] = {};
     if (solve4x4(system, solution)) {
         const softwing::Vec3 gradient{solution[0], solution[1],
@@ -3405,7 +3427,7 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
             // capped like the base field.
             const double base = triangles[face].pressureDifference;
             const double combined =
-                std::clamp(base + increment, -0.5 * q, ceiling);
+                std::clamp(base + increment, floorFor(face), ceiling);
             sim.body->setFacePressureDifference(face, combined);
         }
     }
@@ -3464,7 +3486,7 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                     dot(normal, gradient) + couple * halfStation[face];
                 const double base = triangles[face].pressureDifference;
                 const double combined =
-                    std::clamp(base + increment, -0.5 * q, ceiling);
+                    std::clamp(base + increment, floorFor(face), ceiling);
                 sim.body->setFacePressureDifference(face, combined);
             }
         }
