@@ -250,6 +250,65 @@ CENTRE OF PRESSURE — reshaping the exterior Cp, which is legitimately
 chordwise-varying — rather than from a gradient. That is a redesign of the
 calibrated stability stack and is still open.
 
+---
+
+## OPEN, and the one a pilot actually hits: no weathercock stability
+
+### The report
+
+Pull one brake and the wing steers — correctly, toward the braked side —
+then loses inflation and collapses. The pilot's description: "it feels
+like the wing rotates but the local wind does not, so it's essentially
+flying sideways, and then correctly collapses."
+
+### Not the wind
+
+The obvious suspicion is that the freestream fails to rotate with the
+wing. It does not need to. In free flight the relative wind is
+`freestreamVelocity(sim, controls) − canopyVelocityOf(sim)` — a fixed air
+mass with the canopy's own velocity subtracted — so it swings as the
+flight path curves. Flying in a steady uniform wind is Galilean-equivalent
+to flying in still air; the wing cannot tell. Rotating the freestream
+would rotate the WEATHER, translating the wing sideways rather than
+turning it. Do not do it.
+
+### What is actually missing
+
+`sampleWingAero` deletes the sideslip before it measures anything:
+
+```cpp
+const softwing::Vec3 windInPlane =
+    relative - dot(relative, spanAxis) * spanAxis;
+```
+
+That span component IS the sideslip. After this line it survives only in
+the lift and drag DIRECTIONS. Nothing in the model turns sideslip into a
+yawing moment: the polar's drag acts through the anchor on the centreline
+so it has no lever arm, the per-rib pressure winds carry rotation but not
+sideslip, and the pilot's drag acts below the wing and gives roll.
+
+So the wing has **no directional stability whatever**. Once it yaws,
+nothing brings the nose back into the wind, the sideslip persists and
+grows, and a canopy flying sideways collapses. It is visible hands-up
+(sideslip walks out to several m/s on the Swoop with no input at all) and
+the brake makes it worse, because the turning couple yaws the wing and yaw
+without weathercock stability is pure sideslip generation. The better the
+steering works, the faster the wing ends up flying sideways.
+
+### What to do
+
+A real canopy weathercocks from its ARC: sideslip meets the two halves'
+tilted section planes at different incidence, and the difference pulls the
+nose back into the wind. The machinery for that already exists —
+`alphaHalfDeviationRadians` and `halfDynamicPressureRatio` currently take
+each half's wind from the canopy's rigid-body spin only. Feed the sideslip
+component through each half's own section plane as well and the arc gets
+its real effect, arriving through the differential pass that already
+carries the brake: no new force channel, no new invariant.
+
+Do this BEFORE the retrim basis redesign. It is smaller, the machinery is
+built, and it is the one that is collapsing wings in the GUI today.
+
 ### Also true, and probably related
 
 gnuA1 is under-inflated **in the tunnel**, before free flight is involved
