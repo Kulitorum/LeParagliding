@@ -526,12 +526,15 @@ and a classical finite-wing polar sets the system-level force:
   velocity toward the system's bulk velocity, not toward zero. Absolute
   damping at glide speed is a fake drag several times the real drag budget
   — it, not the aerodynamics, would set the trim speed.
-- The pilot is sized so weight matches the polar resultant at the in-flight
-  trim (rest angle plus glide angle, iterated to a fixed point), a few
-  percent light for tip-stall margin, and the system launches with the
-  steady descent velocity already applied — from a dead stop in a
-  horizontal wind, the canopy gets yanked aft around the heavy pilot and
-  goes over before the sink can develop.
+- Pilot-plus-harness mass is explicit. TrimmedGlide keeps the estimated path
+  direction but sizes q from achieved bounded wing support versus total
+  dynamic-node weight, then runs eight co-moving quasi-static load frames and
+  recalibrates on the retained geometry. DropFromRest remains an untouched
+  pre-inflated zero-velocity release.
+- `StepSettings::cableConstraintSweepPairs` adds deterministic serial
+  reverse/forward cable-only passes before structural sweeps. Playground free
+  flight uses three pairs so the payload reaction crosses its deep suspension
+  graph at 30x2; zero is the exact historical/tunnel bypass.
 
 Three earlier lessons that still stand:
 

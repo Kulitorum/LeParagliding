@@ -194,13 +194,33 @@ endif()
 # The Playground's wing: mesh parsing, refinement, SoftBody assembly and the
 # per-frame step, with no widget attached. A library rather than GUI sources
 # so the headless solver benchmark drives the identical simulation.
+add_library(playground_pressure STATIC
+    src/gui/playground_pressure_solve.cpp
+    src/gui/playground_pressure_solve.h
+)
+target_include_directories(playground_pressure PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui)
+
 add_library(playground_sim STATIC
     src/gui/playground_sim.cpp
     src/gui/playground_sim.h
     src/gui/playground_metrics.cpp
     src/gui/playground_metrics.h
 )
-target_link_libraries(playground_sim PUBLIC Qt6::Core softwing_core)
+add_library(playground_contact STATIC
+    src/gui/playground_contact.cpp
+    src/gui/playground_contact.h
+)
+target_link_libraries(playground_contact PUBLIC softwing_core)
+target_include_directories(playground_contact PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
+)
+target_link_libraries(playground_sim PUBLIC
+    playground_pressure
+    Qt6::Core
+    softwing_core
+    playground_contact
+)
 target_include_directories(playground_sim PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
 )
@@ -366,15 +386,35 @@ add_executable(playground-metrics-test
 )
 target_link_libraries(playground-metrics-test PRIVATE playground_sim)
 
+add_executable(playground-pressure-solve-test
+    tests/playground_pressure_solve_test.cpp
+)
+target_link_libraries(playground-pressure-solve-test PRIVATE playground_pressure)
+
+add_executable(softwing-material-test
+    tests/softwing_material_test.cpp
+)
+target_link_libraries(softwing-material-test PRIVATE softwing_core)
+
 add_executable(playground-cells-test
     tests/playground_cells_test.cpp
 )
 target_link_libraries(playground-cells-test PRIVATE playground_sim)
 
+add_executable(playground-material-test
+    tests/playground_material_test.cpp
+)
+target_link_libraries(playground-material-test PRIVATE playground_sim)
+
 add_executable(playground-contact-test
     tests/playground_contact_test.cpp
 )
-target_link_libraries(playground-contact-test PRIVATE playground_sim)
+target_link_libraries(playground-contact-test PRIVATE playground_contact)
+
+add_executable(playground-contact-integration-test
+    tests/playground_contact_integration_test.cpp
+)
+target_link_libraries(playground-contact-integration-test PRIVATE playground_sim)
 
 add_executable(flatparts-export-test
     tests/flatparts_export_test.cpp
@@ -477,8 +517,12 @@ set_target_properties(
     section-grid-test
     airfoil-file-test
     playground-metrics-test
+    playground-pressure-solve-test
+    softwing-material-test
     playground-cells-test
+    playground-material-test
     playground-contact-test
+    playground-contact-integration-test
     flatparts-export-test
     nesting-bench
     softwing-bench
@@ -497,8 +541,12 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         section-grid-test
         airfoil-file-test
         playground-metrics-test
+        playground-pressure-solve-test
+        softwing-material-test
         playground-cells-test
+        playground-material-test
         playground-contact-test
+        playground-contact-integration-test
         flatparts-export-test
         nesting-bench
         softwing-bench
@@ -598,8 +646,13 @@ add_test(NAME section_grid COMMAND section-grid-test)
 add_test(NAME airfoil_file COMMAND airfoil-file-test
     "${CMAKE_CURRENT_SOURCE_DIR}/Data/gnua.txt")
 add_test(NAME playground_metrics COMMAND playground-metrics-test)
+add_test(NAME playground_pressure_solve COMMAND playground-pressure-solve-test)
+add_test(NAME softwing_material COMMAND softwing-material-test)
 add_test(NAME playground_cells COMMAND playground-cells-test)
+add_test(NAME playground_material COMMAND playground-material-test)
 add_test(NAME playground_contact COMMAND playground-contact-test)
+add_test(NAME playground_contact_integration
+    COMMAND playground-contact-integration-test)
 add_test(NAME flatparts_export COMMAND flatparts-export-test)
 add_test(NAME engine_rejects_missing_input
     COMMAND leparagliding-engine

@@ -339,6 +339,313 @@ void testTensionReadout()
           "tension: out-of-range constraint reads zero");
 }
 
+void testLineDeduplication()
+{
+    // Old lep-sim files contain both the captured full-wing segment and the
+    // writer's mirrored copy. Endpoint order is immaterial, but an authored
+    // row/brake distinction at coincident coordinates is not.
+    const QByteArray json = R"json({
+        "nodes": [[0,0,0], [1000,0,0], [1000,1000,0], [0,1000,0]],
+        "quads": [[0,1,2,3]],
+        "lines": [
+          {"a":[0,0,0], "b":[0,0,-1000], "plan":1, "brake":0},
+          {"a":[0,0,-1000], "b":[0,0,0], "plan":1, "brake":0},
+          {"a":[0,0,0], "b":[0,0,-1000], "plan":1, "brake":0},
+          {"a":[0,0,0], "b":[0,0,-1000], "plan":2, "brake":0},
+          {"a":[0,0,0], "b":[0,0,-1000], "plan":1, "brake":1}
+        ]
+      })json";
+    QString error;
+    const std::optional<pg::SimMesh> parsed = pg::parseSimMesh(json, error);
+    check(parsed.has_value(), "dedup: duplicate JSON parses");
+    if (!parsed) {
+        return;
+    }
+    check(parsed->lines.size() == 3,
+          "dedup: exact and reversed copies become one line");
+    check(parsed->duplicateLineCount == 2,
+          "dedup: parser reports discarded copies");
+    const pg::SimBody parsedBody =
+        pg::buildSimBody(*parsed, {}, pinnedControls());
+    check(parsedBody.lineSegments.size() == 3,
+          "dedup: one cable per distinct semantic line");
+    check(parsedBody.duplicateLineCount == 2,
+          "dedup: parser diagnostic reaches built body");
+    check(std::abs(parsedBody.tunnelLineSolverBallastKg
+                   - 2.0 * pg::tunnelLineJunctionRelaxationMassKg)
+              < 1.0e-12,
+          "tunnel mass: unique junctions get diagnosed relaxation ballast");
+    check(parsedBody.lineJunctionFloorMassKg == 0.0,
+          "tunnel mass: physical free-flight floor is inactive when pinned");
+
+    pg::SimMesh direct = testMesh();
+    const pg::SimLine original = direct.lines.front();
+    direct.lines.push_back(
+        {original.b, original.a, original.brake, original.plan});
+    const pg::SimBody directBody =
+        pg::buildSimBody(direct, {}, pinnedControls());
+    check(directBody.lineSegments.size() + 1 == direct.lines.size(),
+          "dedup: builder defensively rejects direct duplicate");
+    check(directBody.duplicateLineCount == 1,
+          "dedup: builder reports direct duplicate");
+    double uniqueLineMass = 0.0;
+    for (const pg::SimLine &line : testMesh().lines) {
+        uniqueLineMass += pg::lineLinearDensityKgPerMetre
+                          * length(line.b - line.a);
+    }
+    check(std::abs(directBody.authoredLineMassKg - uniqueLineMass) < 1.0e-12,
+          "dedup: rejected line does not duplicate physical mass");
+}
+
+void setConstraintTension(pg::SimBody &sim,
+                          const pg::SimControls &controls,
+                          std::size_t constraint,
+                          double newtons)
+{
+    const double substepRate =
+        controls.substeps / pg::simulationTimeStep;
+    sim.body->constraints()[constraint].accumulatedLambda =
+        -newtons / (substepRate * substepRate);
+}
+
+void testRiserCutAndMass()
+{
+    pg::SimBody sim;
+    sim.body = std::make_unique<softwing::SoftBody>();
+    const std::size_t carabiner =
+        sim.body->addNode({0.0, 0.0, 0.0},
+                          pg::lineJunctionNumericalMassKg);
+    const std::size_t upperLeft =
+        sim.body->addNode({-0.6, 0.0, 0.8}, 0.10);
+    const std::size_t upperRight =
+        sim.body->addNode({0.6, 0.0, 0.8}, 0.20);
+    const std::size_t pilot =
+        sim.body->addNode({0.0, 0.0, -1.0}, 80.0);
+    const std::size_t leftCable =
+        sim.body->addCableConstraint(carabiner, upperLeft, 1.0);
+    const std::size_t rightCable =
+        sim.body->addCableConstraint(carabiner, upperRight, 1.0);
+    const std::size_t harness =
+        sim.body->addDistanceConstraint(carabiner, pilot, 1.0);
+    sim.lineSegments = {
+        {carabiner, upperLeft, false, leftCable, 1, true},
+        {carabiner, upperRight, false, rightCable, 1, true},
+        {carabiner, pilot, false, harness, 0, false},
+    };
+    sim.carabinerNodes = {carabiner};
+
+    const pg::SimControls controls;
+    setConstraintTension(sim, controls, leftCable, 5.0);
+    setConstraintTension(sim, controls, rightCable, 5.0);
+    setConstraintTension(sim, controls, harness, 8.0);
+    const pg::LineLoadReport loads = pg::lineLoads(sim, controls);
+    // Each branch contributes (±3, 0, 4) N. The canopy reaction is their
+    // vector sum: 8 N, not the 10 N scalar sum and not 18 N after counting
+    // the harness side of the same internal cut.
+    check(std::abs(loads.riserForce.x) < 1.0e-12
+              && std::abs(loads.riserForce.z - 8.0) < 1.0e-12,
+          "riser: branched reaction is vector-summed");
+    check(std::abs(loads.riserNewtons - 8.0) < 1.0e-12,
+          "riser: harness reaction is not double-counted");
+    check(loads.totalSegments == 2 && loads.slackSegments == 0,
+          "riser: only authored suspension segments are diagnosed");
+
+    check(std::abs(pg::simulatedMassKilograms(sim) - 80.3001) < 1.0e-12,
+          "mass: actual nodes include the line junction");
+}
+
+void testPayloadMassLineMassAndLaunch(const pg::SimMesh &mesh)
+{
+    pg::SimControls drop;
+    drop.freeFlight = true;
+    drop.pressurePascal = 80.0;
+    drop.pilotMassKg = 72.0;
+    drop.launchMode = pg::LaunchMode::DropFromRest;
+    pg::SimBody released = pg::buildSimBody(mesh, {}, drop);
+
+    check(std::abs(released.pilotMass - 72.0) < 1.0e-12,
+          "payload: explicit pilot/harness mass is used");
+    check(released.pilotNode != pg::noConstraint
+              && std::abs(released.body->nodes()[released.pilotNode].inverseMass
+                          - 1.0 / 72.0)
+                     < 1.0e-12,
+          "payload: pilot is a dynamic point mass, not a kinematic anchor");
+
+    double expectedLineMass = 0.0;
+    for (const pg::SimLine &line : mesh.lines) {
+        expectedLineMass += pg::lineLinearDensityKgPerMetre
+                            * length(line.b - line.a);
+    }
+    check(std::abs(released.authoredLineMassKg - expectedLineMass) < 1.0e-12,
+          "line mass: authored segment lengths set physical mass");
+
+    std::vector<std::size_t> endpoints;
+    for (const pg::LineSegment &segment : released.lineSegments) {
+        if (segment.suspension) {
+            endpoints.push_back(segment.a);
+            endpoints.push_back(segment.b);
+        }
+    }
+    std::sort(endpoints.begin(), endpoints.end());
+    endpoints.erase(std::unique(endpoints.begin(), endpoints.end()),
+                    endpoints.end());
+    const double expectedFloor = endpoints.size()
+                                 * pg::lineJunctionNumericalMassKg;
+    check(std::abs(released.lineJunctionFloorMassKg - expectedFloor)
+              < 1.0e-12,
+          "line mass: numerical junction floor is separate");
+    check(released.controlNodeFloorMassKg == 0.0,
+          "line mass: a mesh without brakes has no generated control mass");
+    check(released.tunnelLineSolverBallastKg == 0.0,
+          "line mass: free flight carries no tunnel relaxation ballast");
+    double endpointMass = 0.0;
+    for (const std::size_t endpoint : endpoints) {
+        endpointMass += 1.0 / released.body->nodes()[endpoint].inverseMass;
+    }
+    check(std::abs(endpointMass - expectedLineMass - expectedFloor) < 1.0e-12,
+          "line mass: half-segment lumps conserve authored mass");
+
+    pg::SimMesh brakedMesh = mesh;
+    brakedMesh.lines.front().brake = true;
+    const pg::SimBody braked = pg::buildSimBody(brakedMesh, {}, drop);
+    check(std::abs(braked.controlNodeFloorMassKg
+                   - pg::controlNodeNumericalMassKg)
+              < 1.0e-12,
+          "line mass: generated brake handle carries only its stated floor");
+    check(std::abs(braked.authoredLineMassKg - expectedLineMass) < 1.0e-12,
+          "line mass: synthesized brake cable is not double-counted");
+
+    const bool releasedAtRest = std::all_of(
+        released.body->nodes().begin(), released.body->nodes().end(),
+        [](const softwing::Node &node) {
+            return length(node.velocity) < 1.0e-15;
+        });
+    check(releasedAtRest,
+          "launch: drop-from-rest leaves the pre-inflated system at rest");
+
+    pg::SimControls trimmed = drop;
+    trimmed.launchMode = pg::LaunchMode::TrimmedGlide;
+    trimmed.ambientAirVelocityWorld = {2.5, -1.25, 0.75};
+    pg::SimBody flying = pg::buildSimBody(mesh, {}, trimmed);
+    const Vec3 referenceFlow = pg::referenceFlowVelocity(flying, trimmed);
+    const double referenceSpeed = length(referenceFlow);
+    const Vec3 expectedLaunch =
+        trimmed.ambientAirVelocityWorld
+        - rotatedAboutX(referenceFlow, {}, flying.glideAngleRadians)
+              * (referenceSpeed > 0.0
+                     ? flying.trimmedLaunchAirspeed / referenceSpeed
+                     : 0.0);
+    check(length(flying.body->nodes()[flying.pilotNode].velocity
+                 - expectedLaunch)
+              < 1.0e-12,
+          "launch: ground velocity is ambient minus trimmed apparent flow");
+    check(flying.trimmedLaunchDynamicPressure > 0.0
+              && flying.trimmedLaunchAirspeed > 0.0
+              && flying.trimmedLaunchEffectiveLiftCoefficient > 0.0,
+          "launch: achieved rest-field calibration is diagnosed");
+
+    std::array<double, 3> mass{30.0, 90.0, 250.0};
+    std::array<double, 3> launchSpeed{};
+    std::array<double, 3> launchQ{};
+    for (std::size_t index = 0; index < mass.size(); ++index) {
+        pg::SimControls weighted = trimmed;
+        weighted.pilotMassKg = mass[index];
+        const pg::SimBody launch = pg::buildSimBody(mesh, {}, weighted);
+        launchSpeed[index] = launch.trimmedLaunchAirspeed;
+        launchQ[index] = launch.trimmedLaunchDynamicPressure;
+        check(std::isfinite(launchSpeed[index])
+                  && std::isfinite(launchQ[index]),
+              "launch: weight-aware speed and q remain finite");
+        const double weight =
+            pg::simulatedMassKilograms(launch)
+            * pg::gravityMetresPerSecondSquared;
+        const double achievedSupport =
+            (launch.pressureSolve.achievedForce
+             + launch.lastPolarDragTractionForce)
+                .z;
+        const bool qCapped =
+            launchQ[index] >= 4.0 * weighted.pressurePascal - 1.0e-9;
+        check(qCapped
+                  ? achievedSupport > 0.0 && achievedSupport < weight
+                  : std::abs(achievedSupport - weight) / weight < 0.05,
+              "launch: achieved support matches weight unless q is capped");
+    }
+    const bool monotonicLaunch =
+        launchSpeed[0] < launchSpeed[1]
+        && launchSpeed[1] <= launchSpeed[2]
+        && launchQ[0] < launchQ[1] && launchQ[1] <= launchQ[2]
+        && (launchQ[1] < launchQ[2]
+            || launchQ[2] >= 4.0 * trimmed.pressurePascal - 1.0e-9);
+    check(monotonicLaunch,
+          "launch: 30/90/250 kg produce monotonic trimmed speed and q");
+
+    pg::SimControls tooLight = drop;
+    tooLight.pilotMassKg = -5.0;
+    const pg::SimBody minimum = pg::buildSimBody(mesh, {}, tooLight);
+    check(std::abs(minimum.pilotMass - pg::minimumPilotMassKg) < 1.0e-12,
+          "payload: programmatic mass is clamped at the lower bound");
+    pg::SimControls tooHeavy = drop;
+    tooHeavy.pilotMassKg = 500.0;
+    const pg::SimBody maximum = pg::buildSimBody(mesh, {}, tooHeavy);
+    check(std::abs(maximum.pilotMass - pg::maximumPilotMassKg) < 1.0e-12,
+          "payload: programmatic mass is clamped at the upper bound");
+}
+
+void testDynamicPointPayloadPendulum(const pg::SimMesh &mesh)
+{
+    pg::SimControls controls;
+    controls.freeFlight = true;
+    controls.pressurePascal = 0.0;
+    controls.pilotMassKg = 70.0;
+    controls.launchMode = pg::LaunchMode::DropFromRest;
+    pg::SimBody sim = pg::buildSimBody(mesh, {}, controls);
+    check(sim.pilotNode != pg::noConstraint,
+          "pendulum: free-flight build has a point payload");
+    check(!sim.carabinerNodes.empty(),
+          "pendulum: payload has a carabiner-side support");
+    if (sim.pilotNode == pg::noConstraint || sim.carabinerNodes.empty()) {
+        return;
+    }
+
+    // Freeze the canopy/riser side to make the familiar pendulum reference
+    // case, but leave the exact payload node and harness constraints created
+    // by buildSimBody. Rotate the payload about the common carabiner axis so
+    // every harness rest length remains satisfied at release.
+    auto &nodes = sim.body->nodes();
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        if (index != sim.pilotNode) {
+            sim.body->fixNode(index);
+        }
+    }
+    Vec3 pivot;
+    for (const std::size_t carabiner : sim.carabinerNodes) {
+        pivot += nodes[carabiner].position;
+    }
+    pivot /= static_cast<double>(sim.carabinerNodes.size());
+    const Vec3 bottom = nodes[sim.pilotNode].position;
+    const Vec3 released = rotatedAboutX(bottom, pivot, 20.0 * kDegrees);
+    nodes[sim.pilotNode].position = released;
+    nodes[sim.pilotNode].previousPosition = released;
+    nodes[sim.pilotNode].velocity = {};
+
+    softwing::StepSettings settings;
+    settings.timeStep = pg::simulationTimeStep;
+    settings.substeps = pg::simulationSubsteps;
+    settings.constraintIterations = pg::simulationIterations;
+    settings.gravity = {0.0, 0.0, -pg::gravityMetresPerSecondSquared};
+    settings.velocityDampingPerSecond = 0.0;
+    for (int frame = 0; frame < 5; ++frame) {
+        sim.body->step(settings);
+    }
+    const Vec3 moved = nodes[sim.pilotNode].position;
+    check(std::abs(moved.y - pivot.y) < std::abs(released.y - pivot.y),
+          "pendulum: gravity moves the released payload toward bottom");
+    check(length(nodes[sim.pilotNode].velocity) > 1.0e-4,
+          "pendulum: payload acquires dynamic velocity under gravity");
+    check(moved.z < released.z,
+          "pendulum: payload loses gravitational potential after release");
+}
+
 void testGrab(const pg::SimMesh &mesh)
 {
     // Direction matters here. Cables are one-sided and at q = 0 nothing
@@ -447,6 +754,143 @@ void testTinyRestEdgeIgnored(const pg::SimMesh &mesh)
     check(worst < 1.0F, "tinyrest: degenerate edge excluded from strain");
 }
 
+void testBoundedPressureRetrim(const pg::SimMesh &mesh)
+{
+    pg::SimControls controls;
+    controls.pressurePascal = 80.0;
+    controls.flightLoad = true;
+    controls.cellPressureModel = false;
+    pg::SimBody sim = pg::buildSimBody(mesh, {}, controls);
+    pg::applyAerodynamicForces(sim, controls);
+
+    const pg::PressureSolveDiagnostics &solve = sim.pressureSolve;
+    check(solve.attempted && !solve.legacy,
+          "pressure: bounded final-Cp path is default");
+    check(solve.valid && !solve.numericalFailure,
+          "pressure: bounded projection completes");
+    check(sim.faceAppliedExternalCp.size() == sim.skinTriangleCount,
+          "pressure: one final Cp per skin face");
+    check(solve.minimumCp
+              >= pg::minimumExteriorPressureCoefficient - 1.0e-9
+              && solve.maximumCp
+                     <= pg::maximumExteriorPressureCoefficient + 1.0e-9,
+          "pressure: final exterior Cp respects physical bounds");
+
+    Vec3 integrated;
+    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+        const double reconstructed =
+            sim.faceInteriorPressure[face]
+            - sim.faceDynamicPressure[face]
+                  * sim.faceAppliedExternalCp[face];
+        check(std::abs(reconstructed
+                       - sim.body->triangles()[face].pressureDifference)
+                  < 1.0e-9,
+              "pressure: face load is interior minus q Cp");
+        const softwing::Triangle &triangle = sim.body->triangles()[face];
+        const auto &nodes = sim.body->nodes();
+        integrated +=
+            triangle.pressureDifference * 0.5
+            * cross(nodes[triangle.b].position - nodes[triangle.a].position,
+                    nodes[triangle.c].position - nodes[triangle.a].position);
+    }
+    check(length(integrated - solve.achievedForce) < 1.0e-8,
+          "pressure: achieved-force diagnostic is independently integrated");
+    check(length((solve.achievedForce - solve.requestedForce)
+                 - solve.forceResidual)
+              < 1.0e-9,
+          "pressure: force residual remains in physical newtons");
+    const pg::WingAeroSample appliedSample =
+        pg::sampleWingAero(sim, controls);
+    check(appliedSample.valid
+              && std::abs(sim.lastLift
+                          - dot(sim.lastAeroForce,
+                                appliedSample.liftDirection))
+                     < 1.0e-8
+              && std::abs(sim.lastDrag
+                          - dot(sim.lastAeroForce,
+                                appliedSample.windDirection))
+                     < 1.0e-8,
+          "pressure: bounded telemetry resolves the applied force");
+    check(std::abs(solve.achievedLiftNewtons
+                   - dot(solve.achievedForce,
+                         appliedSample.liftDirection))
+              < 1.0e-8,
+          "pressure: diagnostics separate achieved from requested lift");
+    check(length(sim.lastPolarDragTractionForce) < 1.0e-15
+              && sim.lastPolarDragTractionNewtons == 0.0,
+          "drag: pinned pressure-shape instrument receives no skin traction");
+
+    controls.pressureSolveMode =
+        pg::PressureSolveMode::LegacyIncrementClamp;
+    pg::SimBody legacy = pg::buildSimBody(mesh, {}, controls);
+    pg::applyAerodynamicForces(legacy, controls);
+    check(legacy.pressureSolve.legacy
+              && !legacy.pressureSolve.attempted,
+          "pressure: legacy retrim requires explicit mode");
+    check(length(legacy.lastPolarDragTractionForce) < 1.0e-15
+              && legacy.lastPolarDragTractionNewtons == 0.0,
+          "drag: legacy oracle receives no new skin traction");
+    check(sim.faceRetrimPreferredCp.size() == sim.skinTriangleCount
+              && legacy.faceAppliedExternalCp.size()
+                     == legacy.skinTriangleCount,
+          "pressure: preferred and legacy Cp fields are available");
+    double worstPriorDifference = 0.0;
+    for (std::size_t face = 0;
+         face < sim.faceRetrimPreferredCp.size()
+             && face < legacy.faceAppliedExternalCp.size(); ++face) {
+        worstPriorDifference = std::max(
+            worstPriorDifference,
+            std::abs(sim.faceRetrimPreferredCp[face]
+                     - legacy.faceAppliedExternalCp[face]));
+    }
+    check(worstPriorDifference < 1.0e-10,
+          "pressure: bounded objective prior matches same-frame legacy field");
+
+    pg::SimControls flyingControls = controls;
+    flyingControls.freeFlight = true;
+    flyingControls.flightLoad = false;
+    flyingControls.pressureSolveMode =
+        pg::PressureSolveMode::BoundedExteriorCp;
+    flyingControls.launchMode = pg::LaunchMode::DropFromRest;
+    pg::SimBody flying = pg::buildSimBody(mesh, {}, flyingControls);
+    const Vec3 calibrationVelocity =
+        flyingControls.ambientAirVelocityWorld
+        - pg::referenceFlowVelocity(flying, flyingControls);
+    for (softwing::Node &node : flying.body->nodes()) {
+        node.velocity = calibrationVelocity;
+    }
+    pg::applyPressure(flying, flyingControls);
+    pg::applyAerodynamicForces(flying, flyingControls);
+    const pg::WingAeroSample flyingSample =
+        pg::sampleWingAero(flying, flyingControls);
+    check(flyingSample.valid
+              && std::abs(flying.lastPolarDragTargetNewtons
+                          - flyingSample.dynamicPressure
+                                * flying.planformArea
+                                * flyingSample.dragCoefficient)
+                     < 1.0e-8,
+          "drag: traction target is finite-wing polar drag without fabric heuristic");
+    const double expectedTraction = std::max(
+        0.0,
+        flying.lastPolarDragTargetNewtons
+            - flying.pressureSolve.achievedDragNewtons);
+    check(std::abs(flying.lastPolarDragTractionNewtons
+                   - expectedTraction)
+              < 1.0e-6 * std::max(1.0, expectedTraction),
+          "drag: free-flight skin traction supplies only missing positive drag");
+    check(flying.lastPolarDragTractionPowerWatts <= 1.0e-8,
+          "drag: free-flight skin traction has non-positive air-relative power");
+
+    pg::SimControls still = controls;
+    still.pressureSolveMode = pg::PressureSolveMode::BoundedExteriorCp;
+    still.pressurePascal = 0.0;
+    pg::SimBody noQ = pg::buildSimBody(mesh, {}, still);
+    pg::applyAerodynamicForces(noQ, still);
+    check(length(noQ.lastPolarDragTractionForce) < 1.0e-15
+              && noQ.lastPolarDragTractionNewtons == 0.0,
+          "drag: zero dynamic pressure produces zero skin traction");
+}
+
 }  // namespace
 
 int main()
@@ -458,9 +902,14 @@ int main()
     testTwistSign(mesh);
     testLeadingEdgeDent(mesh);
     testTensionReadout();
+    testLineDeduplication();
+    testRiserCutAndMass();
+    testPayloadMassLineMassAndLaunch(mesh);
+    testDynamicPointPayloadPendulum(mesh);
     testGrab(mesh);
     testCsv(mesh);
     testTinyRestEdgeIgnored(mesh);
+    testBoundedPressureRetrim(mesh);
     if (failures > 0) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

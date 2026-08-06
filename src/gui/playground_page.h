@@ -114,7 +114,12 @@ private:
     QCheckBox *showLineTension_ = nullptr;
     QSlider *lineScale_ = nullptr;
     QComboBox *quality_ = nullptr;
+    QComboBox *skinModel_ = nullptr;
+    QLabel *skinMaterialLabel_ = nullptr;
     QCheckBox *freeFlight_ = nullptr;
+    QSlider *pilotMass_ = nullptr;
+    QLabel *pilotMassLabel_ = nullptr;
+    QComboBox *launchMode_ = nullptr;
     QCheckBox *fabricContact_ = nullptr;
     QLabel *flightLabel_ = nullptr;
     QTimer *flightTimer_ = nullptr;

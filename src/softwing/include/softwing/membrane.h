@@ -97,10 +97,21 @@ struct OrthotropicMembraneMaterial {
     double warpPreTension = 0.0;
     double weftPreTension = 0.0;
     double dampingTime = 0.0;
+    // Fraction of tensile tangent stiffness retained by a normal material
+    // direction while its Green strain is compressive. 1.0 is the exact
+    // historical bilateral membrane. Lower values approximate wrinkling.
+    double compressionStiffnessRatio = 1.0;
 
     [[nodiscard]] SymmetricMatrix3 stiffnessMatrix() const;
     [[nodiscard]] SymmetricMatrix3 complianceMatrix() const;
 };
+
+// State-dependent constitutive matrix used by diagnostics and XPBD. The
+// ratio==1 path returns stiffnessMatrix() directly and preserves the original
+// arithmetic. Otherwise an SPD-safe D*K*D scaling is used.
+[[nodiscard]] SymmetricMatrix3 effectiveMembraneStiffness(
+    const OrthotropicMembraneMaterial& material,
+    const Vec3& greenStrain);
 
 void validateOrthotropicMembraneMaterial(
     const OrthotropicMembraneMaterial& material);

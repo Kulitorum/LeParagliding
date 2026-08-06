@@ -104,6 +104,24 @@ false` reproduces the old stamp bit for bit; the bench takes
 −6° excursion the old model parks permanently deflated while the cell
 model re-pressurises every section back to rest volume.
 
+### Air state: the wing moves through the atmosphere
+
+`SimControls::ambientAirVelocityWorld` is the surrounding air's velocity in
+world coordinates. The single sign convention everywhere is
+`v_relative = v_air − v_surface`: ribs, vent faces, the wing polar, pilot drag,
+pressure summaries, air-mote travel and flight telemetry all derive from that
+state. In the tunnel, the q-derived reference flow at the selected angle of
+attack is added to ambient. In free flight, ambient is the entire atmosphere;
+the pressure slider remains only a reference dynamic pressure/load cap and
+trimmed-launch speed. It is not injected again as a moving air mass.
+
+The build still calibrates and pre-inflates the rest shape at the reference
+apparent flow. TrimmedGlide then gives all components the common ground
+velocity `ambient − rotate(referenceFlow, span, glideAngle)`; DropFromRest
+resets ground velocity to zero while retaining that pre-inflation. Shifting
+ambient and every node velocity by the same vector leaves sample, pressure,
+cell flow, force and a solver step invariant in the focused regression.
+
 ### What the wing meets, and what a brake does
 
 Three corrections to the free-flight force model, all measured against
@@ -134,6 +152,15 @@ layers the area sum counts and the air does not — 9.1 m² on a 15 m²
 wing), and the force at the impulse that would null the relative motion
 within one frame, without which it pushed a collapsed wing *upward*.
 
+The finite-wing polar's missing viscous drag has a separate bounded-free-flight
+path. Only `max(0, q*S*Cd_polar - D_pressure)` is spread by current skin area
+along the relative wind; it supplies no lift, is zero at q=0, and its measured
+air-relative power is non-positive. The excess-frontal/fabric heuristic above
+is deliberately excluded from that traction. Reinjecting its residual turned
+ordinary 2-5 m2 breathing estimates into hundreds of newtons of new shear and
+a positive deformation/drag feedback loop. Pinned shape analysis remains
+pressure-only, and the legacy oracle receives no traction.
+
 **Each rib meets its own wind, and a brake is not a pitch input.** The
 per-rib relative wind now includes the canopy's rigid-body spin (`I·ω =
 L` over the canopy nodes about their centroid), which is where roll and
@@ -160,8 +187,8 @@ symmetric pull is bit-for-bit what it was. Absolute tunnel loads moved
 with the α reference (gnuC2: 1406 → 1278 N lift, L/D 7.79 → 7.66); settle
 time, span, area, volume and flags did not.
 
-**The turning moment from that split is NOT solved**, and two attempts
-are recorded in the code so a third does not repeat them. Adding a roll
+Two failed historical turning-moment attempts are recorded so they are not
+repeated. Adding a roll
 row to the force-distribution solve wrecked the *symmetric* glide
 (airspeed 9 → 14.5 m/s, sink −1.3 → −3.2, before any brake was pulled):
 forcing the increment's own roll moment to a prescribed value is not a
@@ -169,14 +196,12 @@ no-op, it rebuilds the whole increment field. Layering the couple on
 after the solve is symmetric-safe but folded the wing at 4 s against a
 9 s baseline (span 8.4 → 5.4 m in one second), because a spanwise-linear
 pressure gradient loads the tips hardest — exactly where this fabric is
-weakest. It sits behind `LEP_AERO_BRAKE_ROLL`, off by default.
+weakest. It sat behind the removed `LEP_AERO_BRAKE_ROLL` experiment.
 
-Both attempts share one flaw: they bolt a couple onto a wing-level
-resultant. A brake's moment has to arrive where the brake acts — the aft
-fabric of its own half — which means running the whole force-and-
-distribution pass per half-span, each with its own α, brake, anchor and
-4×4 solve. That is the next attempt. Until then a one-sided pull still
-departs after several seconds (8 s, against 9 s before the split).
+The production resolution is the bounded final-Cp hierarchy documented
+below: one shared global field first, followed by a lower-priority L-R
+lift/drag target. It preserves the arc's common bracing and reports the
+differential authority instead of bolting an unconstrained couple on later.
 
 ### Fabric contact
 
@@ -185,32 +210,54 @@ the lines — which cuts both ways: impossible geometry, but also an
 unphysical escape hatch that lets a tangle "un-knot" by ghosting. The
 **Fabric contact** checkbox (Solver section; `SimControls::
 fabricContact`, bench `--contact`) adds the Playground's own thin-cloth
-pass: candidates found once per frame by a spatial-hash sweep (skin
-nodes vs skin triangles and vs suspension-line segments, with rest-pose
-pairs excluded so designed-adjacent fabric never fights), then plain
-PBD position projections after every substep with an inelastic normal
-velocity fix, a remembered approach side so a fast crossing is pushed
-BACK through, and a 1 mm/substep correction cap so deep stacks resolve
-gently. It is deliberately NOT the engine's certified contact pipeline,
-which enumerates O(V·T + E²) feature pairs serially ninety times a
-frame — five orders of magnitude over budget — and cannot be switched
-off once registered.
+pass in the Qt-free `playground_contact` module. It covers skin
+vertex/triangle, skin edge/edge, and authored suspension
+segment/triangle features. Harness ties and generated brake-control
+cables are not authored suspension and are not contact colliders.
+Line/line contact and friction remain unsupported.
 
-Two calibration lessons, both measured on gnuC2: the separation must
-stay at 1 mm — at 2 mm the wrinkle fields of a healthy loaded wing
+Exclusions now come only from topology: incident and one-ring skin
+features, plus triangles adjacent to an authored line attachment. The
+old rule that permanently excluded every pair close in the rest pose
+was wrong — two unrelated panels designed 0.5 mm apart must still
+collide. Candidates are deterministic and persist while their swept
+substep envelope remains valid. The envelope covers 1.5 times the
+velocity-predicted substep travel plus a mesh-scaled 3--10 mm allowance;
+if XPBD motion escapes it, the retained pre-substep candidates are
+projected first and a narrow envelope is rebuilt for the next substep.
+That preserves the approach side through a crossing without inflating
+every candidate over a full violent frame.
+
+The broad phase is a complete 3-D grid for ordinary features. A feature
+covering more than 64 cells goes on an explicit oversized list and is
+tested against the full compatible set; dense cells use local
+sweep-and-prune rather than being skipped. Work and candidate budgets
+remain hard bounds. Hitting either sets `coverageComplete=false` and is
+reported by the bench; partial coverage is never presented as complete.
+Projection is mass-weighted across every feature node, retains the
+captured separating side, and removes only closing normal velocity.
+Same-side deep overlaps retain the gentle 1 mm/substep cap, while a
+signed crossing is returned fully to its captured side in one pass.
+It is deliberately NOT the generic registered SoftBody contact pipeline,
+whose exhaustive per-iteration enumeration is unsuitable here.
+
+The fabric separation remains 1 mm — at 2 mm the wrinkle fields of a healthy loaded wing
 (~23% slack fabric at sub-millimetre spacing) light up as thousands of
 false contacts that stiffen the skin and snag collapse recovery — and
 capture margins must be taken relative to the canopy-mean velocity,
 or bulk motion makes the whole upper and lower skin candidates of each
-other. Cost with the box ticked: ~12 ms/frame on gnuC2 at native
-resolution (detection once per frame, thirty projection passes), about
-32 fps against 52 without. Off is the identical old code path.
+other. The complete feature set is still expensive: a bounded gnuC2
+native-resolution startup frame at 30x2 measured 550.6 ms with contact
+versus 24.3 ms with contact off, with 1,474 vertex/triangle,
+3,968 edge/edge and 573 line/triangle candidates, eight envelope
+refreshes and complete coverage. That cost is why contact remains opt-in.
+Off never enters the module and preserves the pinned tunnel path exactly.
 
-With contact on, a −4° excursion recovers to a clean wing (32 mm
-residual asymmetry); a −6° one recovers to ~81% span with a genuine
-tip cravat still working itself out — physically locked fabric now, not
-geometry that ghosted apart. Line-line contact (riser twists) is not
-modelled.
+The earlier collapse-recovery claims were measured with the incomplete
+vertex-only pass and do not carry forward as validation of this feature
+set. The current guarantees are the deterministic feature and integration
+tests plus honest real-mesh coverage diagnostics, not a calibrated cravat
+or riser-twist model.
 
 ## The instruments
 
@@ -247,12 +294,54 @@ Wing-level:
 Lines:
 
 - **Per-segment tension** read from the XPBD accumulated multiplier
-  (force = λ/h², exact for the solved state), summed into **row loads**
-  (A/B/C/D…, left/right separately), with slack-segment counts. Row
+  (force = λ/h², exact for the solved state). Exact/reversed legacy JSON
+  duplicates are discarded before constraints are built, keyed by quantized
+  endpoints plus authored plan/brake semantics. **Riser and row loads** are
+  vector reactions across the authored suspension cut immediately above the
+  carabiners; pilot harness and synthesized brake-control drawing segments are
+  excluded so the same load path is not counted twice. Row loads remain split
+  A/B/C/D… and left/right, with slack-segment counts. Row
   grouping uses the engine's own per-line row plans; a mesh exported
   before those tags existed reports no row table at all — an empty table
   is honest, a mis-grouped one is not. Re-run the engine to regenerate
   the mesh with tags.
+
+### Free-flight payload and suspension mass
+
+The experimental free-flight mode takes pilot plus harness/instruments as an
+explicit mass (90 kg default); it no longer solves backward from its own polar
+to choose the payload that makes the current pressure setting balance. The
+payload is presently one dynamic point mass. Its bilateral XPBD ties to the
+carabiners make a real translational gravity pendulum, but it has no body
+orientation, rotational inertia, weight shift or separate harness geometry;
+those claims wait for the generic rigid-payload suspension migration.
+
+Until line material metadata carries measured mass per metre, authored lines
+use a documented 1 g/m fallback. Half of each unique segment's mass is lumped
+to each welded endpoint. A 0.1 g positive numerical floor per junction and per
+generated brake-control node is reported separately, so solver conditioning is
+not mistaken for physical line mass. Harness ties have no added mass because
+the explicit payload includes the harness, and synthesized brake-control
+cables do not duplicate the authored brake cascade's physical mass.
+
+The pinned tunnel deliberately retains 50 g per authored junction as
+**nonphysical static-relaxation ballast**, reported separately in the session
+log and bench output. Tunnel gravity is zero, so the inertial conditioning does
+not change its static weight or equilibrium; it only lets the light branched
+cable graph settle at the standard 30x2 budget. Free flight never receives
+this ballast: it uses physical length-lumped line mass plus the 0.1 g floor,
+and `simulatedMassKilograms()` therefore remains the physical flying mass.
+
+Two launch conditions are intentionally distinct. **Trimmed glide** retains
+the estimated flight-path direction, but sizes speed/q from the bounded field's
+achieved vertical wing force and total dynamic-node weight. It runs eight
+bounded-only co-moving quasi-static gravity/aero/cable frames, resets every
+wake/control/cell/Cp transient state, and recalibrates q on the loaded geometry
+before release. Three cable reverse/forward sweep pairs propagate the payload
+reaction through the deep suspension graph; zero remains the exact historical
+and tunnel path. **Drop from rest** performs none of that and releases the
+pre-inflated system with zero initial velocity. It is a transient/pendulum
+experiment, not a ground inflation or trim solution.
 
 ## The verdicts
 
@@ -342,6 +431,63 @@ controls and prints a full report; `--shape-sweep from:to:step` emits the
 sweep as CSV. The GUI and the bench share `settleAndMeasure()`, so a
 number in a report can always be reproduced without a GUI.
 
+## Bounded final exterior-Cp projection
+
+The production retrim does not solve an unbounded pressure increment and then
+clip its answer. `applyPressure` records each face's interior pressure, local
+dynamic pressure and stamped exterior-Cp prior. The Qt-free
+`playground_pressure` solver chooses the final Cp directly inside `[-3, 1]`,
+then the face load is reconstructed exactly as `p_inside - q*Cp`. Cp=1 is the
+stagnation ceiling; q≈0 faces are fixed because Cp cannot change their load.
+
+The objective prior is the same-frame field produced by the calibrated legacy
+load path (global force/pitch 4x4, then two half-wing 4x4 passes), but each
+intermediate pressure proposal is clamped through that face's physical Cp
+interval `[p_inside-q, p_inside+3q]`. This matters during the pre-inflated soft
+start, where applying the old absolute pressure clamp directly can present
+`std::clamp` with an inverted interval. The objective is an area integral with
+equal Cp mobility per unit area. Each active face is additionally restricted
+to +/-0.05 Cp around that preferred topology, intersected with the global
+`[-3,1]` envelope. This local trust region prevents an exact global equality
+from moving load to a structurally different chordwise location.
+
+Stages are global force (three rows), pitch about the live anchor, then L-R
+lift and drag together. A later stage freezes earlier achieved equalities and
+gets one reported authority in [0,1]; saturation is therefore a physical
+limit rather than a hidden post-clamp residual. Exact pure/offline solves find
+the maximum on the requested target ray by bisection. Production instead
+caches the last verified authority and dual multipliers: it reprojects the
+cached value on the live geometry, halves it until feasible if necessary, and
+tries one +0.02 probe. Force starts at zero; pitch and differential start at
+one so their normally feasible full-target fast path is not delayed. Every
+accepted probe is still an exact bounded projection, and the zero-authority
+baseline is the current hierarchical value itself. The L-R target starts from
+the prior field and adds the polar's side request with the explicit factor two
+required by +D/-D half loading. This retains the arced canopy's common lateral
+bracing.
+
+The semismooth dual Newton solve normalises rows internally but reports force
+and moment residuals in N and N.m. Rank, condition estimate, authority hint,
+probe/backoff state, active bounds, Cp range, iteration cost and numerical
+failure are carried through the body, metrics, HUD/session log and
+`softwing-bench`. Production telemetry
+uses the achieved bounded pressure force; requested polar lift/drag remain
+separate diagnostics. `softwing-bench --pressure-acceptance` compares fresh
+bounded and legacy bodies and gates finite settling, flags, Cp bounds,
+leading-edge dent and washout. The old 4x4 increment and clamp is available
+only as `--legacy-pressure` for the bit-comparable regression oracle.
+
+Partial force authority also changes how to read pinned L/D: it is the ratio of
+the pressure force that survived the bounds, not a claim that the requested
+finite-wing polar was achieved. Free flight adds only the separately diagnosed
+polar-drag deficit above. With the deep-cable passes, achieved-load launch,
+eight-frame relaxation and corrected polar-only traction, the capped gnuC2
+five-second probe stays flying: alpha <=16.39 degrees, L/D >=3.09, span >=9.62
+m and volume >=-2.6%. At 5 s alpha is 14.77 degrees, sink -1.64 m/s, span 9.95
+m and volume -1.3%. The slow load/phugoid oscillation and 97/190 slack lines at
+that sample preserve the experimental claim boundary; this is not a certified
+or converged absolute glide model.
+
 ## The turning couple, and where it had to go
 
 A one-sided brake used to produce no turning moment at all. The polar was
@@ -370,17 +516,14 @@ Three ways of getting it there were tried, and the first three failed:
    Sharing the spanwise row out by area instead fixed that but left a
    twist flag at a tip: giving each half its own `v` still puts a lateral
    body force on each half that the single solve never had.
-4. **What is in the tree.** The shared pass is left exactly as it was —
-   the wing-level resultant, the wing anchor, one solve over all the skin
-   — and a *differential* pass adds half the coefficient difference to one
-   half and takes it off the other, through the same machinery, about each
-   half's own anchor on its own mean chord. The two anchors are offset
-   spanwise, so the couple has the wing's real lever arm and costs nothing
-   in pitch (a spanwise arm crossed with any force has no span-axis
-   component). With equal brakes and equal angles the difference is
-   *exactly* the zero vector and the pass does not run, so the tunnel
-   calibration is bit-for-bit unchanged — verified by CSV comparison, not
-   by inspection.
+4. **What is in the tree.** One bounded final-Cp field serves the complete
+   wing. Global force and pitch are frozen before the two L-R lift/drag rows
+   are introduced with a common authority. Their target is the prior L-R
+   field plus the polar's +D/-D request, so the common solve retains the arc's
+   lateral bracing and does not independently cancel each half. Equal brakes
+   and equal incidence request no new differential. The former shared 4x4
+   plus two half 4x4 passes remain only under `--legacy-pressure` for the
+   historical bit-comparable row.
 
 ### Roll and yaw damping, which had to come first
 
@@ -390,12 +533,25 @@ at 17–18 s: the wing-level polar gave a rolling or yawing wing no
 restoring force whatever, because both halves saw one angle and one
 dynamic pressure.
 
-Both now come from the canopy's **rigid-body spin** (`canopySpinOf`), the
-same fit the per-rib pressure wind uses and for the same reason — a rigid
-fit has no breathing mode, so no fabric motion reaches a kilonewton-scale
-force through it. Each half gets the wind at its own quarter-chord
-station, which yields a low-passed angle departure and a dynamic-pressure
-ratio; both are 0 and 1 on a wing that is not rotating.
+Both now use the canopy's **rigid-body spin** (`canopySpinOf`), the same fit
+the per-rib pressure flow uses and for the same reason — a rigid fit has no
+breathing mode, so no fabric motion reaches a kilonewton-scale force through
+it. Each half gets the flow at its own quarter-chord station. In addition, each
+rest rib section normal is mapped into the live rigid span/chord/up frame, and
+the half flow is projected into that section plane. Sideslip therefore meets
+the mirrored arc at opposite incidences and creates a weathercock moment
+through the existing differential pressure pass. Per-rib no-beta incidence
+and the exact planform-weighted common mode are removed, so a non-rotating,
+no-sideslip wing remains 0/1 and common trim is unchanged even for asymmetric
+section geometry.
+
+The helper tests verify mirrored-beta incidence and a near-odd restoring yaw
+pressure moment for both signs, a flat arc's zero response, no-beta invariance,
+and the existing ±10° clamp under an extreme beta input. This is directional
+authority, not proof by itself. After the separate cable-load, launch and
+polar-only-drag repairs, the capped five-second gnuC2 probe stays within alpha
+16.39 degrees, span above 9.62 m and volume above -2.6%; its remaining slow
+load oscillation preserves the experimental claim boundary.
 
 Measuring each half's own **chord line** instead was tried first and is
 wrong twice over: a rigid roll does not move the chords relative to each
@@ -470,11 +626,51 @@ carries a real 53–77 Pa gradient where it used to be a flat 74–80. The
 `--tuck 250` guard on the Swoop at 60×4 is untouched — no bay there ever
 crosses the threshold.
 
+## Selectable fabric formulation
+
+The calibrated/default skin remains the legacy bilateral distance truss. The
+prototype selector replaces only those skin stretch/shear springs with
+orthotropic three-component membrane elements; the ribs, straps, seams,
+suspension, pressure/cell model and opt-in contact path remain the same. No
+parallel truss is left under the membrane skin, so comparisons do not silently
+double its stiffness.
+
+Each ordered source quad defines one material direction field: `q0 -> q3` is
+chord/warp and `q0 -> q1` is span/weft. Both triangles receive a winding-safe,
+isometric tangent chart transported from that common direction, leaving the
+designed pose at exactly zero Green strain even on a mildly non-planar quad.
+Degenerate charts are skipped and counted. Interior manifold edges receive a
+signed four-node dihedral XPBD hinge; boundaries are free, while degenerate,
+non-manifold or inconsistently wound incidences are skipped and diagnosed.
+
+The prototype defaults are warp/weft/coupling/shear
+`8000/5000/1000/1500 N/m`, compression ratio `0.05`, zero material damping and
+dihedral compliance `5e-4`. Compression uses an SPD-preserving `D*K*D`
+stiffness reduction. A ratio of exactly one takes the original bilateral
+matrix path byte-for-byte. Shear keeps full stiffness in tension, is partially
+softened when one material direction compresses, and receives the full
+retained ratio when both do (the shear scale is the geometric mean of the two
+normal scales).
+
+Slack and strain heatmaps use the membrane's warp/weft Green strains in this
+mode instead of reconstructing edge strain. Material values are prototype
+controls, not measured cloth certification. Nonzero constraint-space membrane
+damping is additionally diagnosed as experimental: it is not yet accepted in
+the full mixed membrane/rib/line network, so the prototype default is off.
+
+At native gnuC2 resolution the mode builds 15,840 membrane triangles and
+23,727 hinges, retaining 6,949 non-skin distance/cable constraints. A bounded
+80 Pa hard-load probe for ten frames at 30x2 remained finite (volume +4.7%,
+span +1.7%), but ran at about 267 ms/frame: roughly 135 ms in membrane solves
+and 98 ms in the deliberately serial hinges. That is a correctness probe, not
+a settled/calibrated shape claim or an interactive-performance claim.
+
 ## Limits, stated
 
 Same boundary as always, now with a sharper edge: the polar is classical
 lifting-line with heuristic constants, the pressure distribution is a
-shaped guess, and the fabric is a mass-spring cloth, so **absolute**
+shaped guess, and neither the calibrated distance truss nor the experimental
+orthotropic material is measured coupon data, so **absolute**
 forces and angles carry model error. What the instruments measure is the
 **relative, structural** response of one design — where fabric goes
 slack, which row unloads, at what α the nose dents — and comparisons of

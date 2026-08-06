@@ -11,11 +11,14 @@
 //
 //   softwing-bench <lep-sim.json> [--subdiv N] [--detailed-ribs]
 //                  [--frames N] [--warmup N] [--threads N]
-//                  [--substeps N] [--iterations N] [--csv]
+//                  [--substeps N] [--iterations N] [--line-sweeps N] [--csv]
 //                  [--glide N] [--brake CM] [--release SECONDS]
+//                  [--pilot-mass KG] [--drop-from-rest]
+//                  [--membrane] [--warp-stiffness N/M] [material flags]
 //                  [--shape [SECONDS]] [--shape-sweep FROM:TO:STEP]
 //                  [--tuck [PULL_CM]] [--dive [DEGREES]] [--no-cells]
-//                  [--contact] [--no-flight-load]
+//                  [--contact] [--no-flight-load] [--legacy-pressure]
+//                  [--pressure-acceptance]
 
 #include "../src/gui/playground_metrics.h"
 #include "../src/gui/playground_sim.h"
@@ -64,8 +67,19 @@ struct Options
     unsigned threads = 0;
     int substeps = pg::simulationSubsteps;
     int iterations = pg::simulationIterations;
+    int lineSweepPairs = pg::defaultFreeFlightCableSweepPairs;
     double pressurePascal = 80.0;
     double angleOfAttackDegrees = 6.0;
+    double pilotMassKg = pg::defaultPilotMassKg;
+    pg::LaunchMode launchMode = pg::LaunchMode::TrimmedGlide;
+    pg::SkinModel skinModel = pg::SkinModel::LegacyDistanceTruss;
+    double warpStiffness = pg::prototypeWarpStiffness;
+    double weftStiffness = pg::prototypeWeftStiffness;
+    double couplingStiffness = pg::prototypeCouplingStiffness;
+    double shearStiffness = pg::prototypeShearStiffness;
+    double membraneDampingSeconds = pg::prototypeMembraneDampingSeconds;
+    double compressionRatio = pg::prototypeCompressionStiffnessRatio;
+    double bendCompliance = pg::prototypeBendCompliance;
     bool swing = false;
     bool polar = false;
     double brakeMetres = 0.0;
@@ -90,6 +104,10 @@ struct Options
     bool noCells = false;
     // Fabric/line self-contact, off by default like the GUI.
     bool contact = false;
+    // Explicit regression oracle for pre-P5 guards. Production/default is
+    // the bounded final-exterior-Cp solve.
+    bool legacyPressure = false;
+    bool pressureAcceptance = false;
     // The collapse-recovery experiment: settle, yank one side's A cascade
     // down until it folds, release, and watch whether the wing recovers.
     bool tuck = false;
@@ -117,6 +135,12 @@ struct Options
             out = std::atoi(argv[++index]);
             return true;
         };
+        const auto realValue = [&](double &out) {
+            if (index + 1 >= argc) return false;
+            char *end = nullptr;
+            out = std::strtod(argv[++index], &end);
+            return end != argv[index] && *end == '\0' && std::isfinite(out);
+        };
         if (argument == "--subdiv") {
             if (!value(options.subdivision)) return false;
         } else if (argument == "--frames") {
@@ -127,6 +151,9 @@ struct Options
             if (!value(options.substeps)) return false;
         } else if (argument == "--iterations") {
             if (!value(options.iterations)) return false;
+        } else if (argument == "--line-sweeps") {
+            if (!value(options.lineSweepPairs)
+                || options.lineSweepPairs < 0) return false;
         } else if (argument == "--threads") {
             int threads = 0;
             if (!value(threads)) return false;
@@ -139,6 +166,33 @@ struct Options
             int degrees = 0;
             if (!value(degrees)) return false;
             options.angleOfAttackDegrees = degrees;
+        } else if (argument == "--pilot-mass") {
+            if (index + 1 >= argc) return false;
+            char *end = nullptr;
+            options.pilotMassKg = std::strtod(argv[++index], &end);
+            if (end == argv[index] || *end != '\0'
+                || !std::isfinite(options.pilotMassKg)) {
+                return false;
+            }
+        } else if (argument == "--drop-from-rest") {
+            options.launchMode = pg::LaunchMode::DropFromRest;
+            options.freeFlight = true;
+        } else if (argument == "--membrane") {
+            options.skinModel = pg::SkinModel::OrthotropicMembrane;
+        } else if (argument == "--warp-stiffness") {
+            if (!realValue(options.warpStiffness)) return false;
+        } else if (argument == "--weft-stiffness") {
+            if (!realValue(options.weftStiffness)) return false;
+        } else if (argument == "--coupling-stiffness") {
+            if (!realValue(options.couplingStiffness)) return false;
+        } else if (argument == "--shear-stiffness") {
+            if (!realValue(options.shearStiffness)) return false;
+        } else if (argument == "--membrane-damping") {
+            if (!realValue(options.membraneDampingSeconds)) return false;
+        } else if (argument == "--compression-ratio") {
+            if (!realValue(options.compressionRatio)) return false;
+        } else if (argument == "--bend-compliance") {
+            if (!realValue(options.bendCompliance)) return false;
         } else if (argument == "--swing") {
             options.swing = true;
             options.freeFlight = true;
@@ -189,6 +243,11 @@ struct Options
             options.noCells = true;
         } else if (argument == "--contact") {
             options.contact = true;
+        } else if (argument == "--legacy-pressure") {
+            options.legacyPressure = true;
+        } else if (argument == "--pressure-acceptance") {
+            options.pressureAcceptance = true;
+            options.shape = true;
         } else if (argument == "--tuck") {
             options.tuck = true;
             // Full-string numeric parse, so a following mesh path is not
@@ -544,6 +603,56 @@ void reportLine(const char *label,
                 share);
 }
 
+void printPressureSolve(const pg::SimBody &sim)
+{
+    const pg::PressureSolveDiagnostics &solve = sim.pressureSolve;
+    if (!solve.attempted && !solve.legacy) {
+        return;
+    }
+    std::fprintf(
+        stderr,
+        "pressure %s: %s%s, authority %.4f/%.4f/%.4f, "
+        "rank %zu/%zu/%zu, %zu faces, active %zu low + %zu high, "
+        "%zu projections/%zu Newton iterations/%.2f ms, "
+        "Cp %.4f..%.4f, residual F %.3f %.3f %.3f N, "
+        "pitch %.3f N.m, half dL/dD %.3f/%.3f N\n",
+        solve.legacy ? "legacy increment+clamp" : "bounded final Cp",
+        solve.valid ? "valid" : "invalid",
+        solve.numericalFailure ? " NUMERICAL FAILURE" : "",
+        solve.authority[0], solve.authority[1], solve.authority[2],
+        solve.rank[0], solve.rank[1], solve.rank[2],
+        solve.variableCount,
+        solve.activeLower, solve.activeUpper,
+        solve.projectionCalls, solve.projectionIterations,
+        solve.solveMilliseconds,
+        solve.minimumCp, solve.maximumCp,
+        solve.forceResidual.x, solve.forceResidual.y,
+        solve.forceResidual.z, solve.pitchResidual,
+        solve.halfDifferenceResidual[0],
+        solve.halfDifferenceResidual[1]);
+    if (!solve.legacy) {
+        std::fprintf(
+            stderr,
+            "  authority cache hint %.4f/%.4f/%.4f, probe %c/%c/%c, "
+            "backoff %zu/%zu/%zu\n",
+            solve.authorityHint[0], solve.authorityHint[1],
+            solve.authorityHint[2],
+            solve.authorityProbeAccepted[0] ? '+' : '-',
+            solve.authorityProbeAccepted[1] ? '+' : '-',
+            solve.authorityProbeAccepted[2] ? '+' : '-',
+            solve.authorityBackoffs[0], solve.authorityBackoffs[1],
+            solve.authorityBackoffs[2]);
+    }
+    if (!solve.legacy && !sim.faceRetrimPreferredCp.empty()) {
+        const auto [low, high] = std::minmax_element(
+            sim.faceRetrimPreferredCp.begin(),
+            sim.faceRetrimPreferredCp.end());
+        std::fprintf(stderr,
+                     "  same-frame legacy preferred Cp %.4f..%.4f\n",
+                     *low, *high);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -554,11 +663,18 @@ int main(int argc, char **argv)
                      "usage: softwing-bench <lep-sim.json> [--subdiv N] "
                      "[--detailed-ribs] [--frames N] [--warmup N] "
                      "[--threads N] [--substeps N] [--iterations N] "
+                     "[--line-sweeps N] "
                      "[--gpu|--gpu-jacobi] [--csv] "
                      "[--shape [SECONDS]] [--shape-sweep FROM:TO:STEP] "
                      "[--tuck [PULL_CM]] [--dive [DEGREES]] [--no-cells] "
-                     "[--contact] [--no-flight-load] "
-                     "[--glide N] [--brake CM] [--release SECONDS]\n");
+                     "[--contact] [--no-flight-load] [--legacy-pressure] "
+                     "[--pressure-acceptance] "
+                     "[--glide N] [--brake CM] [--release SECONDS] "
+                     "[--pilot-mass KG] [--drop-from-rest] "
+                     "[--membrane] [--warp-stiffness N/M] "
+                     "[--weft-stiffness N/M] [--coupling-stiffness N/M] "
+                     "[--shear-stiffness N/M] [--membrane-damping SEC] "
+                     "[--compression-ratio R] [--bend-compliance C]\n");
         return 2;
     }
 
@@ -593,9 +709,24 @@ int main(int argc, char **argv)
     pg::SimControls controls;
     controls.substeps = options.substeps;
     controls.constraintIterations = options.iterations;
+    controls.freeFlightCableSweepPairs = options.lineSweepPairs;
     controls.workerThreads = options.threads;
     controls.pressurePascal = options.pressurePascal;
     controls.angleOfAttackDegrees = options.angleOfAttackDegrees;
+    controls.pilotMassKg = options.pilotMassKg;
+    controls.launchMode = options.launchMode;
+    controls.skinModel = options.skinModel;
+    controls.warpStiffness = options.warpStiffness;
+    controls.weftStiffness = options.weftStiffness;
+    controls.couplingStiffness = options.couplingStiffness;
+    controls.shearStiffness = options.shearStiffness;
+    controls.membraneDampingSeconds = options.membraneDampingSeconds;
+    controls.compressionStiffnessRatio = options.compressionRatio;
+    controls.bendCompliance = options.bendCompliance;
+    controls.pressureSolveMode =
+        options.legacyPressure
+            ? pg::PressureSolveMode::LegacyIncrementClamp
+            : pg::PressureSolveMode::BoundedExteriorCp;
     controls.freeFlight = options.freeFlight;
     // The shape modes load the tunnel like flight by default (a tunnel
     // carrying only the pressure field's own resultant under-reads every
@@ -630,6 +761,39 @@ int main(int argc, char **argv)
         std::chrono::duration<double>(std::chrono::steady_clock::now()
                                       - buildStart)
             .count();
+    std::fprintf(stderr,
+                 "skin model %s: %zu membranes, %zu hinges, %zu/%zu "
+                 "degenerate elements/hinges skipped\n",
+                 pg::skinModelName(sim.skinModel),
+                 sim.body->membraneElements().size(),
+                 sim.body->dihedralConstraints().size(),
+                 sim.skippedMembraneElements,
+                 sim.skippedDihedralHinges);
+    if (sim.skinModel == pg::SkinModel::OrthotropicMembrane) {
+        const auto &m = sim.skinMaterial;
+        std::fprintf(stderr,
+                     "prototype material warp/weft/coupling/shear "
+                     "%.0f/%.0f/%.0f/%.0f N/m, damping %.3f s, "
+                     "compression %.4f, bend compliance %.3g\n",
+                     m.warpStiffness,
+                     m.weftStiffness,
+                     m.couplingStiffness,
+                     m.shearStiffness,
+                     m.dampingTime,
+                     m.compressionStiffnessRatio,
+                     sim.skinBendCompliance);
+        if (m.dampingTime > 0.0) {
+            std::fprintf(stderr,
+                         "WARNING: nonzero membrane damping is experimental "
+                         "in the mixed membrane/rib/line network\n");
+        }
+    }
+    if (sim.tunnelLineSolverBallastKg > 0.0) {
+        std::fprintf(stderr,
+                     "line relaxation %.3f kg nonphysical pinned-tunnel "
+                     "solver ballast (zero gravity)\n",
+                     sim.tunnelLineSolverBallastKg);
+    }
 
     // The cross-ports: the only path back into a cell whose own mouth
     // has folded shut, so a run of bays with no port is a run that
@@ -831,22 +995,116 @@ int main(int argc, char **argv)
                          result.simulatedSeconds,
                          result.report.flags.size(),
                          result.report.flags.size() == 1 ? "" : "s");
+            printPressureSolve(wing);
         }
         return 0;
+    }
+
+    // Real-wing P5 acceptance: compare the bounded final-Cp production path
+    // against the explicit legacy oracle from fresh, identical bodies. This
+    // guards structural distribution, not merely zero global residuals.
+    if (options.pressureAcceptance) {
+        if (options.legacyPressure) {
+            std::fprintf(stderr,
+                         "--pressure-acceptance selects both pressure "
+                         "paths; do not combine it with --legacy-pressure.\n");
+            return 2;
+        }
+        const pg::ShapeBaseline boundedBaseline =
+            pg::captureShapeBaseline(sim);
+        const pg::SettleResult bounded = pg::settleAndMeasure(
+            sim, controls, boundedBaseline, options.shapeSeconds);
+
+        pg::SimControls legacyControls = controls;
+        legacyControls.pressureSolveMode =
+            pg::PressureSolveMode::LegacyIncrementClamp;
+        pg::SimBody legacy = pg::buildSimBody(
+            refined, build, legacyControls);
+        const pg::ShapeBaseline legacyBaseline =
+            pg::captureShapeBaseline(legacy);
+        const pg::SettleResult oracle = pg::settleAndMeasure(
+            legacy, legacyControls, legacyBaseline, options.shapeSeconds);
+
+        const auto finiteReport = [](const pg::ShapeReport &report) {
+            return std::isfinite(report.spanRatio)
+                   && std::isfinite(report.areaRatio)
+                   && std::isfinite(report.volumeRatio)
+                   && std::isfinite(report.worstLeadingEdgeDentMetres)
+                   && std::isfinite(report.worstTwistDegrees)
+                   && std::isfinite(report.agitationMetresPerSecond);
+        };
+        constexpr double kDentToleranceMetres = 0.010;
+        constexpr double kWashoutToleranceDegrees = 0.5;
+        const bool accepted =
+            bounded.settled && finiteReport(bounded.report)
+            && bounded.report.flags.empty()
+            && sim.pressureSolve.valid
+            && !sim.pressureSolve.numericalFailure
+            && sim.pressureSolve.minimumCp
+                   >= pg::minimumExteriorPressureCoefficient - 1.0e-9
+            && sim.pressureSolve.maximumCp
+                   <= pg::maximumExteriorPressureCoefficient + 1.0e-9
+            && bounded.report.worstLeadingEdgeDentMetres
+                   <= oracle.report.worstLeadingEdgeDentMetres
+                          + kDentToleranceMetres
+            && std::abs(bounded.report.worstTwistDegrees)
+                   <= std::abs(oracle.report.worstTwistDegrees)
+                          + kWashoutToleranceDegrees;
+        std::printf(
+            "pressure acceptance (%s)\n"
+            "                 bounded      legacy       allowed delta\n"
+            "  settled        %-8s     %-8s\n"
+            "  flags          %-8zu     %-8zu\n"
+            "  LE dent mm     %8.1f     %8.1f       +%.1f\n"
+            "  washout deg    %8.2f     %8.2f       +%.2f abs\n"
+            "  agitation mm/s %8.1f     %8.1f\n"
+            "  span ratio     %8.4f     %8.4f\n"
+            "  volume ratio   %8.4f     %8.4f\n",
+            accepted ? "PASS" : "FAIL",
+            bounded.settled ? "yes" : "no",
+            oracle.settled ? "yes" : "no",
+            bounded.report.flags.size(), oracle.report.flags.size(),
+            1000.0 * bounded.report.worstLeadingEdgeDentMetres,
+            1000.0 * oracle.report.worstLeadingEdgeDentMetres,
+            1000.0 * kDentToleranceMetres,
+            bounded.report.worstTwistDegrees,
+            oracle.report.worstTwistDegrees,
+            kWashoutToleranceDegrees,
+            1000.0 * bounded.report.agitationMetresPerSecond,
+            1000.0 * oracle.report.agitationMetresPerSecond,
+            bounded.report.spanRatio, oracle.report.spanRatio,
+            bounded.report.volumeRatio, oracle.report.volumeRatio);
+        printPressureSolve(sim);
+        return accepted ? 0 : 1;
     }
 
     // A single wind-tunnel measurement: settle at the current controls,
     // then print the full instrument report (or its CSV row, for scripts).
     if (options.shape) {
         const pg::ShapeBaseline baseline = pg::captureShapeBaseline(sim);
+        const auto settleStart = std::chrono::steady_clock::now();
         const pg::SettleResult result = pg::settleAndMeasure(
             sim, controls, baseline, options.shapeSeconds);
+        const double settleMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - settleStart)
+                .count();
         if (options.csv) {
             printCsvLine(pg::shapeReportCsvHeader());
             printCsvLine(pg::shapeReportCsvRow(result.report));
         } else {
             printShapeReport(controls, result, options.meshPath);
         }
+        printPressureSolve(sim);
+        const double frames =
+            result.simulatedSeconds / pg::simulationTimeStep;
+        std::fprintf(stderr,
+                     "shape stepping %.2f ms total, %.2f ms/frame "
+                     "over %.0f frames (build %.2f ms excluded)\n",
+                     settleMilliseconds,
+                     frames > 0.0 ? settleMilliseconds / frames : 0.0,
+                     frames,
+                     1000.0 * buildSeconds);
         return 0;
     }
 
@@ -1032,9 +1290,37 @@ int main(int argc, char **argv)
             return 1;
         }
         std::printf("pilot mass      %.1f kg\n", sim.pilotMass);
+        std::printf("launch          %s\n",
+                    pg::launchModeName(controls.launchMode));
+        if (controls.launchMode == pg::LaunchMode::TrimmedGlide) {
+            const double launchSupport = sim.lastAeroForce.z;
+            std::printf("launch trim     %.2f m/s, %.1f Pa, effective CL %.3f,"
+                        " achieved support %.0f N, residual H/V %.0f/%+.0f N,"
+                        " %d calibration solves, relax %d frames\n",
+                        sim.trimmedLaunchAirspeed,
+                        sim.trimmedLaunchDynamicPressure,
+                        sim.trimmedLaunchEffectiveLiftCoefficient,
+                        launchSupport,
+                        sim.trimmedLaunchHorizontalResidualNewtons,
+                        sim.trimmedLaunchVerticalResidualNewtons,
+                        sim.trimmedLaunchCalibrationIterations,
+                        sim.trimmedLaunchRelaxationFrames);
+        }
+        std::printf("system mass     %.1f kg (%zu duplicate lines rejected)\n",
+                    pg::simulatedMassKilograms(sim),
+                    sim.duplicateLineCount);
+        std::printf("line mass       %.3f kg authored + %.4f kg junction"
+                    " floor + %.4f kg control floor\n",
+                    sim.authoredLineMassKg,
+                    sim.lineJunctionFloorMassKg,
+                    sim.controlNodeFloorMassKg);
         std::printf("system          %.2f m^2 planform, AR %.2f\n\n",
                     sim.planformArea,
                     sim.aspectRatio);
+        std::printf("solver          %d x %d + %d cable sweep pair%s\n\n",
+                    controls.substeps, controls.constraintIterations,
+                    controls.freeFlightCableSweepPairs,
+                    controls.freeFlightCableSweepPairs == 1 ? "" : "s");
         std::printf("   time    airspeed   alpha     L/D    fwd m/s"
                     "   sink m/s   span m   volume    pilot below\n");
         // Turn instrumentation. A brake's whole job is to steer, and none
@@ -1097,6 +1383,8 @@ int main(int argc, char **argv)
                 continue;
             }
             const softwing::Vec3 velocity = systemVelocity();
+            const softwing::Vec3 throughAir =
+                velocity - controls.ambientAirVelocityWorld;
             const softwing::Vec3 pilot =
                 sim.body->nodes()[sim.pilotNode].position;
             softwing::Vec3 canopy;
@@ -1107,7 +1395,8 @@ int main(int argc, char **argv)
                 ++counted;
             }
             canopy /= static_cast<double>(counted);
-            const double forward = dot(velocity, sim.restChordDirection);
+            const double forward =
+                dot(throughAir, sim.restChordDirection);
             std::printf("  %5.1fs   %7.2f   %+6.2f  %6.2f    %+6.2f"
                         "    %+6.2f    %6.2f    %+5.1f%%     %6.2f m"
                         "   [L %5.0f N, Pz %5.0f N]\n",
@@ -1116,7 +1405,7 @@ int main(int argc, char **argv)
                         sim.lastAlphaDegrees,
                         sim.lastGlideRatio,
                         forward,
-                        velocity.z,
+                        throughAir.z,
                         spanExtent(sim),
                         designVolume > 0.0
                             ? 100.0 * (enclosedVolume(sim) - designVolume)
@@ -1185,39 +1474,36 @@ int main(int argc, char **argv)
                         tailCount > 0 ? tailPressure / tailCount : 0.0,
                         cellLow,
                         cellHigh);
+            printPressureSolve(sim);
             // What the lines are actually carrying. A flying wing holds
             // the pilot up, so this has to sit at his weight; anything
             // far below it means the system is falling faster than the
             // canopy can hold it and the lines have gone slack — at
             // which point nothing is pulling the wing into shape.
-            double riserLoad = 0.0;
-            std::size_t slackSegments = 0;
-            for (const pg::LineSegment &segment : sim.lineSegments) {
-                const double tension = pg::constraintTensionNewtons(
-                    sim, controls, segment.constraint);
-                if (tension < 1.0) {
-                    ++slackSegments;
-                }
-                for (const std::size_t carabiner : sim.carabinerNodes) {
-                    if (segment.a == carabiner || segment.b == carabiner) {
-                        riserLoad += tension;
-                        break;
-                    }
-                }
-            }
+            const pg::LineLoadReport lineReport =
+                pg::lineLoads(sim, controls);
+            const double systemWeight =
+                pg::simulatedMassKilograms(sim)
+                * pg::gravityMetresPerSecondSquared;
+            const double pilotWeight =
+                sim.pilotMass * pg::gravityMetresPerSecondSquared;
             const pg::WeakCellReport weak = pg::weakestCell(sim);
             const pg::KinkReport kink = pg::sharpestKink(sim);
-            std::printf("           risers %6.0f N of %.0f N weight,"
+            std::printf("           risers %6.0f N; pilot %.0f N,"
+                        " system %.0f N weight,"
                         "  %zu of %zu line segments slack,"
-                        "  fabric drag %5.0f N over %.1f m2\n",
-                        riserLoad,
-                        (sim.pilotMass
-                         + pg::fabricArealDensity * sim.planformArea)
-                            * 9.80665,
-                        slackSegments,
-                        sim.lineSegments.size(),
+                        "  fabric drag %5.0f N over %.1f m2,"
+                        "  polar skin drag %5.0f/%5.0f N (%+.0f W)\n",
+                        lineReport.riserNewtons,
+                        pilotWeight,
+                        systemWeight,
+                        lineReport.slackSegments,
+                        lineReport.totalSegments,
                         sim.lastFabricDragNewtons,
-                        sim.lastExcessFrontalArea);
+                        sim.lastExcessFrontalArea,
+                        sim.lastPolarDragTractionNewtons,
+                        sim.lastPolarDragTargetNewtons,
+                        sim.lastPolarDragTractionPowerWatts);
             std::printf("           weakest cell #%zu at x %+.2f m: "
                         "section %.0f%% of rest, %.0f Pa;"
                         "  kink %.0f deg at rib %zu"
@@ -1306,20 +1592,19 @@ int main(int argc, char **argv)
         }
         const auto canopyCentre = [&sim] {
             softwing::Vec3 centre;
-            for (std::size_t node = 0; node < sim.skinTriangleCount; ++node) {
-                static_cast<void>(node);
-            }
             const auto &nodes = sim.body->nodes();
-            std::size_t counted = 0;
-            for (const softwing::Node &node : nodes) {
-                centre += node.position;
-                ++counted;
+            const std::size_t counted = std::min(sim.canopyNodeCount,
+                                                 nodes.size());
+            for (std::size_t index = 0; index < counted; ++index) {
+                centre += nodes[index].position;
             }
             return counted > 0 ? centre / static_cast<double>(counted)
                                : centre;
         };
-        std::printf("pilot mass      %.1f kg (wing trimmed to its own lift)\n",
+        std::printf("pilot mass      %.1f kg (explicit point payload)\n",
                     sim.pilotMass);
+        std::printf("launch          %s\n",
+                    pg::launchModeName(controls.launchMode));
         std::printf("\n  frame   brake     pilot fore/aft   pilot below\n");
         for (int frame = 0; frame < 240; ++frame) {
             // 90 frames (1.5 s) to settle, then both brakes to 40 cm.
@@ -1532,8 +1817,16 @@ int main(int argc, char **argv)
                    profile.distanceConstraintNanoseconds,
                    total,
                    options.frames);
+        reportLine("  cable-only sweeps",
+                   profile.cableConstraintNanoseconds,
+                   total,
+                   options.frames);
         reportLine("  membrane constraints",
                    profile.membraneConstraintNanoseconds,
+                   total,
+                   options.frames);
+        reportLine("  dihedral hinges",
+                   profile.bendingConstraintNanoseconds,
                    total,
                    options.frames);
         reportLine("  membrane diagnostics",
@@ -1568,6 +1861,34 @@ int main(int argc, char **argv)
                     "wing",
                     sim.planformArea,
                     sim.aspectRatio);
+        if (controls.fabricContact) {
+            const pg::PlaygroundContactStats &contact = sim.contact.stats;
+            std::printf(
+                "  %-26s %9zu vertex/tri, %zu edge/edge, %zu line/tri\n",
+                "contact candidates",
+                contact.vertexTriangleCandidates,
+                contact.edgeEdgeCandidates,
+                contact.segmentTriangleCandidates);
+            std::printf(
+                "  %-26s %9zu active, %zu refreshes, coverage %s\n",
+                "contact projection",
+                contact.activeContacts,
+                contact.substepRefreshes,
+                contact.coverageComplete ? "complete" : "INCOMPLETE");
+            std::printf(
+                "  %-26s %9zu tests, %zu excluded, %zu large, %zu hits\n",
+                "contact broad phase",
+                contact.broadPhaseTests,
+                contact.topologyExcludedPairs,
+                contact.largeSweptEnvelopes,
+                contact.broadPhaseBudgetHits
+                    + contact.candidateBudgetHits);
+            std::printf(
+                "  %-26s %9.3f -> %.3f mm worst before/after\n",
+                "contact penetration",
+                1000.0 * contact.worstPenetrationBefore,
+                1000.0 * contact.worstPenetrationAfter);
+        }
     } catch (const std::exception &exception) {
         std::fprintf(stderr, "Solver failed: %s\n", exception.what());
         return 1;

@@ -24,11 +24,11 @@ revisions, never certified absolute aerodynamics — see
 
 These files started as an unmodified copy so they could be re-synced from
 SoftWingLab by copying over them. **That contract has been dropped**, by the
-owner's decision, and `soft_body.{h,cpp}` has diverged: the Playground's wing
-is a mass-spring cloth of distance constraints with no membrane elements, so
-none of the vendored parallel machinery applied to it and 98% of every frame
-sat in a single-threaded loop. See `docs/xpbd-performance.md` for the
-measurements and the reasoning.
+owner's decision, and `soft_body.{h,cpp}` has diverged. The Playground still
+defaults to its calibrated mass-spring distance-truss skin, but can now build
+the skin from the generic membrane elements as an explicitly experimental
+material mode. See `docs/xpbd-performance.md` for the parallel-solver history
+and `docs/playground-shape-analysis.md` for the material-mode boundary.
 
 What changed, all of it modelled on the membrane paths already here and
 carrying the same reproducibility contract (bit-identical at any worker
@@ -48,6 +48,27 @@ count; `workerThreads == 0` still selects the untouched serial sweep):
   historical absolute damping; the Playground's free flight sets it to the
   system's bulk velocity so fabric ringing is damped without the damping
   acting as a fake drag on the glide.
+- `StepSettings::cableConstraintSweepPairs` — optional serial reverse/forward
+  unilateral-cable passes distributed before the general structural sweeps.
+  They condition deep suspension load propagation without paying for extra
+  cloth iterations. Zero bypasses the path exactly and preserves historical
+  arithmetic; Playground free flight currently requests three pairs.
+- `OrthotropicMembraneMaterial::compressionStiffnessRatio` — an SPD-safe
+  `D*K*D` compression reduction. The default `1.0` bypasses the new branch and
+  preserves the original bilateral stiffness matrix exactly; the shear scale
+  is the geometric mean of the two normal-direction scales.
+- `DihedralBendingConstraint` — a true signed four-node hinge on two adjacent
+  membrane triangles. It is solved serially in deterministic insertion order,
+  included in rollback/state persistence, and deliberately omitted at skin
+  boundaries, degenerate faces and non-manifold/inconsistently wound edges.
+
+The generic membrane constraint-space damping field predates the Playground
+material mode. Nonzero values are stable for the small isolated coupons it was
+written for, but are not yet accepted for the mixed full-wing network where
+ribs, lines and membranes repeatedly move shared nodes. The Playground
+therefore defaults material damping to zero and diagnoses any explicit
+nonzero setting as experimental; changing that requires a separate coupled
+damping design, not a hidden material retune.
 
 Re-syncing from SoftWingLab now means merging rather than copying. Anything
 LEparagliding-specific still belongs in `src/gui` / `src/engine` instead.

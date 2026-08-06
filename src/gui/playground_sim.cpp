@@ -1,5 +1,7 @@
 #include "playground_sim.h"
 
+#include "playground_pressure_solve.h"
+
 #include <softwing/parallel.h>
 
 #include <QByteArray>
@@ -12,11 +14,13 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <queue>
+#include <set>
 #include <utility>
 
 namespace lep::playground {
@@ -122,14 +126,6 @@ constexpr double kMinimumLiftCoefficient = -0.10;
 // forward for lower ones, which is a restoring moment in both directions:
 // static pitch stability with the trim angle the designer rigged.
 constexpr double kAnchorTravelPerRadian = 1.0;
-// The anchor's static reference tracks the wing's own slow-average angle
-// of attack rather than a fixed target: the line rigging plus the
-// pendulum are already statically stable in pitch, and an anchor that
-// pulled toward its own idea of trim just fought them — raising its gain
-// produced a limit cycle, not stability. Washed out this way, the anchor
-// carries no standing moment and acts purely as a damper on the
-// timescales the fabric and pendulum oscillate at.
-constexpr double kAnchorWashoutSeconds = 3.0;
 // Pitch-rate term on the same anchor: the resultant shifts aft while the
 // angle of attack is still rising, which is the pressure-native form of
 // the Cmq damping a real canopy has and this model otherwise lacks. It is
@@ -175,8 +171,8 @@ constexpr double kTunnelBrakeGapMetres = 0.20;
 // Absolute damping of the flight-loaded tunnel (see stepSimulation).
 constexpr double tunnelDampingPerSecond = 8.0;
 
-// Defined in the aerodynamics section further down; buildSimBody needs
-// them for pilot sizing and the glide launch.
+// Defined in the aerodynamics section further down; buildSimBody needs it
+// for the trimmed-glide launch estimate.
 double wingLiftCoefficient(double angleRadians);
 
 // Rodrigues, for tilting the airflow off the rest chord by the angle of
@@ -273,6 +269,97 @@ std::uint64_t quantizedKey(const softwing::Vec3 &point)
            | (component(point.z) << 42);
 }
 
+double finiteClamped(double value, double fallback, double low, double high)
+{
+    return std::clamp(std::isfinite(value) ? value : fallback, low, high);
+}
+
+softwing::OrthotropicMembraneMaterial prototypeMaterial(
+    const SimControls &controls)
+{
+    softwing::OrthotropicMembraneMaterial material;
+    material.warpStiffness = finiteClamped(
+        controls.warpStiffness, prototypeWarpStiffness, 1.0, 1.0e7);
+    material.weftStiffness = finiteClamped(
+        controls.weftStiffness, prototypeWeftStiffness, 1.0, 1.0e7);
+    material.shearStiffness = finiteClamped(
+        controls.shearStiffness, prototypeShearStiffness, 1.0, 1.0e7);
+    const double maximumCoupling =
+        0.99 * std::sqrt(material.warpStiffness * material.weftStiffness);
+    material.couplingStiffness = finiteClamped(
+        controls.couplingStiffness,
+        prototypeCouplingStiffness,
+        0.0,
+        maximumCoupling);
+    material.dampingTime = finiteClamped(
+        controls.membraneDampingSeconds,
+        prototypeMembraneDampingSeconds,
+        0.0,
+        1.0);
+    material.compressionStiffnessRatio = finiteClamped(
+        controls.compressionStiffnessRatio,
+        prototypeCompressionStiffnessRatio,
+        1.0e-4,
+        1.0);
+    softwing::validateOrthotropicMembraneMaterial(material);
+    return material;
+}
+
+std::optional<double> restDihedralAngle(const softwing::Vec3 &a,
+                                        const softwing::Vec3 &b,
+                                        const softwing::Vec3 &c,
+                                        const softwing::Vec3 &d)
+{
+    const softwing::Vec3 edge = b - a;
+    const softwing::Vec3 firstArea = cross(edge, c - a);
+    const softwing::Vec3 secondArea = cross(d - a, edge);
+    const double edgeLength = length(edge);
+    const double firstLength = length(firstArea);
+    const double secondLength = length(secondArea);
+    if (!(edgeLength > 1.0e-12)
+        || !(firstLength > 1.0e-12 * edgeLength)
+        || !(secondLength > 1.0e-12 * edgeLength)) {
+        return std::nullopt;
+    }
+    const softwing::Vec3 edgeUnit = edge / edgeLength;
+    const softwing::Vec3 firstNormal = firstArea / firstLength;
+    const softwing::Vec3 secondNormal = secondArea / secondLength;
+    return std::atan2(dot(edgeUnit, cross(firstNormal, secondNormal)),
+                      std::clamp(dot(firstNormal, secondNormal), -1.0, 1.0));
+}
+
+struct SemanticLineKey
+{
+    std::uint64_t first = 0;
+    std::uint64_t second = 0;
+    int plan = 0;
+    bool brake = false;
+
+    bool operator<(const SemanticLineKey &other) const
+    {
+        if (first != other.first) {
+            return first < other.first;
+        }
+        if (second != other.second) {
+            return second < other.second;
+        }
+        if (plan != other.plan) {
+            return plan < other.plan;
+        }
+        return brake < other.brake;
+    }
+};
+
+SemanticLineKey semanticLineKey(const SimLine &line)
+{
+    std::uint64_t first = quantizedKey(line.a);
+    std::uint64_t second = quantizedKey(line.b);
+    if (second < first) {
+        std::swap(first, second);
+    }
+    return {first, second, line.plan, line.brake};
+}
+
 // Consistently orients the skin triangles (flood fill over shared edges),
 // then flips the whole skin outward by signed volume, so a positive
 // uniform pressure inflates the wing instead of crushing it.
@@ -346,6 +433,28 @@ void orientOutward(const std::vector<softwing::Vec3> &nodes,
 }
 
 }  // namespace
+
+const char *launchModeName(LaunchMode mode)
+{
+    switch (mode) {
+    case LaunchMode::TrimmedGlide:
+        return "trimmed glide";
+    case LaunchMode::DropFromRest:
+        return "drop from rest";
+    }
+    return "unknown";
+}
+
+const char *skinModelName(SkinModel model)
+{
+    switch (model) {
+    case SkinModel::LegacyDistanceTruss:
+        return "legacy distance truss";
+    case SkinModel::OrthotropicMembrane:
+        return "orthotropic membrane prototype";
+    }
+    return "unknown";
+}
 
 std::optional<SimMesh> parseSimMesh(const QByteArray &data, QString &error)
 {
@@ -426,16 +535,23 @@ std::optional<SimMesh> parseSimMesh(const QByteArray &data, QString &error)
             mesh.straps.push_back(std::move(strap));
         }
     }
+    std::set<SemanticLineKey> lineKeys;
     for (const QJsonValue &value : root.value(QLatin1String("lines")).toArray()) {
         const QJsonObject line = value.toObject();
         // Row plan (1..6 = A..F) is a late addition; meshes written before
         // it default to 0, which the row-load instrumentation treats as
         // "unknown" rather than a row of its own.
-        mesh.lines.push_back(
-            {vec(line.value(QLatin1String("a")).toArray()),
-             vec(line.value(QLatin1String("b")).toArray()),
-             line.value(QLatin1String("brake")).toInt() != 0,
-             line.value(QLatin1String("plan")).toInt(0)});
+        SimLine parsed{
+            vec(line.value(QLatin1String("a")).toArray()),
+            vec(line.value(QLatin1String("b")).toArray()),
+            line.value(QLatin1String("brake")).toInt() != 0,
+            line.value(QLatin1String("plan")).toInt(0),
+        };
+        if (!lineKeys.insert(semanticLineKey(parsed)).second) {
+            ++mesh.duplicateLineCount;
+            continue;
+        }
+        mesh.lines.push_back(std::move(parsed));
     }
 
     const int nodeCount = static_cast<int>(mesh.nodes.size());
@@ -582,9 +698,9 @@ SimMesh refineSimMesh(const SimMesh &mesh, int factor)
     return refined;
 }
 
-// Defined next to the contact pass further down; the build calls it while
-// the pose is still the designed one, because the rest-pose exclusion set
-// must be captured before any pressure has acted on the fabric.
+// Defined next to the step adapter below. Build-time preparation records only
+// skin topology and authored suspension attachments; geometric proximity in
+// the designed pose is deliberately not an exclusion.
 void prepareContact(SimBody &sim);
 
 SimBody buildSimBody(const SimMesh &mesh,
@@ -592,6 +708,11 @@ SimBody buildSimBody(const SimMesh &mesh,
                      const SimControls &controls)
 {
     SimBody sim;
+    sim.skinModel = controls.skinModel;
+    sim.skinMaterial = prototypeMaterial(controls);
+    sim.skinBendCompliance = finiteClamped(
+        controls.bendCompliance, prototypeBendCompliance, 0.0, 1.0);
+    sim.duplicateLineCount = mesh.duplicateLineCount;
     auto body = std::make_unique<softwing::SoftBody>();
     const int ribLayers = std::max(1, options.ribLayers);
     const int ribStationSplit = std::max(1, options.ribStationSplit);
@@ -634,6 +755,152 @@ SimBody buildSimBody(const SimMesh &mesh,
                           static_cast<std::size_t>(tri[2]));
     }
     sim.skinTriangleCount = triangles.size();
+
+    // Optional material skin. Each ordered source quad carries one neutral
+    // chart orientation: q0->q3 is chord/warp and q0->q1 is span/weft (the
+    // same u/v convention refineSimMesh documents). The two triangles may be
+    // mildly non-planar, so each receives an isometric chart in its own rest
+    // tangent plane while sharing the quad's transported warp direction.
+    // This keeps the designed pose exactly strain-free instead of flattening
+    // a curved quad and preloading it before the first step.
+    std::vector<std::size_t> membraneForTriangle(
+        triangles.size(), noConstraint);
+    if (sim.skinModel == SkinModel::OrthotropicMembrane) {
+        std::vector<softwing::MembraneElementDefinition> definitions;
+        std::vector<std::size_t> definitionFaces;
+        definitions.reserve(triangles.size());
+        definitionFaces.reserve(triangles.size());
+        for (std::size_t face = 0; face < triangles.size(); ++face) {
+            const auto &quad = mesh.quads[face / 2];
+            const softwing::Vec3 &q0 =
+                mesh.nodes[static_cast<std::size_t>(quad[0])];
+            const softwing::Vec3 &q1 =
+                mesh.nodes[static_cast<std::size_t>(quad[1])];
+            const softwing::Vec3 &q2 =
+                mesh.nodes[static_cast<std::size_t>(quad[2])];
+            const softwing::Vec3 &q3 =
+                mesh.nodes[static_cast<std::size_t>(quad[3])];
+            const softwing::Vec3 warpHint = (q3 - q0) + (q2 - q1);
+            const softwing::Vec3 weftHint = (q1 - q0) + (q2 - q3);
+            const auto &tri = triangles[face];
+            const softwing::Vec3 &p0 =
+                mesh.nodes[static_cast<std::size_t>(tri[0])];
+            const softwing::Vec3 &p1 =
+                mesh.nodes[static_cast<std::size_t>(tri[1])];
+            const softwing::Vec3 &p2 =
+                mesh.nodes[static_cast<std::size_t>(tri[2])];
+            const softwing::Vec3 normal = cross(p1 - p0, p2 - p0);
+            const double normalSquared = lengthSquared(normal);
+            if (!(normalSquared > 1.0e-24)
+                || !(lengthSquared(warpHint) > 1.0e-24)) {
+                ++sim.skippedMembraneElements;
+                continue;
+            }
+            const softwing::Vec3 normalUnit =
+                normal / std::sqrt(normalSquared);
+            softwing::Vec3 warp =
+                warpHint - dot(warpHint, normalUnit) * normalUnit;
+            if (!(lengthSquared(warp) > 1.0e-24)) {
+                warp = cross(weftHint, normalUnit);
+            }
+            if (!(lengthSquared(warp) > 1.0e-24)) {
+                ++sim.skippedMembraneElements;
+                continue;
+            }
+            warp = normalized(warp);
+            if (dot(warp, warpHint) < 0.0) {
+                warp *= -1.0;
+            }
+            const softwing::Vec3 weft = cross(normalUnit, warp);
+            std::array<softwing::Vec2, 3> chart;
+            const std::array<softwing::Vec3, 3> points{p0, p1, p2};
+            for (std::size_t corner = 0; corner < points.size(); ++corner) {
+                const softwing::Vec3 offset = points[corner] - p0;
+                chart[corner] = {dot(offset, warp), dot(offset, weft)};
+            }
+            const softwing::Vec2 edgeOne = chart[1] - chart[0];
+            const softwing::Vec2 edgeTwo = chart[2] - chart[0];
+            const double chartArea = softwing::cross(edgeOne, edgeTwo);
+            const double chartScale = std::max(
+                softwing::lengthSquared(edgeOne),
+                softwing::lengthSquared(edgeTwo));
+            if (!(chartArea > 64.0 * std::numeric_limits<double>::epsilon()
+                                  * chartScale)) {
+                ++sim.skippedMembraneElements;
+                continue;
+            }
+            definitions.push_back(
+                {face, chart, sim.skinMaterial, softwing::MaterialRole::Bulk});
+            definitionFaces.push_back(face);
+        }
+        if (!definitions.empty()) {
+            const std::size_t firstElement = body->membraneElements().size();
+            static_cast<void>(body->addMembraneElements(definitions));
+            for (std::size_t index = 0; index < definitionFaces.size();
+                 ++index) {
+                membraneForTriangle[definitionFaces[index]] =
+                    firstElement + index;
+            }
+        }
+
+        struct EdgeUse {
+            std::size_t from = 0;
+            std::size_t to = 0;
+            std::size_t opposite = 0;
+            std::size_t face = 0;
+        };
+        std::map<std::pair<std::size_t, std::size_t>,
+                 std::vector<EdgeUse>> skinEdges;
+        for (std::size_t face = 0; face < triangles.size(); ++face) {
+            const auto &tri = triangles[face];
+            for (int edge = 0; edge < 3; ++edge) {
+                const std::size_t from = static_cast<std::size_t>(tri[edge]);
+                const std::size_t to =
+                    static_cast<std::size_t>(tri[(edge + 1) % 3]);
+                const std::size_t opposite =
+                    static_cast<std::size_t>(tri[(edge + 2) % 3]);
+                const auto key = std::minmax(from, to);
+                skinEdges[key].push_back({from, to, opposite, face});
+            }
+        }
+        // Decide only after the complete incidence is known. Adding on the
+        // second use and discovering a third later would leave a hinge on a
+        // non-manifold edge.
+        for (const auto &[key, uses] : skinEdges) {
+            Q_UNUSED(key);
+            if (uses.size() == 1) {
+                continue; // genuine skin boundary/intake opening
+            }
+            if (uses.size() != 2) {
+                ++sim.skippedDihedralHinges;
+                continue;
+            }
+            const EdgeUse &first = uses[0];
+            const EdgeUse &second = uses[1];
+            if (membraneForTriangle[first.face] == noConstraint
+                || membraneForTriangle[second.face] == noConstraint
+                || first.from != second.to || first.to != second.from) {
+                ++sim.skippedDihedralHinges;
+                continue;
+            }
+            const std::optional<double> rest = restDihedralAngle(
+                mesh.nodes[first.from],
+                mesh.nodes[first.to],
+                mesh.nodes[first.opposite],
+                mesh.nodes[second.opposite]);
+            if (!rest) {
+                ++sim.skippedDihedralHinges;
+                continue;
+            }
+            body->addDihedralBendingConstraint(
+                first.from,
+                first.to,
+                first.opposite,
+                second.opposite,
+                *rest,
+                sim.skinBendCompliance);
+        }
+    }
 
     // The designed skin as area vectors, kept for the fabric-drag
     // reference: half the sum of |A.w| over a closed surface is its
@@ -706,13 +973,15 @@ SimBody buildSimBody(const SimMesh &mesh,
                    - mesh.nodes[static_cast<std::size_t>(a)]),
             skinCompliance);
     };
-    for (const auto &tri : triangles) {
-        addEdge(tri[0], tri[1]);
-        addEdge(tri[1], tri[2]);
-        addEdge(tri[2], tri[0]);
-    }
-    for (const auto &quad : mesh.quads) {
-        addEdge(quad[1], quad[3]);
+    if (sim.skinModel == SkinModel::LegacyDistanceTruss) {
+        for (const auto &tri : triangles) {
+            addEdge(tri[0], tri[1]);
+            addEdge(tri[1], tri[2]);
+            addEdge(tri[2], tri[0]);
+        }
+        for (const auto &quad : mesh.quads) {
+            addEdge(quad[1], quad[3]);
+        }
     }
 
     // Register the skin faces for drawing. Rib webs and V/H sheets are
@@ -731,6 +1000,10 @@ SimBody buildSimBody(const SimMesh &mesh,
                 sideConstraint(
                     static_cast<std::size_t>(tri[corner]),
                     static_cast<std::size_t>(tri[(corner + 1) % 3]));
+        }
+        if (face < membraneForTriangle.size()
+            && membraneForTriangle[face] != noConstraint) {
+            drawn.membraneElement = membraneForTriangle[face];
         }
         sim.renderFaces.push_back(drawn);
     }
@@ -1272,6 +1545,7 @@ SimBody buildSimBody(const SimMesh &mesh,
             // Each half's share of the projected planform, from the same
             // upper-surface shadow the wing-level figure is summed from.
             sim.halfPlanformArea = {0.0, 0.0};
+            sim.ribPlanformArea.assign(sim.ribChords.size(), 0.0);
             for (std::size_t face = 0; face < triangles.size(); ++face) {
                 if (!sim.faceAero[face].upperSurface) {
                     continue;
@@ -1283,8 +1557,11 @@ SimBody buildSimBody(const SimMesh &mesh,
                     mesh.nodes[static_cast<std::size_t>(tri[1])];
                 const softwing::Vec3 &c =
                     mesh.nodes[static_cast<std::size_t>(tri[2])];
-                sim.halfPlanformArea[sim.ribHalf[sim.faceAero[face].rib]] +=
+                const double facePlanform =
                     std::max(0.0, 0.5 * cross(b - a, c - a).z);
+                const std::size_t rib = sim.faceAero[face].rib;
+                sim.halfPlanformArea[sim.ribHalf[rib]] += facePlanform;
+                sim.ribPlanformArea[rib] += facePlanform;
             }
             // Rescaled to sum to the wing-level figure exactly, so two
             // half-passes at equal coefficients impose the same total
@@ -1295,6 +1572,9 @@ SimBody buildSimBody(const SimMesh &mesh,
                 const double scale = sim.planformArea / halfSum;
                 sim.halfPlanformArea[0] *= scale;
                 sim.halfPlanformArea[1] *= scale;
+                for (double &ribArea : sim.ribPlanformArea) {
+                    ribArea *= scale;
+                }
             }
         }
 
@@ -1398,6 +1678,9 @@ SimBody buildSimBody(const SimMesh &mesh,
             // Same convention as applyPressure: free flight ignores the
             // slider and flies in level air, so its opening fraction must
             // be normalised against the wind it will actually measure.
+            // Unit design-flow direction. Keep this expression independent
+            // of speed (and bit-identical for the zero-ambient tunnel): it
+            // normalises the mouth geometry, not the surrounding air mass.
             const softwing::Vec3 buildWind = rotateAbout(
                 sim.restChordDirection, sim.restSpanAxis,
                 (controls.freeFlight ? 0.0
@@ -1517,34 +1800,73 @@ SimBody buildSimBody(const SimMesh &mesh,
     // Everything added so far is canopy; lines and pilot follow.
     sim.canopyNodeCount = body->nodes().size();
 
-    // Suspension lines: weld junctions, cable constraints per segment,
-    // attach top ends to the nearest skin node, fix the pilot band.
+    // Suspension lines: reject legacy duplicates, lump the physical mass of
+    // each authored segment equally onto its welded endpoints, then create
+    // the cable graph. The old 50 g-per-junction rule made line mass depend
+    // on how an exporter happened to split the graph; length-lumping makes
+    // it depend on how much line is actually present. The small positive
+    // node floor is retained and diagnosed separately as numerical mass.
+    std::vector<const SimLine *> authoredLines;
+    std::map<std::uint64_t, double> junctionPhysicalMass;
+    std::set<SemanticLineKey> builtLineKeys;
+    double lowestZ = std::numeric_limits<double>::max();
+    for (const SimLine &line : mesh.lines) {
+        if (!builtLineKeys.insert(semanticLineKey(line)).second) {
+            ++sim.duplicateLineCount;
+            continue;
+        }
+        const std::uint64_t aKey = quantizedKey(line.a);
+        const std::uint64_t bKey = quantizedKey(line.b);
+        if (aKey == bKey) {
+            continue;
+        }
+        const double segmentMass =
+            lineLinearDensityKgPerMetre * length(line.b - line.a);
+        junctionPhysicalMass[aKey] += 0.5 * segmentMass;
+        junctionPhysicalMass[bKey] += 0.5 * segmentMass;
+        sim.authoredLineMassKg += segmentMass;
+        lowestZ = std::min({lowestZ, line.a.z, line.b.z});
+        authoredLines.push_back(&line);
+    }
+
     std::map<std::uint64_t, std::size_t> junctions;
     const auto lineNode = [&](const softwing::Vec3 &point) {
+        const std::uint64_t key = quantizedKey(point);
         const auto [entry, inserted] =
-            junctions.try_emplace(quantizedKey(point), 0);
+            junctions.try_emplace(key, 0);
         if (inserted) {
-            entry->second = body->addNode(point, lineJunctionMass);
+            const double physicalMass = junctionPhysicalMass[key];
+            if (controls.freeFlight) {
+                entry->second = body->addNode(
+                    point, physicalMass + lineJunctionNumericalMassKg);
+                sim.lineJunctionFloorMassKg +=
+                    lineJunctionNumericalMassKg;
+            } else {
+                // A pinned, zero-gravity tunnel is a static relaxation
+                // problem. Retain the old 50 g/junction inertia there so the
+                // light cable cascade converges at 30x2, but name and account
+                // for it as nonphysical solver ballast. Free flight never
+                // takes this branch and carries physical length-lumped mass.
+                entry->second = body->addNode(
+                    point, tunnelLineJunctionRelaxationMassKg);
+                sim.tunnelLineSolverBallastKg +=
+                    tunnelLineJunctionRelaxationMassKg;
+            }
         }
         return entry->second;
     };
-    double lowestZ = std::numeric_limits<double>::max();
-    for (const SimLine &line : mesh.lines) {
-        lowestZ = std::min({lowestZ, line.a.z, line.b.z});
-    }
-    for (const SimLine &line : mesh.lines) {
+    for (const SimLine *linePointer : authoredLines) {
+        const SimLine &line = *linePointer;
         const std::size_t a = lineNode(line.a);
         const std::size_t b = lineNode(line.b);
-        if (a == b) {
-            continue;
-        }
         sim.lineSegments.push_back(
             {a,
              b,
              line.brake,
              body->addCableConstraint(
                  a, b, length(line.b - line.a), lineCompliance),
-             line.plan});
+             line.plan,
+             true});
     }
     std::vector<std::size_t> carabiners;
     for (const auto &[key, node] : junctions) {
@@ -1632,9 +1954,18 @@ SimBody buildSimBody(const SimMesh &mesh,
         }
         pilotPlace /= static_cast<double>(carabiners.size());
         pilotPlace.z -= pilotDropMetres;
-        // Provisional mass; the real one is set once the wing's lift can be
-        // integrated, further down.
-        sim.pilotNode = body->addNode(pilotPlace, 1.0);
+        // Pilot plus harness/instruments is an explicit input. Clamping at
+        // this structural boundary keeps programmatic and CLI callers as
+        // safe as the GUI control, without fitting the payload to the polar
+        // that is supposed to carry it.
+        const double requestedPilotMass =
+            std::isfinite(controls.pilotMassKg)
+                ? controls.pilotMassKg
+                : defaultPilotMassKg;
+        sim.pilotMass = std::clamp(requestedPilotMass,
+                                   minimumPilotMassKg,
+                                   maximumPilotMassKg);
+        sim.pilotNode = body->addNode(pilotPlace, sim.pilotMass);
         for (const std::size_t node : carabiners) {
             tie(sim.pilotNode,
                 node,
@@ -1647,7 +1978,9 @@ SimBody buildSimBody(const SimMesh &mesh,
                 {sim.pilotNode,
                  node,
                  false,
-                 sideConstraint(sim.pilotNode, node)});
+                 sideConstraint(sim.pilotNode, node),
+                 0,
+                 false});
         }
     } else {
         for (const std::size_t node : carabiners) {
@@ -1709,8 +2042,13 @@ SimBody buildSimBody(const SimMesh &mesh,
         // three metres of span before it was spotted.
         softwing::Vec3 handlePosition = carabiner;
         handlePosition.z -= 0.3;
+        // This is a solver/control point standing in for the pilot's hand,
+        // whose physical mass is already inside pilotMass. It therefore gets
+        // only the explicit numerical floor and is not counted as authored
+        // suspension-line mass.
         const std::size_t handle =
-            body->addNode(handlePosition, lineJunctionMass);
+            body->addNode(handlePosition, controlNodeNumericalMassKg);
+        sim.controlNodeFloorMassKg += controlNodeNumericalMassKg;
         // In free flight the pilot holds the handle, so a brake pull reacts
         // into his mass. Pinned, the handle is nailed down instead.
         if (sim.pilotNode != noConstraint) {
@@ -1726,13 +2064,29 @@ SimBody buildSimBody(const SimMesh &mesh,
             const std::size_t constraint = body->addCableConstraint(
                 handle, top, rest, lineCompliance);
             // Plan 6: the engine hard-codes brakes to the F row.
-            sim.lineSegments.push_back({handle, top, true, constraint, 6});
+            sim.lineSegments.push_back(
+                {handle, top, true, constraint, 6, false});
             sim.brakeLines.push_back({constraint, rest, side < 0.0});
         }
     }
 
     sim.body = std::move(body);
     prepareContact(sim);
+
+    // Calibrate the rest field against the q-derived apparent flow. In free
+    // flight the actual atmosphere is ambient only, so give every component
+    // the matching common ground velocity temporarily. This initializes the
+    // vents, cells and trim from the reference condition without inventing a
+    // moving free-flight atmosphere. DropFromRest is reset to zero below but
+    // deliberately keeps this pre-inflated state.
+    if (controls.freeFlight) {
+        const softwing::Vec3 calibrationVelocity =
+            controls.ambientAirVelocityWorld
+            - referenceFlowVelocity(sim, controls);
+        for (softwing::Node &node : sim.body->nodes()) {
+            node.velocity = calibrationVelocity;
+        }
+    }
     applyPressure(sim, controls);
 
     // The angle the designed line geometry rigs the wing to fly at: the
@@ -1746,44 +2100,20 @@ SimBody buildSimBody(const SimMesh &mesh,
         sim.builtAngleOfAttackDegrees = controls.angleOfAttackDegrees;
     }
 
-    // Trim the pilot to the wing rather than the other way round. The load
-    // model is crude enough that its absolute lift is not a number to hang a
-    // wing loading off, but the pendulum only behaves if weight and lift are
-    // in the same place: too heavy and the system falls with the pilot
-    // weightless in his harness, too light and it climbs and the risers go
-    // slack. Sizing the pilot from the wing's own lift at its default
-    // setting makes every preset hang properly, and the slider still lets
-    // the system sink or climb from there.
+    // Estimate the glide-path angle used by the smart launch. Payload mass is
+    // absent from the angle calculation: it changes the speed needed to carry
+    // the system, not the polar's L/D at a given incidence. The achieved-load
+    // calibration below supplies that weight-aware speed separately.
     if (sim.pilotNode != noConstraint) {
-        auto &nodes = sim.body->nodes();
-        double bodyMass = 0.0;
-        for (std::size_t index = 0; index < nodes.size(); ++index) {
-            if (index != sim.pilotNode && nodes[index].inverseMass > 0.0) {
-                bodyMass += 1.0 / nodes[index].inverseMass;
-            }
-        }
-        // Sized so the system is in vertical balance at its rest attitude:
-        // in a steady glide the weight equals the full aerodynamic
-        // resultant, sqrt(L² + D²), of the polar the force pass imposes.
-        // Sizing from the polar rather than from the integrated pressure
-        // field is what lets the pilot be a realistic weight — the
-        // pressure field's own lift under-reads badly, and a pilot sized
-        // from it hung the wing at a fraction of its real wing loading.
-        // In flight the pendulum hangs vertical and the path descends at
-        // the glide angle, so the wing flies at its rest angle PLUS the
-        // glide angle. Iterate that pair to a fixed point, then size the
-        // pilot so the weight matches the polar's resultant there — that
-        // is what lets the launched system hang at its own trim instead
-        // of climbing away or folding under a starved dynamic pressure.
+        // In flight the path descends at the glide angle, so the wing sees
+        // its rest incidence plus that angle. Iterate the polar pair to the
+        // same fixed point the previous smart launch used.
         const WingAeroSample aero = sampleWingAero(sim, controls);
-        double wanted = 90.0;
         if (aero.valid && sim.planformArea > 0.0) {
             const double aspectRatio = std::max(1.0, sim.aspectRatio);
             const double finiteWing =
                 1.0 / (1.0 + 2.0 / (aspectRatio * kSpanEfficiency));
             double alphaFly = aero.alphaRadians;
-            double lift = 0.0;
-            double drag = 0.0;
             for (int iteration = 0; iteration < 4; ++iteration) {
                 const double liftCoefficient =
                     finiteWing * wingLiftCoefficient(alphaFly);
@@ -1791,27 +2121,16 @@ SimBody buildSimBody(const SimMesh &mesh,
                     kParasiticDragCoefficient
                     + liftCoefficient * liftCoefficient
                           / (kPi * aspectRatio * kSpanEfficiency);
-                lift = aero.dynamicPressure * sim.planformArea
-                       * liftCoefficient;
-                drag = aero.dynamicPressure
-                       * (sim.planformArea * dragCoefficient
-                          + kPilotDragArea);
+                const double lift = aero.dynamicPressure * sim.planformArea
+                                    * liftCoefficient;
+                const double drag = aero.dynamicPressure
+                                    * (sim.planformArea * dragCoefficient
+                                       + kPilotDragArea);
                 sim.glideAngleRadians = std::atan2(drag, lift);
                 alphaFly = aero.alphaRadians + sim.glideAngleRadians;
             }
             sim.alphaTrimRadians = alphaFly;
-            // A little under the exact balance. Flying a few percent
-            // light trims a degree or two below the fixed point, which
-            // is the margin that keeps the arc-tilted tip sections out
-            // of their own stall — sized exactly, the slow trim creep
-            // walked the tips into stall at about seven seconds and the
-            // span folded.
-            wanted = 0.90 * std::hypot(lift, drag)
-                         / gravityMetresPerSecondSquared
-                     - bodyMass;
         }
-        sim.pilotMass = std::clamp(wanted, 30.0, 250.0);
-        nodes[sim.pilotNode].inverseMass = 1.0 / sim.pilotMass;
     }
     for (const std::size_t node : brakeHandles) {
         if (!controls.freeFlight) {
@@ -1819,31 +2138,169 @@ SimBody buildSimBody(const SimMesh &mesh,
         }
     }
 
-    // Launch ON the glide, not at a dead stop in a horizontal wind. From
-    // rest, the imposed drag has no counterpart until the system develops
-    // its sink, and in that transient the light canopy gets yanked aft
-    // around the heavy pilot, loses its angle of attack, and pendulums
-    // over — measured every time, with every force scheme. So every node
-    // starts with the steady descent velocity the polar predicts: the
-    // relative wind then meets the canopy climbing at the glide angle,
-    // which is exactly the in-flight trim the pilot was sized for. The
-    // attitude needs no adjustment — the rest pose already hangs the
-    // pendulum vertical, which is its in-flight attitude too.
+    // TrimmedGlide launches on the estimated flight path. A short deterministic
+    // scalar calibration on the untouched rest geometry sizes q so the
+    // bounded field's ACHIEVED vertical wing force carries the complete
+    // simulated mass. This is intentionally not the requested polar lift: Cp
+    // saturation can make that unavailable. Starting the bounded force-stage
+    // cache near its measured rest authority avoids calibrating against the
+    // production path's deliberately conservative 0.02 first probe; the final
+    // verified authority and dual are retained for the first stepped frame.
+    //
+    // DropFromRest deliberately leaves every node's default velocity at zero:
+    // the already stamped pressure makes it a pre-inflated release experiment,
+    // useful for watching gravity tension the dynamic point-payload suspension
+    // without pretending to be a ground inflation or a solved trim state.
     if (controls.freeFlight && sim.pilotNode != noConstraint
-        && sim.glideAngleRadians > 0.0) {
+        && controls.launchMode == LaunchMode::TrimmedGlide) {
         const WingAeroSample rest = sampleWingAero(sim, controls);
-        if (rest.valid) {
-            const softwing::Vec3 freestream =
-                rest.airspeed * rest.windDirection;
+        const softwing::Vec3 launchAxis =
+            rest.valid ? rest.spanAxis : sim.restSpanAxis;
+        const softwing::Vec3 referenceApparentFlow =
+            rotateAbout(referenceFlowVelocity(sim, controls),
+                        launchAxis,
+                        sim.glideAngleRadians);
+        const double referenceQ = std::max(0.0, controls.pressurePascal);
+        double launchQ = referenceQ;
+        double achievedVertical = 0.0;
+        int calibrationIterations = 0;
+        if (controls.pressureSolveMode
+                == PressureSolveMode::BoundedExteriorCp
+            && sim.pressureAuthorityHint[0] <= 0.0) {
+            // The full-q undeformed gnuC2 audit measured 0.1608 force-ray
+            // authority. This is only a starting hint: every calibration pass
+            // still projects it and deterministically backs off if its own
+            // mesh cannot carry it.
+            sim.pressureAuthorityHint[0] = 0.16;
+        }
+        const auto setCommonVelocityAt = [&](double dynamicPressure) {
+            const double scale =
+                referenceQ > 1.0e-12
+                    ? std::sqrt(std::max(0.0, dynamicPressure) / referenceQ)
+                    : 0.0;
             const softwing::Vec3 descent =
-                freestream
-                - rotateAbout(freestream,
-                              rest.spanAxis,
-                              sim.glideAngleRadians);
+                controls.ambientAirVelocityWorld
+                - scale * referenceApparentFlow;
             for (softwing::Node &node : sim.body->nodes()) {
                 node.velocity = descent;
             }
+        };
+        const auto calibrateAt = [&](double dynamicPressure) {
+            ++calibrationIterations;
+            setCommonVelocityAt(dynamicPressure);
+            // Each unstepped probe is a fresh steady rest condition; do not
+            // let the intake relaxation from the previous scalar q bias it.
+            sim.cellPressure.clear();
             applyPressure(sim, controls);
+            applyAerodynamicForces(sim, controls);
+            const softwing::Vec3 achievedWing =
+                sim.pressureSolve.achievedForce
+                + sim.lastPolarDragTractionForce;
+            achievedVertical = achievedWing.z;
+        };
+
+        double systemMass = 0.0;
+        for (const softwing::Node &node : sim.body->nodes()) {
+            if (node.inverseMass > 0.0) {
+                systemMass += 1.0 / node.inverseMass;
+            }
+        }
+        const double systemWeight =
+            systemMass * gravityMetresPerSecondSquared;
+        const double maximumQ =
+            kMaximumDynamicPressureRatio * referenceQ;
+        const auto resetLaunchAeroState = [&]() {
+            sim.alphaFilteredRadians =
+                std::numeric_limits<double>::quiet_NaN();
+            sim.alphaRateRadiansPerSecond = 0.0;
+            sim.alphaHalfDeviationRadians = {0.0, 0.0};
+            sim.halfDynamicPressureRatio = {1.0, 1.0};
+            sim.brakeApplied = {0.0, 0.0};
+            sim.brakeFilteredMetres = {0.0, 0.0};
+            sim.cellPressure.clear();
+            sim.pressureAuthorityHint = {0.16, 1.0, 1.0};
+            for (auto &multipliers : sim.pressureMultiplierHint) {
+                multipliers.clear();
+            }
+        };
+        for (int iteration = 0; iteration < 2; ++iteration) {
+            calibrateAt(launchQ);
+            if (!(launchQ > 1.0e-12) || !(achievedVertical > 1.0e-6)
+                || !(systemWeight > 0.0)) {
+                break;
+            }
+            launchQ = std::clamp(
+                launchQ * systemWeight / achievedVertical,
+                0.0,
+                maximumQ);
+        }
+        // Leave the pressure field, cell state and bounded warm start at the
+        // exact q the co-moving structural relaxation starts from.
+        calibrateAt(launchQ);
+
+        // Establish the gravity/aero reaction through the real suspension
+        // graph before release. Replacing every node velocity with the common
+        // apparent-flow velocity erases relative vibration — this is a
+        // quasi-static relaxation, not hidden flight time. Eight otherwise
+        // ordinary XPBD frames let the pilot, risers and canopy find a
+        // compatible loaded geometry. No travel or time-filter/control state
+        // is retained, and DropFromRest plus the legacy oracle never enter
+        // this path. Contact is also excluded: it is a runtime fold feature,
+        // not part of trim construction.
+        if (controls.pressureSolveMode
+            == PressureSolveMode::BoundedExteriorCp) {
+            constexpr int relaxationFrames = 8;
+            SimControls relaxationControls = controls;
+            relaxationControls.brakeLeft = 0.0;
+            relaxationControls.brakeRight = 0.0;
+            relaxationControls.fabricContact = false;
+            relaxationControls.performanceProfile = nullptr;
+            for (int frame = 0; frame < relaxationFrames; ++frame) {
+                setCommonVelocityAt(launchQ);
+                stepSimulation(sim, relaxationControls);
+            }
+            sim.airTravel = {};
+            sim.trimmedLaunchRelaxationFrames = relaxationFrames;
+
+            // Only geometry and constraint-compatible position survive the
+            // build settle. Re-seed every wake/control state, cell state and
+            // bounded warm start so the final calibration below is the first
+            // stateful aerodynamic observation of the release geometry.
+            resetLaunchAeroState();
+        }
+
+        // The loaded geometry can carry a different vertical coefficient
+        // than the untouched rest pose. Re-size q on that retained geometry,
+        // then leave the final field/cache and common launch velocity ready
+        // for the first user-visible frame.
+        for (int iteration = 0; iteration < 2; ++iteration) {
+            calibrateAt(launchQ);
+            if (!(launchQ > 1.0e-12) || !(achievedVertical > 1.0e-6)
+                || !(systemWeight > 0.0)) {
+                break;
+            }
+            launchQ = std::clamp(
+                launchQ * systemWeight / achievedVertical,
+                0.0,
+                maximumQ);
+        }
+        calibrateAt(launchQ);
+        sim.trimmedLaunchDynamicPressure = launchQ;
+        sim.trimmedLaunchAirspeed =
+            std::sqrt(2.0 * launchQ / kAirDensity);
+        sim.trimmedLaunchEffectiveLiftCoefficient =
+            launchQ > 1.0e-12 && sim.planformArea > 1.0e-12
+                ? achievedVertical / (launchQ * sim.planformArea)
+                : 0.0;
+        sim.trimmedLaunchHorizontalResidualNewtons = std::hypot(
+            sim.lastAeroForce.x, sim.lastAeroForce.y);
+        sim.trimmedLaunchVerticalResidualNewtons =
+            sim.lastAeroForce.z - systemWeight;
+        sim.trimmedLaunchCalibrationIterations = calibrationIterations;
+    } else if (controls.freeFlight
+               && controls.launchMode == LaunchMode::DropFromRest) {
+        for (softwing::Node &node : sim.body->nodes()) {
+            node.velocity = {};
         }
     }
 
@@ -2202,12 +2659,55 @@ std::vector<double> advanceCellPressures(
 
 }  // namespace
 
+softwing::Vec3 referenceFlowVelocity(const SimBody &sim,
+                                     const SimControls &controls)
+{
+    const double airspeed = std::sqrt(
+        2.0 * std::max(0.0, controls.pressurePascal) / kAirDensity);
+    const double angle =
+        (controls.freeFlight ? 0.0 : controls.angleOfAttackDegrees)
+        * kDegreesToRadians;
+    return airspeed
+           * rotateAbout(sim.restChordDirection, sim.restSpanAxis, angle);
+}
+
+softwing::Vec3 airVelocityWorld(const SimBody &sim,
+                                const SimControls &controls)
+{
+    if (controls.freeFlight) {
+        return controls.ambientAirVelocityWorld;
+    }
+    return controls.ambientAirVelocityWorld
+           + referenceFlowVelocity(sim, controls);
+}
+
+softwing::Vec3 relativeAirVelocity(
+    const softwing::Vec3 &airVelocity,
+    const softwing::Vec3 &surfaceVelocity)
+{
+    return airVelocity - surfaceVelocity;
+}
+
 void applyPressure(SimBody &sim, const SimControls &controls)
 {
     if (!sim.body) {
         return;
     }
-    const double dynamicPressure = controls.pressurePascal;
+    const double referenceDynamicPressure = controls.pressurePascal;
+    const softwing::Vec3 airVelocity = airVelocityWorld(sim, controls);
+    const softwing::Vec3 bulkSurfaceVelocity =
+        controls.freeFlight ? canopyVelocityOf(sim) : softwing::Vec3{};
+    const softwing::Vec3 bulkRelative =
+        relativeAirVelocity(airVelocity, bulkSurfaceVelocity);
+    const bool legacyTunnelAir =
+        !controls.freeFlight
+        && lengthSquared(controls.ambientAirVelocityWorld) == 0.0;
+    const double dynamicPressure =
+        legacyTunnelAir
+            ? referenceDynamicPressure
+            : std::min(0.5 * kAirDensity * lengthSquared(bulkRelative),
+                       kMaximumDynamicPressureRatio
+                           * std::max(0.0, referenceDynamicPressure));
 
     // No rib loops, no chord to hang a distribution off: fall back to the
     // uniform field, which is what this used to be everywhere.
@@ -2218,6 +2718,11 @@ void applyPressure(SimBody &sim, const SimControls &controls)
         // Nothing to derive a physical floor from; the retrim falls back
         // to its own bound.
         sim.facePressureFloor.clear();
+        sim.faceInteriorPressure.clear();
+        sim.faceDynamicPressure.clear();
+        sim.facePriorExternalCp.clear();
+        sim.faceRetrimPreferredCp.clear();
+        sim.faceAppliedExternalCp.clear();
         return;
     }
 
@@ -2234,18 +2739,10 @@ void applyPressure(SimBody &sim, const SimControls &controls)
     // statically self-consistent — but dynamically it inverted the
     // fundamental feedback (a sinking wing lost lift instead of gaining
     // it), which made every free-flight attempt diverge.
-    // In free flight the slider is ignored and the air is level: the wing
-    // finds its own trim, and tilting the oncoming air is a hillside, not
-    // an angle-of-attack control — at the pinned default of 6° it trimmed
-    // the flying wing into its stall.
-    const double airspeed =
-        std::sqrt(2.0 * std::max(0.0, dynamicPressure) / kAirDensity);
-    const double angle =
-        (controls.freeFlight ? 0.0 : controls.angleOfAttackDegrees)
-        * kDegreesToRadians;
-    const softwing::Vec3 freestream =
-        airspeed
-        * rotateAbout(sim.restChordDirection, sim.restSpanAxis, angle);
+    // In free flight the slider supplies only the reference load/launch
+    // speed. The air mass itself is ambientAirVelocityWorld; angle of attack
+    // comes from the wing's motion and attitude. The tunnel adds its
+    // prescribed q-derived flow at the slider angle.
 
     const auto &nodes = sim.body->nodes();
 
@@ -2305,12 +2802,13 @@ void applyPressure(SimBody &sim, const SimControls &controls)
         // section can at most double or cancel its own wind.
         const double spinSpeed = length(spin);
         const double spinLimit =
-            kMaximumSpinWindRatio * length(freestream - systemVelocity);
+            kMaximumSpinWindRatio
+            * length(relativeAirVelocity(airVelocity, systemVelocity));
         if (spinSpeed > spinLimit && spinSpeed > 0.0) {
             spin = (spinLimit / spinSpeed) * spin;
         }
         const softwing::Vec3 relativeWind =
-            freestream - systemVelocity - spin;
+            relativeAirVelocity(airVelocity, systemVelocity + spin);
 
         // Both vectors flattened into the section's own plane, so the angle
         // measured is pitch and not some part of the wing's sweep or arc.
@@ -2345,7 +2843,8 @@ void applyPressure(SimBody &sim, const SimControls &controls)
         const double relativeSpeed = length(relativeWind);
         ribPressure[index] =
             std::min(0.5 * kAirDensity * relativeSpeed * relativeSpeed,
-                     kMaximumDynamicPressureRatio * dynamicPressure);
+                     kMaximumDynamicPressureRatio
+                         * referenceDynamicPressure);
     }
 
     // The interior side of every face. With the cell model on, each cell
@@ -2366,21 +2865,31 @@ void applyPressure(SimBody &sim, const SimControls &controls)
         interior = advanceCellPressures(
             sim,
             ribPressure,
-            freestream,
+            airVelocity,
             std::max(0.0, controls.crossPortGain));
     }
     sim.facePressureFloor.assign(sim.skinTriangleCount, 0.0);
+    sim.faceInteriorPressure.assign(sim.skinTriangleCount, 0.0);
+    sim.faceDynamicPressure.assign(sim.skinTriangleCount, 0.0);
+    sim.facePriorExternalCp.assign(sim.skinTriangleCount, 0.0);
+    sim.faceRetrimPreferredCp.assign(sim.skinTriangleCount, 0.0);
+    sim.faceAppliedExternalCp.assign(sim.skinTriangleCount, 0.0);
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const FaceAero &aero = sim.faceAero[face];
         const double coefficient = externalPressureCoefficient(
             aero.chordFraction, aero.upperSurface, ribLift[aero.rib]);
+        const double faceInterior =
+            cellsActive ? interior[aero.cell] : ribPressure[aero.rib];
+        const double faceDynamic = ribPressure[aero.rib];
+        sim.faceInteriorPressure[face] = faceInterior;
+        sim.faceDynamicPressure[face] = faceDynamic;
+        sim.facePriorExternalCp[face] = coefficient;
+        sim.faceAppliedExternalCp[face] = coefficient;
         // The interior this face has, minus the most the air outside it
         // can ever push back with. Cp is capped at 1 just above, so the
         // stamped value below is always at or over this; it is the retrim
         // that has to be held to it.
-        sim.facePressureFloor[face] =
-            (cellsActive ? interior[aero.cell] : ribPressure[aero.rib])
-            - ribPressure[aero.rib];
+        sim.facePressureFloor[face] = faceInterior - faceDynamic;
         // The outside of the face is q·Cp; only the difference across the
         // fabric loads it, which is why there is no separate ambient
         // anywhere here. The legacy expression is kept verbatim on the
@@ -2396,19 +2905,6 @@ void applyPressure(SimBody &sim, const SimControls &controls)
 }
 
 namespace {
-
-// The airflow the whole wing sees, shared by the load and drag passes.
-softwing::Vec3 freestreamVelocity(const SimBody &sim,
-                                  const SimControls &controls)
-{
-    const double airspeed = std::sqrt(
-        2.0 * std::max(0.0, controls.pressurePascal) / kAirDensity);
-    const double angle =
-        (controls.freeFlight ? 0.0 : controls.angleOfAttackDegrees)
-        * kDegreesToRadians;
-    return airspeed
-           * rotateAbout(sim.restChordDirection, sim.restSpanAxis, angle);
-}
 
 softwing::Vec3 systemVelocityOf(const SimBody &sim)
 {
@@ -2566,11 +3062,12 @@ WingAeroSample sampleWingAero(const SimBody &sim,
     // of agitation and pitched right over. At equilibrium the canopy is
     // still and the term vanishes, so the tunnel condition itself is
     // untouched.
-    const softwing::Vec3 relative =
-        freestreamVelocity(sim, controls)
-        - (controls.freeFlight || controls.flightLoad
-               ? canopyVelocityOf(sim)
-               : softwing::Vec3{});
+    const softwing::Vec3 surfaceVelocity =
+        controls.freeFlight || controls.flightLoad
+            ? canopyVelocityOf(sim)
+            : softwing::Vec3{};
+    const softwing::Vec3 relative = relativeAirVelocity(
+        airVelocityWorld(sim, controls), surfaceVelocity);
     const double speed = length(relative);
     if (speed <= 1.0e-6) {
         return sample;
@@ -2635,6 +3132,7 @@ WingAeroSample sampleWingAero(const SimBody &sim,
         return sample;
     }
     const softwing::Vec3 chordDirection = normalized(chordInPlane);
+    sample.chordDirection = chordDirection;
     const softwing::Vec3 windPlaneDirection = normalized(windInPlane);
     const double alongWind = dot(chordDirection, windPlaneDirection);
     // Positive when the wind comes from below the chord — the physical
@@ -2672,6 +3170,138 @@ WingAeroSample sampleWingAero(const SimBody &sim,
     return sample;
 }
 
+HalfAeroKinematics sampleHalfAeroKinematics(
+    const SimBody &sim, const WingAeroSample &sample)
+{
+    HalfAeroKinematics result;
+    if (!sim.body || !sample.valid || !(sample.airspeed > 1.0e-6)
+        || sim.ribHalf.size() != sim.ribChords.size()
+        || sim.ribPlanformArea.size() != sim.ribChords.size()
+        || !(sim.halfPlanformArea[0] > 0.0)
+        || !(sim.halfPlanformArea[1] > 0.0)) {
+        return result;
+    }
+
+    const softwing::Vec3 restSpan = normalized(sim.restSpanAxis);
+    const softwing::Vec3 restChord = normalized(
+        sim.restChordDirection
+        - dot(sim.restChordDirection, restSpan) * restSpan);
+    const softwing::Vec3 restUp = normalized(cross(restSpan, restChord));
+    const softwing::Vec3 liveSpan = normalized(sample.spanAxis);
+    const softwing::Vec3 liveChord = normalized(
+        sample.chordDirection
+        - dot(sample.chordDirection, liveSpan) * liveSpan);
+    const softwing::Vec3 liveUp = normalized(cross(liveSpan, liveChord));
+    if (length(restSpan) <= 0.0 || length(restChord) <= 0.0
+        || length(restUp) <= 0.0 || length(liveSpan) <= 0.0
+        || length(liveChord) <= 0.0 || length(liveUp) <= 0.0) {
+        return result;
+    }
+
+    const auto &nodes = sim.body->nodes();
+    softwing::Vec3 spinCentre;
+    const softwing::Vec3 spinRate = canopySpinOf(sim, spinCentre);
+    const softwing::Vec3 commonFlow =
+        sample.airspeed
+        * normalized(sample.windDirection
+                     - dot(sample.windDirection, liveSpan) * liveSpan);
+    if (length(commonFlow) <= 1.0e-6) {
+        return result;
+    }
+    double halfAlpha[2] = {0.0, 0.0};
+    double measuredArea[2] = {0.0, 0.0};
+    for (int half = 0; half < 2; ++half) {
+        softwing::Vec3 centre;
+        double centreWeight = 0.0;
+        for (std::size_t index = 0; index < sim.ribChords.size(); ++index) {
+            if (sim.ribHalf[index] != static_cast<std::uint8_t>(half)) {
+                continue;
+            }
+            const RibChord &rib = sim.ribChords[index];
+            const double weight = sim.ribPlanformArea[index];
+            centre += weight
+                      * (nodes[rib.leadingNode].position
+                         + 0.25
+                               * (nodes[rib.trailingNode].position
+                                  - nodes[rib.leadingNode].position));
+            centreWeight += weight;
+        }
+        if (!(centreWeight > 0.0)) {
+            return result;
+        }
+        centre /= centreWeight;
+
+        softwing::Vec3 localVelocity =
+            cross(spinRate, centre - spinCentre);
+        const double localSpeed = length(localVelocity);
+        const double localLimit = kMaximumSpinWindRatio * sample.airspeed;
+        if (localSpeed > localLimit && localSpeed > 0.0) {
+            localVelocity = (localLimit / localSpeed) * localVelocity;
+        }
+        const softwing::Vec3 halfFlow =
+            sample.airspeed * sample.windDirection - localVelocity;
+        result.dynamicPressureRatio[half] =
+            lengthSquared(halfFlow) / (sample.airspeed * sample.airspeed);
+
+        for (std::size_t index = 0; index < sim.ribChords.size(); ++index) {
+            if (sim.ribHalf[index] != static_cast<std::uint8_t>(half)) {
+                continue;
+            }
+            const double weight = sim.ribPlanformArea[index];
+            if (!(weight > 0.0)) {
+                continue;
+            }
+            const softwing::Vec3 restSection =
+                normalized(sim.ribChords[index].spanAxis);
+            softwing::Vec3 liveSection =
+                dot(restSection, restSpan) * liveSpan
+                + dot(restSection, restChord) * liveChord
+                + dot(restSection, restUp) * liveUp;
+            if (length(liveSection) <= 1.0e-6) {
+                continue;
+            }
+            liveSection = normalized(liveSection);
+            const softwing::Vec3 sectionChord =
+                liveChord - dot(liveChord, liveSection) * liveSection;
+            const softwing::Vec3 sectionFlow =
+                halfFlow - dot(halfFlow, liveSection) * liveSection;
+            const softwing::Vec3 baselineFlow =
+                commonFlow - dot(commonFlow, liveSection) * liveSection;
+            if (length(sectionChord) <= 1.0e-6
+                || length(sectionFlow) <= 1.0e-6
+                || length(baselineFlow) <= 1.0e-6) {
+                continue;
+            }
+            const softwing::Vec3 chord = normalized(sectionChord);
+            const softwing::Vec3 flow = normalized(sectionFlow);
+            const softwing::Vec3 baseline = normalized(baselineFlow);
+            const double alpha = std::atan2(
+                dot(cross(chord, flow), liveSection), dot(chord, flow));
+            const double baselineAlpha = std::atan2(
+                dot(cross(chord, baseline), liveSection),
+                dot(chord, baseline));
+            halfAlpha[half] += weight * (alpha - baselineAlpha);
+            measuredArea[half] += weight;
+        }
+        if (!(measuredArea[half] > 0.0)) {
+            return result;
+        }
+        halfAlpha[half] /= measuredArea[half];
+    }
+
+    // Remove the exact planform-weighted common mode. This machinery is a
+    // differential weathercock/rotation correction only; the wing-level
+    // sample remains the sole owner of common incidence and trim.
+    const double common =
+        (sim.halfPlanformArea[0] * halfAlpha[0]
+         + sim.halfPlanformArea[1] * halfAlpha[1])
+        / (sim.halfPlanformArea[0] + sim.halfPlanformArea[1]);
+    result.alphaDeviationRadians = {
+        halfAlpha[0] - common, halfAlpha[1] - common};
+    result.valid = true;
+    return result;
+}
+
 namespace {
 
 // One half-span, as the differential pass sees it: the point on its OWN
@@ -2700,6 +3330,10 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     sim.lastAeroForce = {};
     sim.lastLift = 0.0;
     sim.lastDrag = 0.0;
+    sim.lastPolarDragTractionForce = {};
+    sim.lastPolarDragTargetNewtons = 0.0;
+    sim.lastPolarDragTractionNewtons = 0.0;
+    sim.lastPolarDragTractionPowerWatts = 0.0;
     sim.lastGlideRatio = 0.0;
     sim.lastAlphaDegrees = 0.0;
     sim.lastAirspeed = 0.0;
@@ -2717,7 +3351,6 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     // instead of the fabric's.
     if (!std::isfinite(sim.alphaFilteredRadians)) {
         sim.alphaFilteredRadians = sample.alphaRadians;
-        sim.alphaSlowRadians = sample.alphaRadians;
         sim.alphaRateRadiansPerSecond = 0.0;
     } else {
         const double blend = std::min(
@@ -2727,9 +3360,6 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
             (sample.alphaRadians - previous) * blend;
         sim.alphaRateRadiansPerSecond =
             (sim.alphaFilteredRadians - previous) / simulationTimeStep;
-        sim.alphaSlowRadians +=
-            (sim.alphaFilteredRadians - sim.alphaSlowRadians)
-            * std::min(1.0, simulationTimeStep / kAnchorWashoutSeconds);
     }
     const double aspectRatio = std::max(1.0, sim.aspectRatio);
     const double finiteWing =
@@ -2779,20 +3409,19 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                        && sim.halfPlanformArea[1] > 0.0;
     const int halfCount = split ? 2 : 1;
 
-    // Each half's angle, as a low-passed DEPARTURE from the wing's. The
-    // departure is KINEMATIC: a rolling wing has one half descending into
-    // the air and the other rising out of it, and a yawing one has a tip
-    // running forward and a tip running back, so the two halves meet the
-    // air at different angles. That difference is the entirety of a
-    // wing's roll and yaw damping. The wing-level polar could not see it,
-    // and the hands-up glide grew a lateral oscillation until it folded.
+    // Each half's angle, as a low-passed DEPARTURE from the wing's. Rigid
+    // spin supplies rate damping, while sideslip projected through the
+    // live images of the rest section planes supplies the arc's static
+    // weathercock response. The wing-level polar cannot see either after
+    // it removes the spanwise component to measure common incidence.
     //
-    // Taken from the canopy's RIGID-body spin, for exactly the reason the
-    // per-rib pressure wind is (see canopySpinOf): a rigid fit has no
-    // breathing mode, so none of the fabric's own motion can reach a
-    // force with kilonewtons of authority through it. It is also written
-    // as a departure from the wing's own angle, so a wing that is not
-    // rotating gets exactly zero and flies the trajectory it always did.
+    // Rotation is taken from the canopy's RIGID-body spin, for exactly the
+    // reason the per-rib pressure flow is (see canopySpinOf): a rigid fit
+    // has no breathing mode, so none of the fabric's own motion can reach a
+    // force with kilonewtons of authority. Section-plane incidence is
+    // measured relative to its own no-beta baseline, then its exact weighted
+    // common mode is removed; a no-spin/no-sideslip wing therefore gets zero
+    // even when the mesh or arc is not perfectly mirror-symmetric.
     //
     // Measuring each half's own CHORD line instead was tried first and is
     // wrong twice over: a rigid roll does not move the chords relative to
@@ -2810,97 +3439,27 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         sim.alphaHalfDeviationRadians = {0.0, 0.0};
         sim.halfDynamicPressureRatio = {1.0, 1.0};
     } else {
-        const auto &canopy = sim.body->nodes();
-        const softwing::Vec3 &axis = sample.spanAxis;
-        const softwing::Vec3 windInPlane =
-            sample.windDirection
-            - dot(sample.windDirection, axis) * axis;
-        softwing::Vec3 spinCentre;
-        const softwing::Vec3 spin = canopySpinOf(sim, spinCentre);
-        double raw[2] = {0.0, 0.0};
-        double rawRatio[2] = {1.0, 1.0};
-        bool measured = length(windInPlane) > 1.0e-6;
-        if (measured) {
-            const softwing::Vec3 windPlane = normalized(windInPlane);
-            for (int half = 0; half < 2 && measured; ++half) {
-                softwing::Vec3 centre;
-                std::size_t counted = 0;
-                for (std::size_t index = 0; index < sim.ribChords.size();
-                     ++index) {
-                    if (sim.ribHalf[index]
-                        != static_cast<std::uint8_t>(half)) {
-                        continue;
-                    }
-                    const RibChord &rib = sim.ribChords[index];
-                    centre +=
-                        canopy[rib.leadingNode].position
-                        + 0.25
-                              * (canopy[rib.trailingNode].position
-                                 - canopy[rib.leadingNode].position);
-                    ++counted;
-                }
-                if (counted == 0) {
-                    measured = false;
-                    break;
-                }
-                centre /= static_cast<double>(counted);
-                // The wind this half meets: the wing's, less the velocity
-                // its own quarter-chord station has from the canopy's
-                // rotation. Capped like the per-rib wind is, so a
-                // tumbling transient cannot hand a half a wind of its own
-                // invention.
-                softwing::Vec3 local = cross(spin, centre - spinCentre);
-                const double speed = length(local);
-                const double limit =
-                    kMaximumSpinWindRatio * sample.airspeed;
-                if (speed > limit && speed > 0.0) {
-                    local = (limit / speed) * local;
-                }
-                const softwing::Vec3 halfWind =
-                    sample.airspeed * sample.windDirection - local;
-                // And the SPEED it meets it at, as a ratio of the wing's
-                // dynamic pressure. This is the other half of the yaw
-                // story and it is what makes a brake turn the right way
-                // round: the braked half drags, the wing yaws toward it,
-                // that half is then the retreating one, its dynamic
-                // pressure falls, it loses lift and it drops — which is
-                // the bank. With one dynamic pressure shared by both
-                // halves the only thing a brake could do was camber its
-                // own half into MORE lift, and the wing banked away from
-                // the turn it was making.
-                rawRatio[half] =
-                    lengthSquared(halfWind)
-                    / (sample.airspeed * sample.airspeed);
-                const softwing::Vec3 halfInPlane =
-                    halfWind - dot(halfWind, axis) * axis;
-                if (length(halfInPlane) <= 1.0e-6) {
-                    measured = false;
-                    break;
-                }
-                const softwing::Vec3 halfPlane = normalized(halfInPlane);
-                // The rotation from the wing's wind to this half's, about
-                // the span: the same sign convention the angle of attack
-                // itself uses, so a descending half reads higher.
-                raw[half] =
-                    std::atan2(dot(cross(windPlane, halfPlane), axis),
-                               dot(windPlane, halfPlane));
-            }
-        }
-        if (measured) {
+        const HalfAeroKinematics raw =
+            sampleHalfAeroKinematics(sim, sample);
+        if (raw.valid) {
             // Filtered on the same wake timescale as the wing-level
             // angle, so it damps a roll without becoming a fast loop of
-            // its own, and clamped, because a canopy mid-tumble can spin
-            // fast enough to ask for anything.
+            // its own. Sideslip now also reaches this differential only:
+            // the rest arc's mirrored section planes turn beta into
+            // opposite incidences, while the exact weighted common-mode
+            // subtraction keeps wing-level trim untouched.
             const double blend =
                 std::min(1.0, simulationTimeStep / alphaFilterSeconds);
             for (int half = 0; half < 2; ++half) {
                 double &state = sim.alphaHalfDeviationRadians[half];
-                state += (raw[half] - state) * blend;
+                state +=
+                    (raw.alphaDeviationRadians[half] - state) * blend;
                 state = std::clamp(state,
                                    -kHalfAlphaLimitRadians,
                                    kHalfAlphaLimitRadians);
                 double &ratio = sim.halfDynamicPressureRatio[half];
-                ratio += (rawRatio[half] - ratio) * blend;
+                ratio +=
+                    (raw.dynamicPressureRatio[half] - ratio) * blend;
                 // The spin wind is already capped at the wing's own
                 // airspeed, which bounds this at 4; the clamp is the
                 // belt to that brace.
@@ -3113,15 +3672,13 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                  + sample.dragCoefficient * sample.windDirection)
         + fabricDrag * sample.windDirection;
 
-    // What the polar wants minus what the pressure field already made: the
-    // pressure resultant is cancelled in full — its lift is unrealistically
-    // small and its along-wind component is spurious thrust, and the two
-    // cannot be fixed independently — and the polar's force imposed in its
-    // place. Spread by area so the local fabric loads, which are the
-    // pressure field's actual job, are disturbed as little as possible.
-    // The fabric drag rides in here too: everything the pressure field
-    // makes is cancelled, so a term that stayed out of wingForce would be
-    // cancelled along with it and reach the system as nothing at all.
+    // What the polar requests minus what the pressure field already made.
+    // With full pressure authority this replaces the lift-poor,
+    // thrust-rich inviscid resultant with the finite-wing polar. The bounded
+    // production solve may saturate before that target, in which case its
+    // achieved force and residual below are authoritative. The fabric-drag
+    // request belongs in wingForce as well; otherwise a full-authority solve
+    // would cancel it with the original pressure resultant.
     const softwing::Vec3 correction = wingForce - aerodynamicForce(sim);
 
     // THE HALVES DISAGREE, and that disagreement is the turn. Each half
@@ -3276,18 +3833,14 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     }
 
     // The correction enters the canopy the only way fabric carries load
-    // gracefully: as pressure. Every other application was measured
-    // failing structurally — point loads at the line attachments dented
-    // the intrados into the cells, an area-spread body force leaned the
-    // canopy over, a fabric-distributed couple crushed the nose. Here a
-    // per-face pressure increment δp_i = n̂_i·v + μ·s_i is added to the
-    // stamped field, with (v, μ) solved from a 4x4 linear system so that
-    // the increment's resultant equals the correction exactly and the
-    // total pitch moment about the anchor is zero. s_i is the chordwise
-    // station, so μ is a linear chordwise pressure gradient — the
-    // pressure-native form of a pitch couple. Roll and yaw moments are
-    // deliberately left to the base pressure field and to the
-    // differential pass below.
+    // gracefully: as pressure. Every body-force or point-force shortcut
+    // was measured damaging the canopy. The production path below solves
+    // FINAL exterior Cp directly, within its physical [-3, 1] envelope,
+    // and reconstructs every face as p_inside - q*Cp. A deterministic
+    // weighted projection introduces force, pitch, then L-R differential
+    // equalities in that order; a later stage freezes what the earlier one
+    // physically achieved. The old 4x4 increment plus post-clamp path is
+    // retained in the explicit LegacyIncrementClamp regression mode only.
     static const bool noCouple =
         qEnvironmentVariableIsSet("LEP_AERO_NO_COUPLE");
     static const bool noCorrection =
@@ -3309,7 +3862,402 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         faceHalf[face] = static_cast<std::uint8_t>(halfOf(face));
     }
 
-    // Assemble the 4x4 system: columns are (v.x, v.y, v.z, μ), rows are
+    PressureSolveDiagnostics pressureDiagnostics;
+    pressureDiagnostics.requestedForce =
+        noCorrection ? aerodynamicForce(sim) : wingForce;
+    pressureDiagnostics.requestedLiftNewtons =
+        dot(pressureDiagnostics.requestedForce, sample.liftDirection);
+    pressureDiagnostics.requestedDragNewtons =
+        dot(pressureDiagnostics.requestedForce, sample.windDirection);
+    pressureDiagnostics.requestedPitchMoment =
+        noCouple ? dot(pressureMoment, sample.spanAxis) : 0.0;
+    pressureDiagnostics.variableCount = sim.skinTriangleCount;
+
+    softwing::Vec3 priorHalfDifference;
+    if (halfCount == 2) {
+        for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+            const double sign = faceHalf[face] == 0 ? 1.0 : -1.0;
+            priorHalfDifference +=
+                sign * triangles[face].pressureDifference * areaVector[face];
+        }
+    }
+    // sideDifference is the force added to the left half and removed from
+    // the right. The L-R observable therefore changes by twice that value.
+    // Keeping the prior L-R field in the target preserves the canopy arc's
+    // authored lateral pressure bracing instead of independently rebuilding
+    // each half.
+    const softwing::Vec3 requestedHalfDifference =
+        priorHalfDifference + 2.0 * sideDifference;
+    pressureDiagnostics.requestedHalfDifference = {
+        dot(requestedHalfDifference, sample.liftDirection),
+        dot(requestedHalfDifference, sample.windDirection)};
+
+    if (controls.pressureSolveMode
+        == PressureSolveMode::BoundedExteriorCp) {
+        pressureDiagnostics.attempted = true;
+        const auto boundedStart = std::chrono::steady_clock::now();
+
+        const bool havePressureState =
+            sim.faceInteriorPressure.size() == sim.skinTriangleCount
+            && sim.faceDynamicPressure.size() == sim.skinTriangleCount
+            && sim.facePriorExternalCp.size() == sim.skinTriangleCount;
+        // Near zero q the Cp columns have vanishing physical leverage, so
+        // every stage would spend dozens of bounded projections resolving a
+        // load smaller than the displayed residual precision. Preserve the
+        // stamped field and report zero authority until the polar has at
+        // least 10% of its reference dynamic pressure.
+        const bool enoughPressureAuthority =
+            q >= 0.10 * std::max(0.0, controls.pressurePascal);
+        if (havePressureState && enoughPressureAuthority) {
+            // Preserve the calibrated load-path shape as the objective
+            // prior. The historical 4x4 machinery supplies its proposal
+            // (shared force/pitch plus the two half differentials), with each
+            // intermediate pressure clipped through that face's physical Cp
+            // interval. The bounded solve changes that field only where a
+            // higher-priority equality requires it. The unclamped proposal
+            // was tested first, but projected 10,748 faces onto Cp=1 and
+            // drove an asymmetric limit cycle. Starting again from the base
+            // section Cp instead made the minimum buy the polar force with
+            // new leading-edge suction, producing a 125 mm dent.
+            std::vector<double> preferredCp = sim.facePriorExternalCp;
+            std::vector<double> proposedPressure(sim.skinTriangleCount);
+            for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+                proposedPressure[face] =
+                    triangles[face].pressureDifference;
+            }
+
+            double proposalSystem[4][5] = {};
+            double proposalHalfSystem[2][4][5] = {};
+            for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+                const double faceArea = length(areaVector[face]);
+                if (faceArea <= 0.0) {
+                    continue;
+                }
+                const softwing::Vec3 normal = areaVector[face] / faceArea;
+                const softwing::Vec3 momentArm =
+                    cross(faceCentre[face] - anchor, areaVector[face]);
+                const double basis[4] = {
+                    normal.x, normal.y, normal.z, station[face]};
+                for (int column = 0; column < 4; ++column) {
+                    proposalSystem[0][column] +=
+                        basis[column] * areaVector[face].x;
+                    proposalSystem[1][column] +=
+                        basis[column] * areaVector[face].y;
+                    proposalSystem[2][column] +=
+                        basis[column] * areaVector[face].z;
+                    proposalSystem[3][column] +=
+                        basis[column]
+                        * dot(momentArm, sample.spanAxis);
+                }
+                const int half = faceHalf[face];
+                if (half < 0 || half > 1 || !halves[half].valid) {
+                    continue;
+                }
+                halfStation[face] = dot(
+                    faceCentre[face] - halves[half].anchor,
+                    halves[half].chordDirection);
+                const softwing::Vec3 halfArm = cross(
+                    faceCentre[face] - halves[half].anchor,
+                    areaVector[face]);
+                const double halfBasis[4] = {
+                    normal.x, normal.y, normal.z, halfStation[face]};
+                for (int column = 0; column < 4; ++column) {
+                    proposalHalfSystem[half][0][column] +=
+                        halfBasis[column] * areaVector[face].x;
+                    proposalHalfSystem[half][1][column] +=
+                        halfBasis[column] * areaVector[face].y;
+                    proposalHalfSystem[half][2][column] +=
+                        halfBasis[column] * areaVector[face].z;
+                    proposalHalfSystem[half][3][column] +=
+                        halfBasis[column]
+                        * dot(halfArm, sample.spanAxis);
+                }
+            }
+            proposalSystem[0][4] = noCorrection ? 0.0 : correction.x;
+            proposalSystem[1][4] = noCorrection ? 0.0 : correction.y;
+            proposalSystem[2][4] = noCorrection ? 0.0 : correction.z;
+            proposalSystem[3][4] =
+                noCouple ? 0.0 : -dot(pressureMoment, sample.spanAxis);
+            const auto solveProposal4x4 = [](
+                double matrix[4][5], double solution[4]) {
+                for (int pivot = 0; pivot < 4; ++pivot) {
+                    int best = pivot;
+                    for (int row = pivot + 1; row < 4; ++row) {
+                        if (std::abs(matrix[row][pivot])
+                            > std::abs(matrix[best][pivot])) {
+                            best = row;
+                        }
+                    }
+                    if (std::abs(matrix[best][pivot]) < 1.0e-9) {
+                        return false;
+                    }
+                    if (best != pivot) {
+                        for (int column = 0; column < 5; ++column) {
+                            std::swap(matrix[pivot][column],
+                                      matrix[best][column]);
+                        }
+                    }
+                    for (int row = pivot + 1; row < 4; ++row) {
+                        const double factor =
+                            matrix[row][pivot] / matrix[pivot][pivot];
+                        for (int column = pivot; column < 5; ++column) {
+                            matrix[row][column] -=
+                                factor * matrix[pivot][column];
+                        }
+                    }
+                }
+                for (int row = 3; row >= 0; --row) {
+                    double value = matrix[row][4];
+                    for (int column = row + 1; column < 4; ++column) {
+                        value -= matrix[row][column] * solution[column];
+                    }
+                    solution[row] = value / matrix[row][row];
+                }
+                return true;
+            };
+            double proposalSolution[4] = {};
+            const auto clampProposalPressure =
+                [&](std::size_t face, double pressure) {
+                const double faceDynamic =
+                    std::max(0.0, sim.faceDynamicPressure[face]);
+                const double faceInterior = sim.faceInteriorPressure[face];
+                // Cp in [-3,1], expressed without dividing by a possibly
+                // tiny q. Unlike the legacy absolute ceiling this interval
+                // remains ordered during the preinflated soft start, where
+                // p_inside is near 80 Pa while local q can be below 1 Pa.
+                return std::clamp(
+                    pressure,
+                    faceInterior
+                        - maximumExteriorPressureCoefficient * faceDynamic,
+                    faceInterior
+                        - minimumExteriorPressureCoefficient * faceDynamic);
+            };
+            if (solveProposal4x4(proposalSystem, proposalSolution)) {
+                const softwing::Vec3 gradient{
+                    proposalSolution[0], proposalSolution[1],
+                    proposalSolution[2]};
+                for (std::size_t face = 0;
+                     face < sim.skinTriangleCount; ++face) {
+                    const double faceArea = length(areaVector[face]);
+                    if (faceArea <= 0.0) {
+                        continue;
+                    }
+                    const softwing::Vec3 normal =
+                        areaVector[face] / faceArea;
+                    proposedPressure[face] = clampProposalPressure(
+                        face,
+                        proposedPressure[face]
+                            + dot(normal, gradient)
+                            + proposalSolution[3] * station[face]);
+                }
+            }
+            if (lengthSquared(sideDifference) > 0.0
+                && halves[0].valid && halves[1].valid) {
+                for (int half = 0; half < 2; ++half) {
+                    const softwing::Vec3 want =
+                        half == 0 ? sideDifference
+                                  : -1.0 * sideDifference;
+                    proposalHalfSystem[half][0][4] = want.x;
+                    proposalHalfSystem[half][1][4] = want.y;
+                    proposalHalfSystem[half][2][4] = want.z;
+                    proposalHalfSystem[half][3][4] = 0.0;
+                    double halfSolution[4] = {};
+                    if (!solveProposal4x4(
+                            proposalHalfSystem[half], halfSolution)) {
+                        continue;
+                    }
+                    const softwing::Vec3 gradient{
+                        halfSolution[0], halfSolution[1],
+                        halfSolution[2]};
+                    for (std::size_t face = 0;
+                         face < sim.skinTriangleCount; ++face) {
+                        if (faceHalf[face]
+                            != static_cast<std::uint8_t>(half)) {
+                            continue;
+                        }
+                        const double faceArea = length(areaVector[face]);
+                        if (faceArea <= 0.0) {
+                            continue;
+                        }
+                        const softwing::Vec3 normal =
+                            areaVector[face] / faceArea;
+                        proposedPressure[face] = clampProposalPressure(
+                            face,
+                            proposedPressure[face]
+                                + dot(normal, gradient)
+                                + halfSolution[3] * halfStation[face]);
+                    }
+                }
+            }
+            for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+                const double faceDynamic = sim.faceDynamicPressure[face];
+                if (faceDynamic <= 1.0e-9) {
+                    continue;
+                }
+                const double proposal =
+                    (sim.faceInteriorPressure[face]
+                     - proposedPressure[face])
+                    / faceDynamic;
+                if (std::isfinite(proposal)) {
+                    preferredCp[face] = proposal;
+                }
+            }
+
+            BoundedEqualityProblem problem;
+            problem.variableCount = sim.skinTriangleCount;
+            problem.rowCount = 6;
+            problem.stageRowCounts = {3, 1, 2};
+            problem.authorityMode = AuthoritySolveMode::CachedProbe;
+            problem.authorityHint = sim.pressureAuthorityHint;
+            problem.multiplierHint = sim.pressureMultiplierHint;
+            problem.authorityProbeStep = 0.02;
+            problem.feasibilityTolerance = 1.0e-7;
+            problem.prior.resize(problem.variableCount);
+            problem.lower.resize(problem.variableCount);
+            problem.upper.resize(problem.variableCount);
+            problem.mobility.resize(problem.variableCount);
+            problem.matrix.assign(
+                problem.rowCount * problem.variableCount, 0.0);
+            problem.target.assign(problem.rowCount, 0.0);
+
+            softwing::Vec3 interiorForce;
+            softwing::Vec3 interiorHalfDifference;
+            double interiorPitch = 0.0;
+            for (std::size_t face = 0; face < problem.variableCount;
+                 ++face) {
+                const double faceDynamic =
+                    std::max(0.0, sim.faceDynamicPressure[face]);
+                const double faceInterior = sim.faceInteriorPressure[face];
+                const double stampedCp = std::clamp(
+                    sim.facePriorExternalCp[face],
+                    minimumExteriorPressureCoefficient,
+                    maximumExteriorPressureCoefficient);
+                const double priorCp = std::clamp(
+                    preferredCp[face],
+                    minimumExteriorPressureCoefficient,
+                    maximumExteriorPressureCoefficient);
+                problem.prior[face] = priorCp;
+                sim.faceRetrimPreferredCp[face] = priorCp;
+
+                // A still-air face has no Cp authority: changing Cp while
+                // q=0 is mathematically invisible and only manufactures a
+                // condition number. Fix it to the physical prior.
+                if (faceDynamic <= 1.0e-9) {
+                    problem.lower[face] = stampedCp;
+                    problem.upper[face] = stampedCp;
+                } else {
+                    // A local Cp trust region keeps exact global moments
+                    // from rebuilding the structurally calibrated proposal
+                    // into a different pressure topology. Five hundredths
+                    // Cp is 4 Pa at the standard q=80 Pa: enough to repair
+                    // small clipped resultant/pitch errors, bounded enough that
+                    // missing authority is reported instead of purchased by
+                    // concentrating load at a nose or trailing edge.
+                    constexpr double kCpTrustRadius = 0.05;
+                    problem.lower[face] = std::max(
+                        minimumExteriorPressureCoefficient,
+                        priorCp - kCpTrustRadius);
+                    problem.upper[face] = std::min(
+                        maximumExteriorPressureCoefficient,
+                        priorCp + kCpTrustRadius);
+                }
+
+                // Integral squared change from the calibrated proposal.
+                // All faces get equal Cp mobility per unit area; the
+                // structurally meaningful chordwise shape is in the prior,
+                // not an arbitrary preference for the leading edge.
+                problem.mobility[face] =
+                    1.0 / std::max(1.0e-9, length(areaVector[face]));
+
+                const softwing::Vec3 cpForce =
+                    -faceDynamic * areaVector[face];
+                problem.matrix[face] = cpForce.x;
+                problem.matrix[problem.variableCount + face] = cpForce.y;
+                problem.matrix[2 * problem.variableCount + face] =
+                    cpForce.z;
+                problem.matrix[3 * problem.variableCount + face] =
+                    dot(cross(faceCentre[face] - anchor, cpForce),
+                        sample.spanAxis);
+                const double halfSign =
+                    halfCount == 2 && faceHalf[face] == 0 ? 1.0
+                    : halfCount == 2                       ? -1.0
+                                                         : 0.0;
+                problem.matrix[4 * problem.variableCount + face] =
+                    halfSign * dot(cpForce, sample.liftDirection);
+                problem.matrix[5 * problem.variableCount + face] =
+                    halfSign * dot(cpForce, sample.windDirection);
+
+                const softwing::Vec3 inside =
+                    faceInterior * areaVector[face];
+                interiorForce += inside;
+                interiorPitch +=
+                    dot(cross(faceCentre[face] - anchor, inside),
+                        sample.spanAxis);
+                interiorHalfDifference += halfSign * inside;
+            }
+
+            const softwing::Vec3 forceTarget =
+                pressureDiagnostics.requestedForce - interiorForce;
+            problem.target[0] = forceTarget.x;
+            problem.target[1] = forceTarget.y;
+            problem.target[2] = forceTarget.z;
+            problem.target[3] =
+                pressureDiagnostics.requestedPitchMoment - interiorPitch;
+            problem.target[4] =
+                pressureDiagnostics.requestedHalfDifference[0]
+                - dot(interiorHalfDifference, sample.liftDirection);
+            problem.target[5] =
+                pressureDiagnostics.requestedHalfDifference[1]
+                - dot(interiorHalfDifference, sample.windDirection);
+
+            const BoundedEqualityResult result =
+                solveBoundedEqualityHierarchy(problem);
+            pressureDiagnostics.valid = result.valid;
+            pressureDiagnostics.numericalFailure =
+                result.numericalFailure;
+            pressureDiagnostics.authority = result.authority;
+            pressureDiagnostics.authorityHint = result.authorityHint;
+            pressureDiagnostics.authorityBackoffs =
+                result.authorityBackoffs;
+            pressureDiagnostics.authorityProbeAccepted =
+                result.authorityProbeAccepted;
+            pressureDiagnostics.rank = result.rank;
+            pressureDiagnostics.conditionEstimate =
+                result.conditionEstimate;
+            pressureDiagnostics.activeLower = result.activeLower;
+            pressureDiagnostics.activeUpper = result.activeUpper;
+            pressureDiagnostics.projectionCalls = result.projectionCalls;
+            pressureDiagnostics.projectionIterations =
+                result.projectionIterations;
+            if (result.valid
+                && result.value.size() == sim.skinTriangleCount) {
+                sim.pressureAuthorityHint = result.authority;
+                sim.pressureMultiplierHint = result.multiplierHint;
+                sim.faceAppliedExternalCp = result.value;
+                for (std::size_t face = 0;
+                     face < sim.skinTriangleCount; ++face) {
+                    const double finalPressure =
+                        sim.faceInteriorPressure[face]
+                        - sim.faceDynamicPressure[face]
+                              * sim.faceAppliedExternalCp[face];
+                    sim.body->setFacePressureDifference(
+                        face, finalPressure);
+                }
+            }
+        } else if (!havePressureState) {
+            pressureDiagnostics.numericalFailure = true;
+        } else {
+            pressureDiagnostics.valid = true;
+        }
+        pressureDiagnostics.solveMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - boundedStart)
+                .count();
+    } else {
+        pressureDiagnostics.legacy = true;
+
+    // Assemble the legacy 4x4 increment system: columns are
+    // (v.x, v.y, v.z, μ), rows are
     // the three force components and the span-axis moment (pitch). The
     // same geometry is assembled for each half about its own anchor and
     // its own chord, ready for the differential pass.
@@ -3491,20 +4439,117 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
             }
         }
     }
+        pressureDiagnostics.valid = true;
+        if (sim.faceInteriorPressure.size() == sim.skinTriangleCount
+            && sim.faceDynamicPressure.size() == sim.skinTriangleCount
+            && sim.facePriorExternalCp.size() == sim.skinTriangleCount) {
+            sim.faceAppliedExternalCp.resize(sim.skinTriangleCount);
+            for (std::size_t face = 0; face < sim.skinTriangleCount;
+                 ++face) {
+                const double faceDynamic = sim.faceDynamicPressure[face];
+                sim.faceAppliedExternalCp[face] =
+                    faceDynamic > 1.0e-9
+                        ? (sim.faceInteriorPressure[face]
+                           - triangles[face].pressureDifference)
+                              / faceDynamic
+                        : sim.facePriorExternalCp[face];
+            }
+        }
+    }
 
-    // What actually got applied, after clamping: the residuals say
-    // whether the solve's promise survived contact with the floor and
-    // the cap.
+    // What actually reached the fabric. For the bounded path these are
+    // physical-unit residuals after authority saturation; for the legacy
+    // oracle they expose what its post-solve clamps changed.
     softwing::Vec3 achieved;
     softwing::Vec3 achievedMoment;
+    softwing::Vec3 achievedHalfDifference;
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const softwing::Vec3 force =
             triangles[face].pressureDifference * areaVector[face];
         achieved += force;
         achievedMoment += cross(faceCentre[face] - anchor, force);
+        if (halfCount == 2) {
+            achievedHalfDifference +=
+                (faceHalf[face] == 0 ? 1.0 : -1.0) * force;
+        }
     }
-    sim.lastForceResidual = achieved - wingForce;
-    sim.lastPitchResidual = dot(achievedMoment, sample.spanAxis);
+    pressureDiagnostics.achievedForce = achieved;
+    pressureDiagnostics.achievedLiftNewtons =
+        dot(achieved, sample.liftDirection);
+    pressureDiagnostics.achievedDragNewtons =
+        dot(achieved, sample.windDirection);
+    pressureDiagnostics.forceResidual =
+        achieved - pressureDiagnostics.requestedForce;
+    pressureDiagnostics.achievedPitchMoment =
+        dot(achievedMoment, sample.spanAxis);
+    pressureDiagnostics.pitchResidual =
+        pressureDiagnostics.achievedPitchMoment
+        - pressureDiagnostics.requestedPitchMoment;
+    pressureDiagnostics.achievedHalfDifference = {
+        dot(achievedHalfDifference, sample.liftDirection),
+        dot(achievedHalfDifference, sample.windDirection)};
+    for (std::size_t axis = 0; axis < 2; ++axis) {
+        pressureDiagnostics.halfDifferenceResidual[axis] =
+            pressureDiagnostics.achievedHalfDifference[axis]
+            - pressureDiagnostics.requestedHalfDifference[axis];
+    }
+    if (!sim.faceAppliedExternalCp.empty()) {
+        const auto [minimumCp, maximumCp] = std::minmax_element(
+            sim.faceAppliedExternalCp.begin(),
+            sim.faceAppliedExternalCp.end());
+        pressureDiagnostics.minimumCp = *minimumCp;
+        pressureDiagnostics.maximumCp = *maximumCp;
+    }
+    sim.pressureSolve = pressureDiagnostics;
+    sim.lastForceResidual = pressureDiagnostics.forceResidual;
+    sim.lastPitchResidual = pressureDiagnostics.pitchResidual;
+
+    // A pressure-only inviscid field can saturate at the physical Cp bounds
+    // before it realizes the polar's viscous drag. Add only that positive
+    // deficit as skin traction: no missing lift is manufactured here. The
+    // force is distributed by current wetted area and points with the
+    // relative wind, so its work against the canopy's air-relative bulk
+    // velocity is necessarily dissipative. With no dynamic pressure the
+    // requested and applied traction are exactly zero.
+    softwing::Vec3 polarDragTraction;
+    if (controls.pressureSolveMode
+            == PressureSolveMode::BoundedExteriorCp
+        && controls.freeFlight && q > 1.0e-9) {
+        // Close only the finite-wing polar's viscous drag deficit. The
+        // separate deformation/frontal-area heuristic is already requested
+        // through wingForce's pressure path; reinjecting its full residual as
+        // shear made harmless early cloth breathing become hundreds of
+        // newtons of extra drag and a self-amplifying collapse.
+        sim.lastPolarDragTargetNewtons =
+            q * area * sample.dragCoefficient;
+        const double missingDrag = std::max(
+            0.0,
+            sim.lastPolarDragTargetNewtons
+                - pressureDiagnostics.achievedDragNewtons);
+        double skinArea = 0.0;
+        for (const softwing::Vec3 &faceArea : areaVector) {
+            skinArea += length(faceArea);
+        }
+        if (missingDrag > 0.0 && skinArea > 1.0e-12) {
+            polarDragTraction = missingDrag * sample.windDirection;
+            for (std::size_t face = 0; face < sim.skinTriangleCount;
+                 ++face) {
+                const softwing::Triangle &triangle = triangles[face];
+                const softwing::Vec3 share =
+                    polarDragTraction
+                    * (length(areaVector[face]) / skinArea / 3.0);
+                sim.body->addForce(triangle.a, share);
+                sim.body->addForce(triangle.b, share);
+                sim.body->addForce(triangle.c, share);
+            }
+        }
+    }
+    sim.lastPolarDragTractionForce = polarDragTraction;
+    sim.lastPolarDragTractionNewtons =
+        dot(polarDragTraction, sample.windDirection);
+    sim.lastPolarDragTractionPowerWatts = dot(
+        polarDragTraction,
+        canopyVelocityOf(sim) - airVelocityWorld(sim, controls));
 
     // The pilot as a bluff body, dragged where the mass hangs, against
     // the pilot's own relative wind. Beyond trimming the pendulum lean,
@@ -3512,19 +4557,32 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     // air and pays for it.
     softwing::Vec3 pilotDrag;
     if (sim.pilotNode != noConstraint) {
-        const softwing::Vec3 pilotWind =
-            freestreamVelocity(sim, controls)
-            - nodes[sim.pilotNode].velocity;
+        const softwing::Vec3 pilotWind = relativeAirVelocity(
+            airVelocityWorld(sim, controls),
+            nodes[sim.pilotNode].velocity);
         const double pilotSpeed = std::min(length(pilotWind), 40.0);
         pilotDrag = 0.5 * kAirDensity * kPilotDragArea * pilotSpeed
                     * pilotWind;
         sim.body->addForce(sim.pilotNode, pilotDrag);
     }
 
-    sim.lastAeroForce = wingForce + pilotDrag;
-    sim.lastLift = q * area * sample.liftCoefficient;
-    sim.lastDrag =
-        q * area * sample.dragCoefficient + length(pilotDrag);
+    if (controls.pressureSolveMode
+        == PressureSolveMode::BoundedExteriorCp) {
+        // Production telemetry reports the force that survived the physical
+        // Cp/trust bounds, not the polar request. Dynamics already receives
+        // this achieved pressure through the triangles; reporting the request
+        // here made an authority-zero frame still claim 1280 N of lift.
+        sim.lastAeroForce = achieved + polarDragTraction + pilotDrag;
+        sim.lastLift = dot(sim.lastAeroForce, sample.liftDirection);
+        sim.lastDrag = dot(sim.lastAeroForce, sample.windDirection);
+    } else {
+        // Explicit regression mode preserves its historical requested-polar
+        // CSV/readout. pressureSolve still records the actual residual.
+        sim.lastAeroForce = wingForce + pilotDrag;
+        sim.lastLift = q * area * sample.liftCoefficient;
+        sim.lastDrag =
+            q * area * sample.dragCoefficient + length(pilotDrag);
+    }
     sim.lastGlideRatio =
         sim.lastDrag > 1.0e-6 ? sim.lastLift / sim.lastDrag : 0.0;
     // The MEASURED attitude, in both modes. In the tunnel the polar ran
@@ -3542,9 +4600,10 @@ AeroSummary aerodynamicSummary(const SimBody &sim,
         return summary;
     }
     if (controls.freeFlight || controls.flightLoad) {
-        // The imposed polar is the whole aerodynamic force whenever its
-        // pass runs — free flight, or pinned with flight load; the
-        // pressure resultant is cancelled against it by construction.
+        // applyAerodynamicForces records what its selected pressure path
+        // actually reports. Production is the force that survived the
+        // bounded Cp/trust solve; the explicit legacy oracle preserves its
+        // historical requested-polar readout.
         summary.force = sim.lastAeroForce;
         summary.lift = sim.lastLift;
         summary.drag = sim.lastDrag;
@@ -3554,7 +4613,7 @@ AeroSummary aerodynamicSummary(const SimBody &sim,
     // Pinned, the pressure field is all there is. It carries no drag
     // model, so resolve it against the airflow for what it is worth.
     summary.force = aerodynamicForce(sim);
-    const softwing::Vec3 relative = freestreamVelocity(sim, controls);
+    const softwing::Vec3 relative = airVelocityWorld(sim, controls);
     if (length(relative) <= 1.0e-6) {
         return summary;
     }
@@ -3619,619 +4678,22 @@ void recentreSystem(SimBody &sim)
     }
 }
 
-namespace {
-
 // --- Fabric/line contact -------------------------------------------------
-//
-// The Playground's own thin-cloth contact: candidates found once per
-// FRAME by a spatial-hash proximity pass, then re-projected after every
-// substep as plain PBD position corrections with an inelastic normal
-// velocity fix. Deliberately NOT the engine's certified contact pipeline:
-// that one re-enumerates every vertex-triangle and edge-edge combination
-// serially in every constraint iteration (O(V·T + E²), ~90 times a
-// frame), throws and rolls back the substep on any indeterminate sweep,
-// and cannot be switched off once a pair is registered — each of which
-// disqualifies it for an interactive toy that folds fabric on purpose.
-//
-// Correctness envelope: per-substep travel at collapse speeds is well
-// under the contact separation, so discrete projection cannot tunnel
-// WITHIN a frame; crossings BETWEEN detection passes are covered by the
-// velocity-inflated capture margins plus the recorded approach side,
-// which lets the projection push a node back through a face it crossed
-// since detection.
-
-// Separation held between fabric mid-surfaces, and between fabric and a
-// suspension line's axis. Two constraints pin it: well under the
-// shortest skin edge (~10 mm at the deepest subdivision) so
-// mesh-adjacent nodes never read as contact, and small enough that the
-// WRINKLE fields of a healthy loaded wing (fabric legitimately doubled
-// at sub-millimetre spacing over ~23% of the skin) do not light up as
-// thousands of false contacts — at 2 mm they did, stiffening the whole
-// surface and snagging collapse recovery.
-constexpr double kContactSeparation = 0.001;       // m
-constexpr double kContactLineSeparation = 0.0015;  // m
-// Capture-radius safety on the per-frame velocity margin, and the cap
-// that keeps a violent transient from smearing every primitive across
-// the whole grid (measured: uncapped margins during the inflation
-// transient cost ~90 ms a frame in detection alone). With both sides
-// capped at 5 cm, closing speeds up to ~6 m/s are still fully captured
-// within a frame; anything faster can slip a frame, which the per-
-// substep projection then catches on the next detection pass.
-constexpr double kContactMarginSafety = 1.5;
-constexpr double kContactMarginCap = 0.025;   // m
-// Candidate cap per node, a per-cell pair-product cap, and a global
-// candidate cap: together they make a crumpled-ball pileup degrade to
-// partial contact coverage instead of an unbounded pair enumeration
-// (measured: an uncapped gather cost a full second per frame on an
-// exploded wing).
-constexpr std::size_t kContactMaxPerNode = 32;
-constexpr std::size_t kContactMaxPairsPerCell = 512;
-constexpr std::size_t kContactMaxCandidates = 20000;
-// Per-substep correction cap: deep overlaps (a settled stack the side
-// memory wants to push a node through) resolve over many substeps
-// instead of in one energy-injecting jolt.
-constexpr double kContactMaxCorrection = 0.001;   // m per substep
-// Cell-span cap per inserted item, so one fast triangle cannot smear
-// itself across the whole grid.
-constexpr int kContactMaxCellSpan = 4;
-
-std::uint64_t contactCellKey(int x, int y, int z)
-{
-    const auto pack = [](int value) {
-        return static_cast<std::uint64_t>(value + (1 << 20)) & 0x1FFFFFULL;
-    };
-    return pack(x) | (pack(y) << 21) | (pack(z) << 42);
-}
-
-std::uint64_t contactPairKey(std::uint32_t node,
-                             std::uint32_t item,
-                             bool line)
-{
-    return (static_cast<std::uint64_t>(node) << 33)
-           | (static_cast<std::uint64_t>(item) << 1) | (line ? 1U : 0U);
-}
-
-// Closest point on triangle abc to p, with barycentric weights (Ericson,
-// Real-Time Collision Detection §5.1.5).
-softwing::Vec3 closestOnTriangle(const softwing::Vec3 &p,
-                                 const softwing::Vec3 &a,
-                                 const softwing::Vec3 &b,
-                                 const softwing::Vec3 &c,
-                                 double &u,
-                                 double &v,
-                                 double &w)
-{
-    const softwing::Vec3 ab = b - a;
-    const softwing::Vec3 ac = c - a;
-    const softwing::Vec3 ap = p - a;
-    const double d1 = dot(ab, ap);
-    const double d2 = dot(ac, ap);
-    if (d1 <= 0.0 && d2 <= 0.0) {
-        u = 1.0; v = 0.0; w = 0.0;
-        return a;
-    }
-    const softwing::Vec3 bp = p - b;
-    const double d3 = dot(ab, bp);
-    const double d4 = dot(ac, bp);
-    if (d3 >= 0.0 && d4 <= d3) {
-        u = 0.0; v = 1.0; w = 0.0;
-        return b;
-    }
-    const double vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
-        const double t = d1 / (d1 - d3);
-        u = 1.0 - t; v = t; w = 0.0;
-        return a + t * ab;
-    }
-    const softwing::Vec3 cp = p - c;
-    const double d5 = dot(ab, cp);
-    const double d6 = dot(ac, cp);
-    if (d6 >= 0.0 && d5 <= d6) {
-        u = 0.0; v = 0.0; w = 1.0;
-        return c;
-    }
-    const double vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
-        const double t = d2 / (d2 - d6);
-        u = 1.0 - t; v = 0.0; w = t;
-        return a + t * ac;
-    }
-    const double va = d3 * d6 - d5 * d4;
-    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
-        const double t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        u = 0.0; v = 1.0 - t; w = t;
-        return b + t * (c - b);
-    }
-    const double denominator = 1.0 / (va + vb + vc);
-    v = vb * denominator;
-    w = vc * denominator;
-    u = 1.0 - v - w;
-    return a + v * ab + w * ac;
-}
-
-void contactInsertCells(
-    std::vector<std::pair<std::uint64_t, std::uint32_t>> &cells,
-    const softwing::Vec3 &low,
-    const softwing::Vec3 &high,
-    double cellSize,
-    std::uint32_t item)
-{
-    const auto cellOf = [cellSize](double value) {
-        return static_cast<int>(std::floor(value / cellSize));
-    };
-    const auto clampSpan = [](int begin, int end) {
-        return std::min(end, begin + kContactMaxCellSpan - 1);
-    };
-    const int x0 = cellOf(low.x);
-    const int y0 = cellOf(low.y);
-    const int z0 = cellOf(low.z);
-    const int x1 = clampSpan(x0, cellOf(high.x));
-    const int y1 = clampSpan(y0, cellOf(high.y));
-    const int z1 = clampSpan(z0, cellOf(high.z));
-    for (int x = x0; x <= x1; ++x) {
-        for (int y = y0; y <= y1; ++y) {
-            for (int z = z0; z <= z1; ++z) {
-                cells.emplace_back(contactCellKey(x, y, z), item);
-            }
-        }
-    }
-}
-
-// Lockstep walk over two sorted (cell, index) lists: every co-located
-// (node, item) pair is emitted, deduplicated by one sort at the end.
-// A cell whose pair product exceeds the cap is skipped outright — that
-// is a pileup, and partial coverage beats an unbounded enumeration.
-void contactMergeCells(
-    const std::vector<std::pair<std::uint64_t, std::uint32_t>> &nodeCells,
-    const std::vector<std::pair<std::uint64_t, std::uint32_t>> &itemCells,
-    std::vector<std::uint64_t> &pairs)
-{
-    pairs.clear();
-    std::size_t nodeIndex = 0;
-    std::size_t itemIndex = 0;
-    while (nodeIndex < nodeCells.size() && itemIndex < itemCells.size()) {
-        const std::uint64_t nodeKey = nodeCells[nodeIndex].first;
-        const std::uint64_t itemKey = itemCells[itemIndex].first;
-        if (nodeKey < itemKey) {
-            ++nodeIndex;
-            continue;
-        }
-        if (itemKey < nodeKey) {
-            ++itemIndex;
-            continue;
-        }
-        std::size_t nodeEnd = nodeIndex;
-        while (nodeEnd < nodeCells.size()
-               && nodeCells[nodeEnd].first == nodeKey) {
-            ++nodeEnd;
-        }
-        std::size_t itemEnd = itemIndex;
-        while (itemEnd < itemCells.size()
-               && itemCells[itemEnd].first == itemKey) {
-            ++itemEnd;
-        }
-        if ((nodeEnd - nodeIndex) * (itemEnd - itemIndex)
-            <= kContactMaxPairsPerCell) {
-            for (std::size_t n = nodeIndex; n < nodeEnd; ++n) {
-                const std::uint64_t high =
-                    static_cast<std::uint64_t>(nodeCells[n].second) << 32;
-                for (std::size_t i = itemIndex; i < itemEnd; ++i) {
-                    pairs.push_back(high | itemCells[i].second);
-                }
-            }
-        }
-        nodeIndex = nodeEnd;
-        itemIndex = itemEnd;
-    }
-    std::sort(pairs.begin(), pairs.end());
-    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
-}
-
-// The once-per-frame detection pass. With frameDt zero (the build-time
-// exclusion capture) the velocity margins vanish and the capture radius
-// is exactly the contact separation.
-void detectContacts(SimBody &sim, double frameDt)
-{
-    ContactScratch &scratch = sim.contact;
-    const auto &nodes = sim.body->nodes();
-    const auto &triangles = sim.body->triangles();
-    scratch.candidates.clear();
-    scratch.triangleCells.clear();
-    scratch.segmentCells.clear();
-    // itemSpeed holds each item's CAPPED capture margin in metres.
-    scratch.itemSpeed.assign(
-        sim.skinTriangleCount + sim.lineSegments.size(), 0.0F);
-    scratch.itemBounds.assign(
-        sim.skinTriangleCount + sim.lineSegments.size(),
-        std::array<float, 6>{});
-    const double cell = scratch.cellSize;
-    // Margins from motion RELATIVE to the canopy's mean velocity: bulk
-    // translation closes no gaps, and using absolute speeds made the
-    // whole upper and lower skin candidates of each other whenever the
-    // wing moved fast as a body.
-    softwing::Vec3 meanVelocity;
-    if (!scratch.skinNodes.empty()) {
-        for (const std::uint32_t node : scratch.skinNodes) {
-            meanVelocity += nodes[node].velocity;
-        }
-        meanVelocity =
-            meanVelocity / static_cast<double>(scratch.skinNodes.size());
-    }
-    const auto marginOf = [frameDt,
-                           &meanVelocity](const softwing::Vec3 &velocity) {
-        return std::min(length(velocity - meanVelocity) * frameDt
-                            * kContactMarginSafety,
-                        kContactMarginCap);
-    };
-    const auto storeBounds = [&scratch](std::size_t slot,
-                                        const softwing::Vec3 &low,
-                                        const softwing::Vec3 &high) {
-        scratch.itemBounds[slot] = {
-            static_cast<float>(low.x),  static_cast<float>(low.y),
-            static_cast<float>(low.z),  static_cast<float>(high.x),
-            static_cast<float>(high.y), static_cast<float>(high.z)};
-    };
-
-    for (std::uint32_t face = 0;
-         face < static_cast<std::uint32_t>(sim.skinTriangleCount);
-         ++face) {
-        const auto &tri = triangles[face];
-        const softwing::Vec3 &a = nodes[tri.a].position;
-        const softwing::Vec3 &b = nodes[tri.b].position;
-        const softwing::Vec3 &c = nodes[tri.c].position;
-        const double margin = std::max({marginOf(nodes[tri.a].velocity),
-                                        marginOf(nodes[tri.b].velocity),
-                                        marginOf(nodes[tri.c].velocity)});
-        scratch.itemSpeed[face] = static_cast<float>(margin);
-        const double inflate = 0.5 * kContactSeparation + margin;
-        const softwing::Vec3 low{
-            std::min({a.x, b.x, c.x}) - inflate,
-            std::min({a.y, b.y, c.y}) - inflate,
-            std::min({a.z, b.z, c.z}) - inflate};
-        const softwing::Vec3 high{
-            std::max({a.x, b.x, c.x}) + inflate,
-            std::max({a.y, b.y, c.y}) + inflate,
-            std::max({a.z, b.z, c.z}) + inflate};
-        storeBounds(face, low, high);
-        contactInsertCells(scratch.triangleCells, low, high, cell, face);
-    }
-    std::sort(scratch.triangleCells.begin(), scratch.triangleCells.end());
-
-    for (std::uint32_t segment = 0;
-         segment < static_cast<std::uint32_t>(sim.lineSegments.size());
-         ++segment) {
-        const LineSegment &line = sim.lineSegments[segment];
-        const softwing::Vec3 &a = nodes[line.a].position;
-        const softwing::Vec3 &b = nodes[line.b].position;
-        const double margin = std::max(marginOf(nodes[line.a].velocity),
-                                       marginOf(nodes[line.b].velocity));
-        scratch.itemSpeed[sim.skinTriangleCount + segment] =
-            static_cast<float>(margin);
-        const double inflate = kContactLineSeparation + margin;
-        const softwing::Vec3 low{std::min(a.x, b.x) - inflate,
-                                 std::min(a.y, b.y) - inflate,
-                                 std::min(a.z, b.z) - inflate};
-        const softwing::Vec3 high{std::max(a.x, b.x) + inflate,
-                                  std::max(a.y, b.y) + inflate,
-                                  std::max(a.z, b.z) + inflate};
-        storeBounds(sim.skinTriangleCount + segment, low, high);
-        contactInsertCells(scratch.segmentCells, low, high, cell, segment);
-    }
-    std::sort(scratch.segmentCells.begin(), scratch.segmentCells.end());
-
-    // Node cells: each skin node into every cell its reach-ball touches.
-    scratch.nodeCells.clear();
-    for (const std::uint32_t node : scratch.skinNodes) {
-        const softwing::Vec3 &position = nodes[node].position;
-        const double reach = 0.5 * kContactSeparation
-                             + marginOf(nodes[node].velocity);
-        const softwing::Vec3 low{position.x - reach, position.y - reach,
-                                 position.z - reach};
-        const softwing::Vec3 high{position.x + reach, position.y + reach,
-                                  position.z + reach};
-        contactInsertCells(scratch.nodeCells, low, high, cell, node);
-    }
-    std::sort(scratch.nodeCells.begin(), scratch.nodeCells.end());
-
-    // Cheap point-vs-stored-AABB reject before any closest-point math;
-    // the stored bounds already carry the item's own margin, the node's
-    // margin rides in via its reach having placed it in the cell.
-    const auto outsideBounds = [&scratch](const softwing::Vec3 &position,
-                                          double reach,
-                                          std::size_t slot) {
-        const std::array<float, 6> &bounds = scratch.itemBounds[slot];
-        return position.x < bounds[0] - reach
-               || position.y < bounds[1] - reach
-               || position.z < bounds[2] - reach
-               || position.x > bounds[3] + reach
-               || position.y > bounds[4] + reach
-               || position.z > bounds[5] + reach;
-    };
-
-    // Fabric-vs-fabric pairs. The pair list is sorted by node, so the
-    // per-node cap is a pair of running counters.
-    contactMergeCells(scratch.nodeCells, scratch.triangleCells,
-                      scratch.pairScratch);
-    std::uint32_t currentNode = 0xFFFFFFFFU;
-    std::size_t taken = 0;
-    for (const std::uint64_t pair : scratch.pairScratch) {
-        if (scratch.candidates.size() >= kContactMaxCandidates) {
-            break;
-        }
-        const auto node = static_cast<std::uint32_t>(pair >> 32);
-        const auto face = static_cast<std::uint32_t>(pair);
-        if (node != currentNode) {
-            currentNode = node;
-            taken = 0;
-        }
-        if (taken >= kContactMaxPerNode) {
-            continue;
-        }
-        const softwing::Vec3 &position = nodes[node].position;
-        const double nodeMargin = marginOf(nodes[node].velocity);
-        if (outsideBounds(position,
-                          0.5 * kContactSeparation + nodeMargin, face)) {
-            continue;
-        }
-        const auto &tri = triangles[face];
-        if (tri.a == node || tri.b == node || tri.c == node) {
-            continue;
-        }
-        const double capture = kContactSeparation + nodeMargin
-                               + scratch.itemSpeed[face];
-        double u = 0.0;
-        double v = 0.0;
-        double w = 0.0;
-        const softwing::Vec3 closest = closestOnTriangle(
-            position, nodes[tri.a].position, nodes[tri.b].position,
-            nodes[tri.c].position, u, v, w);
-        const softwing::Vec3 delta = position - closest;
-        if (lengthSquared(delta) >= capture * capture) {
-            continue;
-        }
-        if (std::binary_search(scratch.restExclusions.begin(),
-                               scratch.restExclusions.end(),
-                               contactPairKey(node, face, false))) {
-            continue;
-        }
-        const softwing::Vec3 normal =
-            cross(nodes[tri.b].position - nodes[tri.a].position,
-                  nodes[tri.c].position - nodes[tri.a].position);
-        ContactCandidate candidate;
-        candidate.node = node;
-        candidate.item = face;
-        candidate.line = false;
-        candidate.side = dot(delta, normal) >= 0.0 ? 1.0F : -1.0F;
-        scratch.candidates.push_back(candidate);
-        ++taken;
-    }
-
-    // Fabric-vs-line pairs.
-    contactMergeCells(scratch.nodeCells, scratch.segmentCells,
-                      scratch.pairScratch);
-    currentNode = 0xFFFFFFFFU;
-    taken = 0;
-    for (const std::uint64_t pair : scratch.pairScratch) {
-        if (scratch.candidates.size() >= kContactMaxCandidates) {
-            break;
-        }
-        const auto node = static_cast<std::uint32_t>(pair >> 32);
-        const auto segment = static_cast<std::uint32_t>(pair);
-        if (node != currentNode) {
-            currentNode = node;
-            taken = 0;
-        }
-        if (taken >= kContactMaxPerNode) {
-            continue;
-        }
-        const softwing::Vec3 &position = nodes[node].position;
-        const double nodeMargin = marginOf(nodes[node].velocity);
-        if (outsideBounds(position,
-                          0.5 * kContactSeparation + nodeMargin,
-                          sim.skinTriangleCount + segment)) {
-            continue;
-        }
-        const LineSegment &line = sim.lineSegments[segment];
-        if (line.a == node || line.b == node) {
-            continue;
-        }
-        const double capture =
-            kContactLineSeparation + nodeMargin
-            + scratch.itemSpeed[sim.skinTriangleCount + segment];
-        const softwing::Vec3 &a = nodes[line.a].position;
-        const softwing::Vec3 ab = nodes[line.b].position - a;
-        const double lengthSq = lengthSquared(ab);
-        const double t =
-            lengthSq > 0.0
-                ? std::clamp(dot(position - a, ab) / lengthSq, 0.0, 1.0)
-                : 0.0;
-        const softwing::Vec3 delta = position - (a + t * ab);
-        if (lengthSquared(delta) >= capture * capture) {
-            continue;
-        }
-        if (std::binary_search(scratch.restExclusions.begin(),
-                               scratch.restExclusions.end(),
-                               contactPairKey(node, segment, true))) {
-            continue;
-        }
-        ContactCandidate candidate;
-        candidate.node = node;
-        candidate.item = segment;
-        candidate.line = true;
-        scratch.candidates.push_back(candidate);
-        ++taken;
-    }
-
-}
-
-// The per-substep projection over the frame's candidates: plain PBD
-// position corrections weighted by inverse mass, plus an inelastic fix
-// that removes the approaching component of the relative normal velocity
-// so resolved contacts do not buzz.
-void projectContacts(SimBody &sim)
-{
-    auto &nodes = sim.body->nodes();
-    const auto &triangles = sim.body->triangles();
-    for (const ContactCandidate &candidate : sim.contact.candidates) {
-        softwing::Node &node = nodes[candidate.node];
-        if (candidate.line) {
-            const LineSegment &line = sim.lineSegments[candidate.item];
-            softwing::Node &a = nodes[line.a];
-            softwing::Node &b = nodes[line.b];
-            const softwing::Vec3 ab = b.position - a.position;
-            const double lengthSq = lengthSquared(ab);
-            const double t =
-                lengthSq > 0.0
-                    ? std::clamp(
-                          dot(node.position - a.position, ab) / lengthSq,
-                          0.0, 1.0)
-                    : 0.0;
-            const softwing::Vec3 delta =
-                node.position - (a.position + t * ab);
-            const double distance = length(delta);
-            if (distance >= kContactLineSeparation || distance <= 1e-9) {
-                continue;
-            }
-            const softwing::Vec3 direction = delta / distance;
-            const double depth = std::min(
-                kContactLineSeparation - distance, kContactMaxCorrection);
-            const double weightNode = node.inverseMass;
-            const double weightA = a.inverseMass;
-            const double weightB = b.inverseMass;
-            const double denominator = weightNode
-                                       + (1.0 - t) * (1.0 - t) * weightA
-                                       + t * t * weightB;
-            if (denominator <= 0.0) {
-                continue;
-            }
-            const double scale = depth / denominator;
-            node.position += (scale * weightNode) * direction;
-            a.position -= (scale * (1.0 - t) * weightA) * direction;
-            b.position -= (scale * t * weightB) * direction;
-            const softwing::Vec3 relative =
-                node.velocity
-                - ((1.0 - t) * a.velocity + t * b.velocity);
-            const double approach = dot(relative, direction);
-            if (approach < 0.0) {
-                const double impulse = -approach / denominator;
-                node.velocity += (impulse * weightNode) * direction;
-                a.velocity -= (impulse * (1.0 - t) * weightA) * direction;
-                b.velocity -= (impulse * t * weightB) * direction;
-            }
-            continue;
-        }
-
-        const auto &tri = triangles[candidate.item];
-        softwing::Node &a = nodes[tri.a];
-        softwing::Node &b = nodes[tri.b];
-        softwing::Node &c = nodes[tri.c];
-        double u = 0.0;
-        double v = 0.0;
-        double w = 0.0;
-        const softwing::Vec3 closest = closestOnTriangle(
-            node.position, a.position, b.position, c.position, u, v, w);
-        const softwing::Vec3 delta = node.position - closest;
-        const softwing::Vec3 areaNormal =
-            cross(b.position - a.position, c.position - a.position);
-        const double areaLength = length(areaNormal);
-
-        softwing::Vec3 direction;
-        double depth = 0.0;
-        const bool interior = u > 0.01 && v > 0.01 && w > 0.01;
-        if (interior && areaLength > 1e-12) {
-            // Face contact: enforce the separation on the side the node
-            // approached from, so a node that crossed the face since
-            // detection is pushed BACK through rather than popped out
-            // the far side.
-            const softwing::Vec3 normal = areaNormal / areaLength;
-            const double sideDistance =
-                candidate.side * dot(delta, normal);
-            if (sideDistance >= kContactSeparation) {
-                continue;
-            }
-            direction = candidate.side * normal;
-            depth = std::min(kContactSeparation - sideDistance,
-                             kContactMaxCorrection);
-        } else {
-            const double distance = length(delta);
-            if (distance >= kContactSeparation || distance <= 1e-9) {
-                continue;
-            }
-            direction = delta / distance;
-            depth = std::min(kContactSeparation - distance,
-                             kContactMaxCorrection);
-        }
-
-        const double weightNode = node.inverseMass;
-        const double denominator = weightNode
-                                   + u * u * a.inverseMass
-                                   + v * v * b.inverseMass
-                                   + w * w * c.inverseMass;
-        if (denominator <= 0.0) {
-            continue;
-        }
-        const double scale = depth / denominator;
-        node.position += (scale * weightNode) * direction;
-        a.position -= (scale * u * a.inverseMass) * direction;
-        b.position -= (scale * v * b.inverseMass) * direction;
-        c.position -= (scale * w * c.inverseMass) * direction;
-        const softwing::Vec3 relative =
-            node.velocity
-            - (u * a.velocity + v * b.velocity + w * c.velocity);
-        const double approach = dot(relative, direction);
-        if (approach < 0.0) {
-            const double impulse = -approach / denominator;
-            node.velocity += (impulse * weightNode) * direction;
-            a.velocity -= (impulse * u * a.inverseMass) * direction;
-            b.velocity -= (impulse * v * b.inverseMass) * direction;
-            c.velocity -= (impulse * w * c.inverseMass) * direction;
-        }
-    }
-}
-
-}  // namespace
 
 void prepareContact(SimBody &sim)
 {
-    ContactScratch &scratch = sim.contact;
-    const auto &triangles = sim.body->triangles();
-    scratch.skinNodes.clear();
-    double edgeTotal = 0.0;
-    std::size_t edgeCount = 0;
-    const auto &nodes = sim.body->nodes();
-    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
-        const auto &tri = triangles[face];
-        scratch.skinNodes.push_back(static_cast<std::uint32_t>(tri.a));
-        scratch.skinNodes.push_back(static_cast<std::uint32_t>(tri.b));
-        scratch.skinNodes.push_back(static_cast<std::uint32_t>(tri.c));
-        edgeTotal += length(nodes[tri.b].position - nodes[tri.a].position)
-                     + length(nodes[tri.c].position - nodes[tri.b].position)
-                     + length(nodes[tri.a].position - nodes[tri.c].position);
-        edgeCount += 3;
+    std::vector<PlaygroundContactLine> authoredLines;
+    authoredLines.reserve(sim.lineSegments.size());
+    for (const LineSegment &line : sim.lineSegments) {
+        if (line.suspension) {
+            authoredLines.push_back(
+                {static_cast<std::uint32_t>(line.a),
+                 static_cast<std::uint32_t>(line.b)});
+        }
     }
-    std::sort(scratch.skinNodes.begin(), scratch.skinNodes.end());
-    scratch.skinNodes.erase(
-        std::unique(scratch.skinNodes.begin(), scratch.skinNodes.end()),
-        scratch.skinNodes.end());
-    const double meanEdge =
-        edgeCount > 0 ? edgeTotal / static_cast<double>(edgeCount) : 0.05;
-    scratch.cellSize = std::clamp(2.0 * meanEdge, 0.02, 0.5);
-
-    // Everything already inside the contact thickness in the REST pose is
-    // designed that way — the vent lip, the fabric around each line
-    // attachment — and must never be pushed apart. Captured as permanent
-    // exclusions with a zero-velocity detection pass.
-    scratch.restExclusions.clear();
-    detectContacts(sim, 0.0);
-    scratch.restExclusions.reserve(scratch.candidates.size());
-    for (const ContactCandidate &candidate : scratch.candidates) {
-        scratch.restExclusions.push_back(contactPairKey(
-            candidate.node, candidate.item, candidate.line));
-    }
-    std::sort(scratch.restExclusions.begin(),
-              scratch.restExclusions.end());
-    scratch.candidates.clear();
-    scratch.prepared = true;
+    preparePlaygroundContact(sim.contact, sim.body->nodes(),
+                             sim.body->triangles(), sim.skinTriangleCount,
+                             authoredLines);
 }
 
 void stepSimulation(SimBody &sim, const SimControls &controls)
@@ -4299,6 +4761,10 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
     settings.timeStep = simulationTimeStep;
     settings.substeps = controls.substeps;
     settings.constraintIterations = controls.constraintIterations;
+    settings.cableConstraintSweepPairs =
+        controls.freeFlight
+            ? std::max(0, controls.freeFlightCableSweepPairs)
+            : 0;
     settings.gravity =
         controls.freeFlight
             ? softwing::Vec3{0.0, 0.0, -gravityMetresPerSecondSquared}
@@ -4337,11 +4803,14 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
         // arithmetic (dt/N per substep, damping per substep) is the same
         // as the engine's own internal loop. With the option off this
         // branch is never taken and the step is exactly the old one.
-        detectContacts(sim, simulationTimeStep);
         const int substeps = std::max(1, controls.substeps);
         softwing::StepSettings sub = settings;
         sub.timeStep = simulationTimeStep / substeps;
         sub.substeps = 1;
+        beginPlaygroundContactFrame(sim.contact, sim.body->nodes(),
+                                    sim.body->triangles(),
+                                    sim.skinTriangleCount,
+                                    sub.timeStep);
         // step() consumes the external-force channel at the end of every
         // call (it snapshots node.force, replays it per substep, then
         // clears it), so the frame's forces — the whole polar flight
@@ -4359,7 +4828,18 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
                 liveNodes[index].force = externalForces[index];
             }
             sim.body->step(sub);
-            projectContacts(sim);
+            // Project the candidates captured BEFORE this substep first: their
+            // retained normal is the side a fast crossing must return to.
+            projectPlaygroundContact(sim.contact, sim.body->nodes(),
+                                     sim.body->triangles());
+            if (substep + 1 < substeps
+                && playgroundContactEnvelopeEscaped(sim.contact,
+                                                     sim.body->nodes())) {
+                refreshPlaygroundContact(sim.contact, sim.body->nodes(),
+                                         sim.body->triangles(),
+                                         sim.skinTriangleCount,
+                                         sub.timeStep);
+            }
         }
     } else {
         sim.body->step(settings);
@@ -4376,9 +4856,10 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
     // model records that the wing is travelling, because both modes keep
     // it at the origin.
     sim.airTravel += simulationTimeStep
-                     * (freestreamVelocity(sim, controls)
-                        - (controls.freeFlight ? canopyVelocityOf(sim)
-                                               : softwing::Vec3{}));
+                     * relativeAirVelocity(
+                         airVelocityWorld(sim, controls),
+                         controls.freeFlight ? canopyVelocityOf(sim)
+                                             : softwing::Vec3{});
 }
 
 bool beginGrab(SimBody &sim, std::size_t junctionNode)

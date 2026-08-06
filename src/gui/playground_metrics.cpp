@@ -536,27 +536,80 @@ KinkReport sharpestKink(const SimBody &sim)
     return worst;
 }
 
+namespace {
+
+bool riserReaction(const SimBody &sim,
+                   const LineSegment &segment,
+                   double tension,
+                   Vec3 &reaction)
+{
+    if (!segment.suspension) {
+        return false;
+    }
+    const auto carabiner = [&sim](std::size_t node) {
+        return std::find(sim.carabinerNodes.begin(),
+                         sim.carabinerNodes.end(),
+                         node)
+               != sim.carabinerNodes.end();
+    };
+    const bool aIsCarabiner = carabiner(segment.a);
+    const bool bIsCarabiner = carabiner(segment.b);
+    if (aIsCarabiner == bIsCarabiner) {
+        return false;
+    }
+    const std::size_t lower = aIsCarabiner ? segment.a : segment.b;
+    const std::size_t upper = aIsCarabiner ? segment.b : segment.a;
+    const auto &nodes = sim.body->nodes();
+    if (lower >= nodes.size() || upper >= nodes.size()) {
+        return false;
+    }
+    const Vec3 direction = nodes[upper].position - nodes[lower].position;
+    if (lengthSquared(direction) <= 0.0) {
+        return false;
+    }
+    reaction = tension * normalized(direction);
+    return true;
+}
+
+}  // namespace
+
 LineLoadReport lineLoads(const SimBody &sim, const SimControls &controls)
 {
     LineLoadReport report;
     if (!sim.body) {
         return report;
     }
-    report.totalSegments = sim.lineSegments.size();
     for (const LineSegment &segment : sim.lineSegments) {
+        if (!segment.suspension) {
+            continue;
+        }
+        ++report.totalSegments;
         const double tension =
             constraintTensionNewtons(sim, controls, segment.constraint);
         if (tension < 1.0) {
             ++report.slackSegments;
         }
-        for (const std::size_t carabiner : sim.carabinerNodes) {
-            if (segment.a == carabiner || segment.b == carabiner) {
-                report.riserNewtons += tension;
-                break;
-            }
+        Vec3 reaction;
+        if (riserReaction(sim, segment, tension, reaction)) {
+            report.riserForce += reaction;
         }
     }
+    report.riserNewtons = length(report.riserForce);
     return report;
+}
+
+double simulatedMassKilograms(const SimBody &sim)
+{
+    if (!sim.body) {
+        return 0.0;
+    }
+    double mass = 0.0;
+    for (const softwing::Node &node : sim.body->nodes()) {
+        if (node.inverseMass > 0.0) {
+            mass += 1.0 / node.inverseMass;
+        }
+    }
+    return mass;
 }
 
 ShapeReport measureShape(const SimBody &sim,
@@ -566,6 +619,7 @@ ShapeReport measureShape(const SimBody &sim,
     ShapeReport report;
     report.alphaDegrees = controls.angleOfAttackDegrees;
     report.dynamicPressurePascal = controls.pressurePascal;
+    report.pressureSolve = sim.pressureSolve;
     if (!sim.body || baseline.restPositions.empty()) {
         return report;
     }
@@ -814,11 +868,30 @@ ShapeReport measureShape(const SimBody &sim,
             / baseline.restVolume;
     }
 
-    // Slack fabric: unique edge constraints of the exported skins only.
-    // Rib webs and straps are the load path, not cloth — a slack strut is
-    // a different story than a wrinkle.
+    // Slack fabric comes from the selected skin physics. The membrane path
+    // counts its two normal material strains (warp/weft) directly; the legacy
+    // path keeps its unique exported-skin edge calculation unchanged.
     const auto &constraints = sim.body->constraints();
     {
+        std::size_t materialDirections = 0;
+        std::size_t slackDirections = 0;
+        for (const RenderFace &face : sim.renderFaces) {
+            if (!isSkinSurface(face.surface) || !face.membraneElement) {
+                continue;
+            }
+            const auto diagnostics =
+                sim.body->membraneDiagnostics(*face.membraneElement);
+            materialDirections += 2;
+            slackDirections +=
+                diagnostics.greenStrain.x < slackStrainThreshold ? 1 : 0;
+            slackDirections +=
+                diagnostics.greenStrain.y < slackStrainThreshold ? 1 : 0;
+        }
+        if (materialDirections > 0) {
+            report.slackFraction =
+                static_cast<double>(slackDirections)
+                / static_cast<double>(materialDirections);
+        } else {
         std::vector<char> counted(constraints.size(), 0);
         std::size_t skinEdges = 0;
         std::size_t slackEdges = 0;
@@ -853,6 +926,7 @@ ShapeReport measureShape(const SimBody &sim,
             skinEdges > 0 ? static_cast<double>(slackEdges)
                                 / static_cast<double>(skinEdges)
                           : 0.0;
+        }
     }
 
     // Asymmetry: live sections carried back into the rest frame and
@@ -907,13 +981,14 @@ ShapeReport measureShape(const SimBody &sim,
 
     report.agitationMetresPerSecond = agitationOf(sim);
 
-    // Row loads at the riser level: segments touching a carabiner with a
-    // known plan, plus the brake-handle cables (their lower end is the
-    // handle, not a carabiner, so they need their own gate).
+    // Row loads at the authored suspension cut immediately above each
+    // carabiner. Harness ties below and synthesized brake-control cables are
+    // drawn as lines too, but counting either would measure the same load path
+    // again rather than another canopy reaction.
     struct RowTally
     {
-        double left = 0.0;
-        double right = 0.0;
+        Vec3 left;
+        Vec3 right;
         int leftSegments = 0;
         int rightSegments = 0;
         int leftSlack = 0;
@@ -937,29 +1012,18 @@ ShapeReport measureShape(const SimBody &sim,
         });
     if (meshHasPlans) {
         const Vec3 spanAxis = normalized(sim.restSpanAxis);
-        const auto isCarabiner = [&sim](std::size_t node) {
-            return std::find(sim.carabinerNodes.begin(),
-                             sim.carabinerNodes.end(),
-                             node)
-                   != sim.carabinerNodes.end();
-        };
+        Vec3 totalReaction;
         for (const LineSegment &segment : sim.lineSegments) {
-            bool brakeHandle = false;
-            for (const BrakeLine &brake : sim.brakeLines) {
-                if (brake.constraint == segment.constraint) {
-                    brakeHandle = true;
-                    break;
-                }
-            }
-            const bool riser =
-                segment.plan > 0
-                && (isCarabiner(segment.a) || isCarabiner(segment.b));
-            if (!riser && !brakeHandle) {
+            const double tension = constraintTensionNewtons(
+                sim, controls, segment.constraint);
+            Vec3 reaction;
+            if (segment.plan <= 0
+                || !riserReaction(sim, segment, tension, reaction)) {
                 continue;
             }
             int row;
             bool brake = false;
-            if (brakeHandle || segment.plan == 6 || segment.brake) {
+            if (segment.plan == 6 || segment.brake) {
                 row = 5;
                 brake = true;
             } else if (segment.plan >= 1 && segment.plan <= 5) {
@@ -979,27 +1043,23 @@ ShapeReport measureShape(const SimBody &sim,
                     : nodes[segment.b].position;
             const double station =
                 dot((restA + restB) * 0.5, spanAxis);
-            const double tension = constraintTensionNewtons(
-                sim, controls, segment.constraint);
             const bool slack = tension < kSlackRiserNewtons;
             RowTally &tally = tallies[static_cast<std::size_t>(row)];
             tally.present = true;
             tally.brake = tally.brake || brake;
             if (station < 0.0) {
-                tally.left += tension;
+                tally.left += reaction;
                 ++tally.leftSegments;
                 tally.leftSlack += slack ? 1 : 0;
             } else {
-                tally.right += tension;
+                tally.right += reaction;
                 ++tally.rightSegments;
                 tally.rightSlack += slack ? 1 : 0;
             }
-            report.lineLoadNewtons += tension;
-            // Brake cables sit outside the slack count: the tunnel rigs
-            // them with a deliberate gap, so their slackness is the
-            // rigging working, not a row shedding load.
-            report.slackRiserSegments += (slack && !brake) ? 1 : 0;
+            totalReaction += reaction;
+            report.slackRiserSegments += slack ? 1 : 0;
         }
+        report.lineLoadNewtons = length(totalReaction);
         for (std::size_t row = 0; row < tallies.size(); ++row) {
             const RowTally &tally = tallies[row];
             if (!tally.present) {
@@ -1008,8 +1068,8 @@ ShapeReport measureShape(const SimBody &sim,
             RowLoad load;
             load.row = QLatin1Char(static_cast<char>('A' + row));
             load.brake = tally.brake;
-            load.leftNewtons = tally.left;
-            load.rightNewtons = tally.right;
+            load.leftNewtons = length(tally.left);
+            load.rightNewtons = length(tally.right);
             load.segments = tally.leftSegments + tally.rightSegments;
             load.slackSegments = tally.leftSlack + tally.rightSlack;
             report.rows.push_back(load);
@@ -1169,8 +1229,10 @@ ShapeReport measureShape(const SimBody &sim,
             if (!tally.present || tally.brake) {
                 continue;
             }
-            const double low = std::min(tally.left, tally.right);
-            const double high = std::max(tally.left, tally.right);
+            const double left = length(tally.left);
+            const double right = length(tally.right);
+            const double low = std::min(left, right);
+            const double high = std::max(left, right);
             if (high <= kLoadedRowNewtons) {
                 continue;
             }
@@ -1178,7 +1240,7 @@ ShapeReport measureShape(const SimBody &sim,
             if (ratio < worstRatio) {
                 worstRatio = ratio;
                 worstRow = row;
-                worstLeft = tally.left < tally.right;
+                worstLeft = left < right;
                 found = true;
             }
         }
@@ -1230,6 +1292,15 @@ void faceSlackField(const SimBody &sim, std::vector<float> &strainOut)
     for (std::size_t face = 0; face < sim.renderFaces.size(); ++face) {
         const RenderFace &drawn = sim.renderFaces[face];
         if (!isSkinSurface(drawn.surface)) {
+            continue;
+        }
+        if (drawn.membraneElement) {
+            const auto diagnostics =
+                sim.body->membraneDiagnostics(*drawn.membraneElement);
+            strainOut[face] = static_cast<float>(
+                std::min({0.0,
+                          diagnostics.greenStrain.x,
+                          diagnostics.greenStrain.y}));
             continue;
         }
         double worst = 0.0;
@@ -1293,6 +1364,42 @@ void nodeStrainFields(const SimBody &sim,
     // would hide exactly the state the maps exist to show.
     tensileOut.assign(nodes.size(), 0.0F);
     slackOut.assign(nodes.size(), 0.0F);
+    std::vector<float> membraneTensileWeight(nodes.size(), 0.0F);
+    std::vector<float> membraneSlackWeight(nodes.size(), 0.0F);
+    for (const RenderFace &drawn : sim.renderFaces) {
+        if (!isSkinSurface(drawn.surface) || !drawn.membraneElement) {
+            continue;
+        }
+        const std::size_t elementIndex = *drawn.membraneElement;
+        if (elementIndex >= sim.body->membraneElements().size()) {
+            continue;
+        }
+        const auto diagnostics = sim.body->membraneDiagnostics(elementIndex);
+        const float area = static_cast<float>(
+            sim.body->membraneElements()[elementIndex].referenceArea);
+        const std::array<float, 2> normalStrain{
+            static_cast<float>(diagnostics.greenStrain.x),
+            static_cast<float>(diagnostics.greenStrain.y)};
+        for (const std::size_t node : drawn.nodes) {
+            for (const float strain : normalStrain) {
+                if (strain >= 0.0F) {
+                    tensileOut[node] += area * strain;
+                    membraneTensileWeight[node] += area;
+                } else {
+                    slackOut[node] += area * strain;
+                    membraneSlackWeight[node] += area;
+                }
+            }
+        }
+    }
+    for (std::size_t node = 0; node < nodes.size(); ++node) {
+        if (membraneTensileWeight[node] > 0.0F) {
+            tensileOut[node] /= membraneTensileWeight[node];
+        }
+        if (membraneSlackWeight[node] > 0.0F) {
+            slackOut[node] /= membraneSlackWeight[node];
+        }
+    }
     // First pass: the drawn, deduplicated edge set and its rest
     // lengths, for the mesh-relative floor below. Regions meshed much
     // finer than the wing's norm — the vent rims, the tip web struts —
@@ -1305,6 +1412,9 @@ void nodeStrainFields(const SimBody &sim,
     std::vector<float> rests;
     std::vector<char> seen(constraints.size(), 0);
     for (const RenderFace &drawn : sim.renderFaces) {
+        if (isSkinSurface(drawn.surface) && drawn.membraneElement) {
+            continue;
+        }
         if (drawn.surface == SimSurface::Rib && !detailedRibs) {
             continue;
         }
@@ -1350,6 +1460,10 @@ void nodeStrainFields(const SimBody &sim,
              - tie.restLength)
             / tie.restLength);
         for (const std::size_t node : {tie.a, tie.b}) {
+            if (membraneTensileWeight[node] > 0.0F
+                || membraneSlackWeight[node] > 0.0F) {
+                continue;
+            }
             if (strain >= 0.0F) {
                 tensileOut[node] += strain * rest;
                 tensileWeight[node] += rest;

@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -25,6 +26,11 @@ void check(bool condition, const char *what)
         std::fprintf(stderr, "FAIL: %s\n", what);
         ++failures;
     }
+}
+
+bool nearVec(const Vec3 &a, const Vec3 &b, double tolerance)
+{
+    return length(a - b) <= tolerance;
 }
 
 constexpr double kPi = 3.14159265358979323846;
@@ -510,6 +516,223 @@ void testHealthyBayIsNotVented()
           "an undeformed bay is not vented at all");
 }
 
+void testGalileanAirState()
+{
+    pg::SimControls baseControls;
+    baseControls.freeFlight = true;
+    baseControls.launchMode = pg::LaunchMode::DropFromRest;
+    baseControls.cellPressureModel = true;
+    pg::SimControls shiftedControls = baseControls;
+    const Vec3 frameShift{2.3, -1.7, 0.6};
+    shiftedControls.ambientAirVelocityWorld = frameShift;
+
+    pg::SimBody base = pg::buildSimBody(testMesh(), {}, baseControls);
+    pg::SimBody shifted =
+        pg::buildSimBody(testMesh(), {}, shiftedControls);
+    check(!pg::sampleWingAero(base, baseControls).valid,
+          "air state: reference q is not a moving free-flight atmosphere");
+    check(!base.cellPressure.empty()
+              && base.cellPressure[0] > 0.9 * baseControls.pressurePascal,
+          "air state: drop-from-rest is nevertheless pre-inflated");
+    const Vec3 baseVelocity{0.4, -9.3, -1.2};
+    for (std::size_t index = 0; index < base.body->nodes().size(); ++index) {
+        base.body->nodes()[index].velocity = baseVelocity;
+        shifted.body->nodes()[index].velocity = baseVelocity + frameShift;
+    }
+
+    const pg::WingAeroSample baseSample =
+        pg::sampleWingAero(base, baseControls);
+    const pg::WingAeroSample shiftedSample =
+        pg::sampleWingAero(shifted, shiftedControls);
+    check(baseSample.valid && shiftedSample.valid,
+          "Galilean: both aero samples are valid");
+    check(std::abs(baseSample.airspeed - shiftedSample.airspeed) < 1e-12
+              && std::abs(baseSample.dynamicPressure
+                          - shiftedSample.dynamicPressure)
+                     < 1e-12
+              && std::abs(baseSample.alphaRadians
+                          - shiftedSample.alphaRadians)
+                     < 1e-12
+              && nearVec(baseSample.windDirection,
+                         shiftedSample.windDirection,
+                         1e-12),
+          "Galilean: ambient and surface shifts leave polar sample unchanged");
+
+    pg::applyPressure(base, baseControls);
+    pg::applyPressure(shifted, shiftedControls);
+    double pressureError = 0.0;
+    for (std::size_t face = 0; face < base.skinTriangleCount; ++face) {
+        pressureError = std::max(
+            pressureError,
+            std::abs(base.body->triangles()[face].pressureDifference
+                     - shifted.body->triangles()[face].pressureDifference));
+    }
+    double cellError = 0.0;
+    for (std::size_t cell = 0; cell < base.cellPressure.size(); ++cell) {
+        cellError = std::max(
+            cellError,
+            std::abs(base.cellPressure[cell] - shifted.cellPressure[cell]));
+    }
+    check(pressureError < 1e-11 && cellError < 1e-11,
+          "Galilean: rib pressure, intakes and cell state are invariant");
+
+    pg::applyAerodynamicForces(base, baseControls);
+    pg::applyAerodynamicForces(shifted, shiftedControls);
+    double forceError = 0.0;
+    for (std::size_t index = 0; index < base.body->nodes().size(); ++index) {
+        forceError = std::max(
+            forceError,
+            length(base.body->nodes()[index].force
+                   - shifted.body->nodes()[index].force));
+    }
+    check(forceError < 1e-9
+              && nearVec(base.lastAeroForce, shifted.lastAeroForce, 1e-9),
+          "Galilean: distributed aerodynamic forces are invariant");
+
+    pg::stepSimulation(base, baseControls);
+    pg::stepSimulation(shifted, shiftedControls);
+    double positionError = 0.0;
+    double velocityError = 0.0;
+    for (std::size_t index = 0; index < base.body->nodes().size(); ++index) {
+        positionError = std::max(
+            positionError,
+            length(base.body->nodes()[index].position
+                   - shifted.body->nodes()[index].position));
+        velocityError = std::max(
+            velocityError,
+            length(base.body->nodes()[index].velocity + frameShift
+                   - shifted.body->nodes()[index].velocity));
+    }
+    check(positionError < 1e-8 && velocityError < 1e-8,
+          "Galilean: one solver step preserves relative state");
+}
+
+void testSectionPlaneWeathercock()
+{
+    pg::SimControls controls;
+    controls.freeFlight = true;
+    controls.launchMode = pg::LaunchMode::DropFromRest;
+    controls.cellPressureModel = false;
+    pg::SimBody sim = pg::buildSimBody(testMesh(), {}, controls);
+    check(sim.ribChords.size() == 3,
+          "weathercock: synthetic wing has three section planes");
+    if (sim.ribChords.size() != 3) {
+        return;
+    }
+
+    // Give both halves equal planform authority for this pure helper case.
+    // The centre rib joins the low-span half; its live position still sets
+    // the correct quarter-chord centre for the rigid-spin term.
+    sim.ribHalf = {0, 0, 1};
+    sim.ribPlanformArea = {0.5, 0.5, 1.0};
+    sim.halfPlanformArea = {1.0, 1.0};
+    const double referenceSpeed = length(
+        pg::referenceFlowVelocity(sim, controls));
+    const auto setFlow = [&](double betaSpeed) {
+        for (softwing::Node &node : sim.body->nodes()) {
+            node.velocity = {-betaSpeed, -referenceSpeed, 0.0};
+        }
+        return pg::sampleWingAero(sim, controls);
+    };
+
+    for (pg::RibChord &rib : sim.ribChords) {
+        rib.spanAxis = {1.0, 0.0, 0.0};
+    }
+    const pg::HalfAeroKinematics flat =
+        pg::sampleHalfAeroKinematics(sim, setFlow(2.0));
+    check(flat.valid
+              && std::abs(flat.alphaDeviationRadians[0]) < 1e-12
+              && std::abs(flat.alphaDeviationRadians[1]) < 1e-12,
+          "weathercock: a flat wing removes spanwise beta from every section");
+
+    const double arc = 25.0 * kPi / 180.0;
+    const Vec3 lowNormal{std::cos(arc), 0.0, std::sin(arc)};
+    const Vec3 highNormal{std::cos(arc), 0.0, -std::sin(arc)};
+    sim.ribChords[0].spanAxis = lowNormal;
+    sim.ribChords[1].spanAxis = lowNormal;
+    sim.ribChords[2].spanAxis = highNormal;
+    const pg::HalfAeroKinematics noBeta =
+        pg::sampleHalfAeroKinematics(sim, setFlow(0.0));
+    const pg::HalfAeroKinematics positive =
+        pg::sampleHalfAeroKinematics(sim, setFlow(2.0));
+    const pg::HalfAeroKinematics negative =
+        pg::sampleHalfAeroKinematics(sim, setFlow(-2.0));
+    check(positive.valid && negative.valid
+              && positive.alphaDeviationRadians[0]
+                     * positive.alphaDeviationRadians[1]
+                     < 0.0,
+          "weathercock: mirrored arc turns beta into opposite half incidences");
+    check(noBeta.valid
+              && std::abs(noBeta.alphaDeviationRadians[0]) < 1e-12
+              && std::abs(noBeta.alphaDeviationRadians[1]) < 1e-12,
+          "weathercock: asymmetric section geometry has zero no-beta departure");
+    check(std::abs(positive.alphaDeviationRadians[0]
+                   + negative.alphaDeviationRadians[0])
+                  < 1e-12
+              && std::abs(positive.alphaDeviationRadians[1]
+                          + negative.alphaDeviationRadians[1])
+                     < 1e-12,
+          "weathercock: reversing beta reverses the differential sign");
+    check(std::abs(positive.alphaDeviationRadians[0]
+                   + positive.alphaDeviationRadians[1])
+                  < 1e-12,
+          "weathercock: exact weighted common incidence is removed");
+
+    const auto yawMomentFor = [&](double betaSpeed) {
+        sim.alphaFilteredRadians =
+            std::numeric_limits<double>::quiet_NaN();
+        sim.alphaHalfDeviationRadians = {0.0, 0.0};
+        sim.halfDynamicPressureRatio = {1.0, 1.0};
+        setFlow(betaSpeed);
+        pg::applyPressure(sim, controls);
+        pg::applyAerodynamicForces(sim, controls);
+        const pg::WingAeroSample sample = pg::sampleWingAero(sim, controls);
+        Vec3 centre;
+        for (std::size_t node = 0; node < sim.canopyNodeCount; ++node) {
+            centre += sim.body->nodes()[node].position;
+        }
+        centre = centre / static_cast<double>(sim.canopyNodeCount);
+        Vec3 moment;
+        for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+            const auto &tri = sim.body->triangles()[face];
+            const Vec3 &a = sim.body->nodes()[tri.a].position;
+            const Vec3 &b = sim.body->nodes()[tri.b].position;
+            const Vec3 &c = sim.body->nodes()[tri.c].position;
+            const Vec3 force = tri.pressureDifference
+                               * 0.5 * cross(b - a, c - a);
+            moment += cross((a + b + c) / 3.0 - centre, force);
+        }
+        const Vec3 up = normalized(
+            cross(sample.spanAxis, sample.chordDirection));
+        return dot(moment, up);
+    };
+    const double yawZero = yawMomentFor(0.0);
+    const double yawPositive = yawMomentFor(2.0) - yawZero;
+    const double yawNegative = yawMomentFor(-2.0) - yawZero;
+    check(yawPositive < 0.0 && yawNegative > 0.0,
+          "weathercock: differential pressure moment restores both beta signs");
+    check(std::abs(std::abs(yawPositive) - std::abs(yawNegative))
+                  < 0.08 * 0.5
+                        * (std::abs(yawPositive) + std::abs(yawNegative)),
+          "weathercock: mirrored beta produces near-odd yaw-moment parity");
+    check(std::max(std::abs(yawPositive), std::abs(yawNegative)) < 10.0,
+          "weathercock: small-beta yaw moment stays bounded");
+
+    for (int frame = 0; frame < 120; ++frame) {
+        setFlow(50.0);
+        pg::applyPressure(sim, controls);
+        pg::applyAerodynamicForces(sim, controls);
+    }
+    constexpr double halfLimit = 10.0 * kPi / 180.0;
+    check(std::isfinite(sim.alphaHalfDeviationRadians[0])
+              && std::isfinite(sim.alphaHalfDeviationRadians[1])
+              && std::abs(sim.alphaHalfDeviationRadians[0])
+                     <= halfLimit + 1e-12
+              && std::abs(sim.alphaHalfDeviationRadians[1])
+                     <= halfLimit + 1e-12,
+          "weathercock: extreme-beta filter remains finite and clamped");
+}
+
 }  // namespace
 
 int main()
@@ -527,6 +750,8 @@ int main()
     testSqueezeCap();
     testCollapseVent();
     testHealthyBayIsNotVented();
+    testGalileanAirState();
+    testSectionPlaneWeathercock();
     if (failures != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

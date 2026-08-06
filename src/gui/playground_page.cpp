@@ -61,15 +61,20 @@
 // exactly the same simulation. What is left here is the view: camera,
 // shading, colour ramps and the control panel.
 using lep::playground::LineSegment;
+using lep::playground::LaunchMode;
+using lep::playground::PressureSolveMode;
 using lep::playground::RenderFace;
 using lep::playground::SimBody;
 using lep::playground::SimBuildOptions;
 using lep::playground::SimControls;
 using lep::playground::SimMesh;
 using lep::playground::SimSurface;
+using lep::playground::SkinModel;
 using lep::playground::buildSimBody;
 using lep::playground::defaultRibLayers;
 using lep::playground::defaultRibStationSplit;
+using lep::playground::maximumPilotMassKg;
+using lep::playground::minimumPilotMassKg;
 using lep::playground::noConstraint;
 using lep::playground::parseSimMesh;
 using lep::playground::refineSimMesh;
@@ -231,6 +236,17 @@ public:
         double sinkSpeed = 0.0;
         double pilotBelowMetres = 0.0;
         double pilotMassKg = 0.0;
+        double polarDragTargetNewtons = 0.0;
+        double polarDragTractionNewtons = 0.0;
+        double polarDragTractionPowerWatts = 0.0;
+        double trimmedLaunchAirspeed = 0.0;
+        double trimmedLaunchDynamicPressure = 0.0;
+        double trimmedLaunchEffectiveLiftCoefficient = 0.0;
+        double trimmedLaunchHorizontalResidualNewtons = 0.0;
+        double trimmedLaunchVerticalResidualNewtons = 0.0;
+        int trimmedLaunchCalibrationIterations = 0;
+        int trimmedLaunchRelaxationFrames = 0;
+        lep::playground::PressureSolveDiagnostics pressureSolve;
         // Simulated time since the last build or Reset, seconds. Not wall
         // clock: the wing runs at its own 60 Hz however long a frame takes
         // to compute, and at 30x2 on a real wing that is two to three
@@ -267,6 +283,7 @@ public:
         softwing::Vec3 boundsHigh;
         std::size_t pilotNode = noConstraint;
         bool freeFlight = false;
+        QString materialSummary;
         QString buildError;
     };
 
@@ -398,12 +415,92 @@ public:
             << "wing           " << QString::number(sim.planformArea, 'f', 2)
             << " m2 planform, AR "
             << QString::number(sim.aspectRatio, 'f', 2) << ", pilot "
-            << QString::number(sim.pilotMass, 'f', 1) << " kg\n"
+            << QString::number(controls.pilotMassKg, 'f', 1)
+            << " kg requested, "
+            << QString::fromLatin1(
+                   lep::playground::launchModeName(controls.launchMode))
+            << "\n"
+            << "skin           "
+            << QString::fromLatin1(lep::playground::skinModelName(sim.skinModel))
+            << ", " << sim.body->membraneElements().size()
+            << " membranes, " << sim.body->dihedralConstraints().size()
+            << " hinges, skipped " << sim.skippedMembraneElements << "/"
+            << sim.skippedDihedralHinges << " elements/hinges\n";
+        if (sim.skinModel == SkinModel::OrthotropicMembrane) {
+            const auto &m = sim.skinMaterial;
+            out << "material       warp/weft/coupling/shear "
+                << QString::number(m.warpStiffness, 'f', 0) << "/"
+                << QString::number(m.weftStiffness, 'f', 0) << "/"
+                << QString::number(m.couplingStiffness, 'f', 0) << "/"
+                << QString::number(m.shearStiffness, 'f', 0)
+                << " N/m, damping "
+                << QString::number(m.dampingTime, 'f', 3)
+                << " s, compression "
+                << QString::number(m.compressionStiffnessRatio, 'f', 3)
+                << ", bend compliance "
+                << QString::number(sim.skinBendCompliance, 'g', 3) << "\n";
+            if (m.dampingTime > 0.0) {
+                out << "WARNING        nonzero membrane damping is "
+                       "experimental in the mixed rib/line network\n";
+            }
+        }
+        out
+            << "line mass      "
+            << QString::number(sim.authoredLineMassKg, 'f', 3)
+            << " kg authored + "
+            << QString::number(sim.lineJunctionFloorMassKg, 'f', 4)
+            << " kg junction floor + "
+            << QString::number(sim.controlNodeFloorMassKg, 'f', 4)
+            << " kg control floor\n";
+        if (sim.tunnelLineSolverBallastKg > 0.0) {
+            out << "line relaxation "
+                << QString::number(sim.tunnelLineSolverBallastKg, 'f', 3)
+                << " kg nonphysical pinned-tunnel solver ballast"
+                   " (zero gravity)\n";
+        }
+        out
             << "solver         " << controls.substeps << " substeps x "
-            << controls.constraintIterations << " iterations\n"
+            << controls.constraintIterations << " iterations";
+        if (controls.freeFlight && controls.freeFlightCableSweepPairs > 0) {
+            out << " + " << controls.freeFlightCableSweepPairs
+                << " reverse/forward cable-only pair"
+                << (controls.freeFlightCableSweepPairs == 1 ? "" : "s");
+        }
+        out << "\n"
+            << "pressure solve "
+            << (controls.pressureSolveMode
+                        == PressureSolveMode::BoundedExteriorCp
+                    ? "bounded final exterior Cp [-3, 1]"
+                    : "LEGACY increment + post-clamp")
+            << "\n"
             << "cells          " << sim.cells.size()
             << ", cross-port gain x"
             << QString::number(controls.crossPortGain, 'f', 1) << "\n";
+        if (controls.freeFlight
+            && controls.launchMode == LaunchMode::TrimmedGlide) {
+            const double support =
+                (sim.pressureSolve.achievedForce
+                 + sim.lastPolarDragTractionForce)
+                    .z;
+            out << "launch trim    "
+                << QString::number(sim.trimmedLaunchAirspeed, 'f', 2)
+                << " m/s, "
+                << QString::number(sim.trimmedLaunchDynamicPressure, 'f', 1)
+                << " Pa, effective CL "
+                << QString::number(
+                       sim.trimmedLaunchEffectiveLiftCoefficient, 'f', 3)
+                << ", achieved wing support "
+                << QString::number(support, 'f', 0) << " N, residual H/V "
+                << QString::number(
+                       sim.trimmedLaunchHorizontalResidualNewtons, 'f', 0)
+                << "/"
+                << QString::number(
+                       sim.trimmedLaunchVerticalResidualNewtons, 'f', 0)
+                << " N, " << sim.trimmedLaunchCalibrationIterations
+                << " calibration solves + "
+                << sim.trimmedLaunchRelaxationFrames
+                << " relaxation frames\n";
+        }
         std::size_t ported = 0;
         for (std::size_t cell = 0; cell + 1 < sim.cells.size(); ++cell) {
             if (sim.cells[cell].portAreaToNext > 0.0) {
@@ -422,7 +519,7 @@ public:
             << "   sim s   real ms   q Pa  alpha    brakeL/R cm   "
                "airspeed  sink   L/D   span  vol%   cells Pa   "
                "risers N  slack   weak cell            kink        "
-               "fabric N\n";
+               "fabric N polarD A/T/W      Cp range       authority F/P/D\n";
         log_.restart(header);
     }
 
@@ -510,7 +607,8 @@ public:
             spanLow = std::min(spanLow, x);
             spanHigh = std::max(spanHigh, x);
         }
-        // Sink and enclosed volume, computed here rather than carried on
+        // Sink through the surrounding air and enclosed volume, computed
+        // here rather than carried on
         // the body: neither is wanted anywhere else, and the log is the
         // one place both have to line up with the same frame.
         double sink = 0.0;
@@ -523,7 +621,9 @@ public:
             sink += nodeMass * node.velocity.z;
             mass += nodeMass;
         }
-        sink = mass > 0.0 ? sink / mass : 0.0;
+        sink = mass > 0.0
+                   ? sink / mass - controls.ambientAirVelocityWorld.z
+                   : 0.0;
         double volume = 0.0;
         for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
             const softwing::Triangle &tri = sim.body->triangles()[face];
@@ -560,7 +660,25 @@ public:
             << field(100.0 * weak.sectionRatio, 4, 0) << "%  "
             << field(kink.degrees, 4, 0) << "deg@" << kink.rib << " s"
             << field(kink.spanFraction, 4, 2)
-            << field(sim.lastFabricDragNewtons, 9, 0) << "\n";
+            << field(sim.lastFabricDragNewtons, 9, 0)
+            << field(sim.lastPolarDragTractionNewtons, 8, 0) << "/"
+            << field(sim.lastPolarDragTargetNewtons, 5, 0) << "/"
+            << field(sim.lastPolarDragTractionPowerWatts, 7, 0)
+            << "  " << field(sim.pressureSolve.minimumCp, 5, 2)
+            << ".." << field(sim.pressureSolve.maximumCp, 5, 2)
+            << "  " << field(sim.pressureSolve.authority[0], 5, 3)
+            << "/" << field(sim.pressureSolve.authority[1], 5, 3)
+            << "/" << field(sim.pressureSolve.authority[2], 5, 3)
+            << " h" << field(sim.pressureSolve.authorityHint[0], 5, 3)
+            << "/" << field(sim.pressureSolve.authorityHint[1], 5, 3)
+            << "/" << field(sim.pressureSolve.authorityHint[2], 5, 3)
+            << " p" << (sim.pressureSolve.authorityProbeAccepted[0] ? '+' : '-')
+            << (sim.pressureSolve.authorityProbeAccepted[1] ? '+' : '-')
+            << (sim.pressureSolve.authorityProbeAccepted[2] ? '+' : '-')
+            << (sim.pressureSolve.numericalFailure
+                    ? " NUMERICAL-FAIL"
+                    : "")
+            << "\n";
         log_.write(line);
     }
 
@@ -816,6 +934,22 @@ private:
         backTopology_.boundsHigh = sim.boundsHigh;
         backTopology_.pilotNode = sim.pilotNode;
         backTopology_.freeFlight = sim.pilotNode != noConstraint;
+        backTopology_.materialSummary.clear();
+        if (sim.body) {
+            backTopology_.materialSummary = QStringLiteral(
+                "%1 · %2 membranes · %3 hinges · skipped %4/%5")
+                .arg(QString::fromLatin1(
+                    lep::playground::skinModelName(sim.skinModel)))
+                .arg(sim.body->membraneElements().size())
+                .arg(sim.body->dihedralConstraints().size())
+                .arg(sim.skippedMembraneElements)
+                .arg(sim.skippedDihedralHinges);
+            if (sim.skinModel == SkinModel::OrthotropicMembrane
+                && sim.skinMaterial.dampingTime > 0.0) {
+                backTopology_.materialSummary += QStringLiteral(
+                    " · WARNING nonzero membrane damping is experimental");
+            }
+        }
         backTopology_.buildError = error;
         backTopology_.junctions.clear();
         std::set<std::size_t> unique;
@@ -906,6 +1040,26 @@ private:
                 static_cast<float>(sim.airTravel.z));
             back.glideRatio = sim.lastGlideRatio;
             back.pilotMassKg = sim.pilotMass;
+            back.polarDragTargetNewtons =
+                sim.lastPolarDragTargetNewtons;
+            back.polarDragTractionNewtons =
+                sim.lastPolarDragTractionNewtons;
+            back.polarDragTractionPowerWatts =
+                sim.lastPolarDragTractionPowerWatts;
+            back.trimmedLaunchAirspeed = sim.trimmedLaunchAirspeed;
+            back.trimmedLaunchDynamicPressure =
+                sim.trimmedLaunchDynamicPressure;
+            back.trimmedLaunchEffectiveLiftCoefficient =
+                sim.trimmedLaunchEffectiveLiftCoefficient;
+            back.trimmedLaunchHorizontalResidualNewtons =
+                sim.trimmedLaunchHorizontalResidualNewtons;
+            back.trimmedLaunchVerticalResidualNewtons =
+                sim.trimmedLaunchVerticalResidualNewtons;
+            back.trimmedLaunchCalibrationIterations =
+                sim.trimmedLaunchCalibrationIterations;
+            back.trimmedLaunchRelaxationFrames =
+                sim.trimmedLaunchRelaxationFrames;
+            back.pressureSolve = sim.pressureSolve;
             // The same counter the session log's first column carries, so
             // a moment on screen and a row in the log can be lined up.
             back.simSeconds = loggedSeconds_;
@@ -936,9 +1090,11 @@ private:
                 if (mass > 0.0) {
                     velocity /= mass;
                 }
+                const softwing::Vec3 throughAir =
+                    velocity - controls.ambientAirVelocityWorld;
                 back.forwardSpeed =
-                    dot(velocity, sim.restChordDirection);
-                back.sinkSpeed = velocity.z;
+                    dot(throughAir, sim.restChordDirection);
+                back.sinkSpeed = throughAir.z;
                 if (canopyCount > 0) {
                     canopyCentre /= double(canopyCount);
                     back.pilotBelowMetres =
@@ -1257,6 +1413,43 @@ public:
 
     bool freeFlight() const { return controls_.freeFlight; }
 
+    void setPilotMassKg(double kilograms)
+    {
+        const double clamped = std::clamp(
+            kilograms, minimumPilotMassKg, maximumPilotMassKg);
+        if (controls_.pilotMassKg == clamped) {
+            return;
+        }
+        controls_.pilotMassKg = clamped;
+        if (!mesh_.nodes.empty()) {
+            sendRebuild();
+        }
+    }
+
+    void setLaunchMode(LaunchMode mode)
+    {
+        if (controls_.launchMode == mode) {
+            return;
+        }
+        controls_.launchMode = mode;
+        if (!mesh_.nodes.empty()) {
+            sendRebuild();
+        }
+    }
+
+    void setSkinModel(SkinModel model)
+    {
+        if (controls_.skinModel == model) {
+            return;
+        }
+        controls_.skinModel = model;
+        if (!mesh_.nodes.empty()) {
+            sendRebuild();
+        }
+    }
+
+    QString materialReadout() const { return topo_.materialSummary; }
+
     // Back to the rest pose (and, in free flight, a fresh launch on the
     // glide), from the retained mesh — no engine run needed.
     void resetSimulation()
@@ -1511,6 +1704,42 @@ public:
                          .arg(report.glideRatio, 0, 'f', 1)
                   << QStringLiteral("α %1°")
                          .arg(front_.alphaDegrees, 0, 'f', 1);
+            const auto &solve = front_.pressureSolve;
+            if (solve.numericalFailure) {
+                parts << QStringLiteral("Cp SOLVE FAILED");
+            } else if (solve.attempted) {
+                parts << QStringLiteral(
+                             "Cp %1..%2 · A %3/%4/%5 · H %6/%7/%8")
+                             .arg(solve.minimumCp, 0, 'f', 2)
+                             .arg(solve.maximumCp, 0, 'f', 2)
+                             .arg(solve.authority[0], 0, 'f', 2)
+                             .arg(solve.authority[1], 0, 'f', 2)
+                             .arg(solve.authority[2], 0, 'f', 2)
+                             .arg(solve.authorityHint[0], 0, 'f', 2)
+                             .arg(solve.authorityHint[1], 0, 'f', 2)
+                             .arg(solve.authorityHint[2], 0, 'f', 2);
+            }
+            parts << QStringLiteral("polar skin D %1/%2 N (%3 W)")
+                         .arg(front_.polarDragTractionNewtons, 0, 'f', 0)
+                         .arg(front_.polarDragTargetNewtons, 0, 'f', 0)
+                         .arg(front_.polarDragTractionPowerWatts, 0, 'f', 0);
+            if (controls_.freeFlight
+                && controls_.launchMode == LaunchMode::TrimmedGlide) {
+                parts << QStringLiteral(
+                             "launch %1 km/h · q %2 Pa · CL %3 · H/V %4/%5 N · %6+%7")
+                             .arg(front_.trimmedLaunchAirspeed * 3.6,
+                                  0, 'f', 0)
+                             .arg(front_.trimmedLaunchDynamicPressure,
+                                  0, 'f', 0)
+                             .arg(front_.trimmedLaunchEffectiveLiftCoefficient,
+                                  0, 'f', 2)
+                             .arg(front_.trimmedLaunchHorizontalResidualNewtons,
+                                  0, 'f', 0)
+                             .arg(front_.trimmedLaunchVerticalResidualNewtons,
+                                  0, 'f', 0)
+                             .arg(front_.trimmedLaunchCalibrationIterations)
+                             .arg(front_.trimmedLaunchRelaxationFrames);
+            }
         }
         parts << QStringLiteral("span %1%")
                      .arg(report.spanRatio * 100.0, 0, 'f', 0);
@@ -2641,6 +2870,11 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     // wing stops looking like one, so the extra travel was only misleading.
     // Default 61 Pa = 36 km/h (q = ½ρv² at 10 m/s), a typical trim speed.
     pressure_ = makeSlider(100, 61);
+    pressure_->setToolTip(QStringLiteral(
+        "Reference dynamic pressure and airspeed. In the tunnel this is "
+        "the prescribed airflow. In free flight it calibrates the load "
+        "cap and trimmed launch speed; the atmosphere itself is stationary "
+        "unless an ambient-air velocity is supplied programmatically."));
     lift_ = makeSlider(15, 6);
     leftBrake_ = makeSlider(100, 0);
     rightBrake_ = makeSlider(100, 0);
@@ -2744,7 +2978,31 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     quality_->setCurrentIndex(lep::playground::defaultSolverQuality);
     quality_->setToolTip(QStringLiteral(
         "Substeps x iterations per frame. More substeps hold the fabric "
-        "closer to its designed length; fewer keep the wing interactive."));
+        "closer to its designed length; fewer keep the wing interactive. "
+        "Free flight also adds a cable-only reverse/forward suspension pass "
+        "so payload load reaches the canopy without extra cloth iterations."));
+    skinModel_ = new QComboBox(this);
+    skinModel_->addItem(QStringLiteral("Legacy distance truss"));
+    skinModel_->addItem(QStringLiteral("Orthotropic membrane (prototype)"));
+    skinModel_->setToolTip(QStringLiteral(
+        "Legacy preserves the calibrated bilateral distance-spring skin. "
+        "The prototype replaces only skin springs with warp/weft/shear "
+        "membranes, compression softening and true fold hinges; ribs, seams, "
+        "straps, lines, pressure, cells and contact are unchanged. It is an "
+        "engineering experiment, not a calibrated fabric certificate."));
+    skinMaterialLabel_ = new QLabel(this);
+    skinMaterialLabel_->setWordWrap(true);
+    const auto refreshSkinMaterial = [this] {
+        skinMaterialLabel_->setText(
+            skinModel_->currentIndex() == 0
+                ? QStringLiteral("Calibrated legacy structural guard")
+                : QStringLiteral(
+                      "Prototype W/T/C/S 8000/5000/1000/1500 N/m · "
+                      "compression 0.05 · damping off · bend C 5e-4"));
+    };
+    refreshSkinMaterial();
+    connect(skinModel_, &QComboBox::currentIndexChanged, this,
+            [refreshSkinMaterial](int) { refreshSkinMaterial(); });
 
     // ---- The left panel. The wing on screen is roughly 1:1 while the
     // window is closer to 2:1, so chrome above the viewport is exactly
@@ -2756,13 +3014,29 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "Unpin the wing: gravity on, a pilot slung under the risers, the "
         "whole system flying and re-centred each frame. Steer with the "
         "brakes; a little symmetric brake steadies it."));
+    pilotMass_ = makeSlider(
+        static_cast<int>(maximumPilotMassKg),
+        static_cast<int>(lep::playground::defaultPilotMassKg));
+    pilotMass_->setMinimum(static_cast<int>(minimumPilotMassKg));
+    pilotMass_->setToolTip(QStringLiteral(
+        "Pilot plus harness, instruments and carried equipment. This is an "
+        "explicit free-flight mass; the simulator no longer chooses a mass "
+        "that happens to balance its own aerodynamic polar."));
+    pilotMassLabel_ = new QLabel(this);
+    launchMode_ = new QComboBox(this);
+    launchMode_->addItem(QStringLiteral("Trimmed glide"));
+    launchMode_->addItem(QStringLiteral("Drop from rest"));
+    launchMode_->setToolTip(QStringLiteral(
+        "Trimmed glide starts every component on the estimated flight path. "
+        "Drop from rest releases the pre-inflated point-payload system with "
+        "zero initial velocity so its gravity transient is visible."));
     fabricContact_ = makeCheck(QStringLiteral("Fabric contact"), false);
     fabricContact_->setToolTip(QStringLiteral(
-        "Stop folded fabric passing through itself and through the "
-        "lines. Costs a few milliseconds a frame; what it buys is "
-        "collapses that fold and clear like cloth instead of ghosting "
-        "through the wing. Takes effect on the next frame — no "
-        "rebuild."));
+        "Experimental skin vertex/triangle, edge/edge and authored-line "
+        "contact. Prevents ghosting and reports incomplete broad-phase "
+        "coverage, but is currently expensive on a full wing. Friction "
+        "and line/line contact are not modelled. Takes effect on the next "
+        "frame — no rebuild."));
     flightLabel_ = new QLabel(this);
     flightLabel_->setWordWrap(true);
 
@@ -2799,7 +3073,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     const auto refreshControlReadouts = [this] {
         const double pascal = static_cast<double>(pressure_->value());
         pressureLabel_->setText(
-            QStringLiteral("Pressure %1 Pa · %2 km/h")
+            QStringLiteral("Reference q %1 Pa · airspeed %2 km/h")
                 .arg(pressure_->value())
                 .arg(std::sqrt(2.0 * pascal / 1.225) * 3.6, 0, 'f', 0));
         angleLabel_->setText(
@@ -2812,6 +3086,9 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             QStringLiteral("Right brake %1 cm")
                 .arg(std::lround(rightBrake_->value() / 100.0
                                  * maximumBrakeTravelMetres * 100.0)));
+        pilotMassLabel_->setText(
+            QStringLiteral("Pilot + harness %1 kg")
+                .arg(pilotMass_->value()));
         crossPortLabel_->setText(
             crossPortGain_->value() == 1
                 ? QStringLiteral("Neighbour reinflation ×1 (as designed)")
@@ -2825,7 +3102,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     };
     refreshControlReadouts();
     for (QSlider *slider :
-         {pressure_, lift_, leftBrake_, rightBrake_, crossPortGain_,
+         {pressure_, lift_, leftBrake_, rightBrake_, pilotMass_, crossPortGain_,
           airDensity_}) {
         connect(slider, &QSlider::valueChanged, this,
                 [refreshControlReadouts] { refreshControlReadouts(); });
@@ -2861,7 +3138,12 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     solverRow->addWidget(quality_, 1);
     solverRow->addWidget(settleButton_);
     panelLayout->addLayout(solverRow);
+    panelLayout->addWidget(skinModel_);
+    panelLayout->addWidget(skinMaterialLabel_);
     panelLayout->addWidget(freeFlight_);
+    panelLayout->addWidget(pilotMassLabel_);
+    panelLayout->addWidget(pilotMass_);
+    panelLayout->addWidget(launchMode_);
     panelLayout->addWidget(fabricContact_);
     panelLayout->addWidget(flightLabel_);
 
@@ -3030,6 +3312,27 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         // The toggle rebuilt the body, which leaves the solver running.
         updateShapeTimer();
     });
+    connect(skinModel_, &QComboBox::currentIndexChanged,
+            this, [this](int index) {
+                if (view_ != nullptr) {
+                    view_->setSkinModel(
+                        index == 1 ? SkinModel::OrthotropicMembrane
+                                   : SkinModel::LegacyDistanceTruss);
+                }
+            });
+    connect(pilotMass_, &QSlider::valueChanged, this, [this](int kilograms) {
+        if (view_ != nullptr) {
+            view_->setPilotMassKg(static_cast<double>(kilograms));
+        }
+    });
+    connect(launchMode_, &QComboBox::currentIndexChanged,
+            this, [this](int index) {
+                if (view_ != nullptr) {
+                    view_->setLaunchMode(
+                        index == 1 ? LaunchMode::DropFromRest
+                                   : LaunchMode::TrimmedGlide);
+                }
+            });
     connect(settleButton_, &QPushButton::clicked, this,
             [this] { toggleSettle(); });
 
@@ -3227,7 +3530,8 @@ void PlaygroundPage::ensureView()
     view_->setTopologyCallback([this](const QString &error) {
         status_->setText(
             error.isEmpty()
-                ? pendingBuildStatus_
+                ? pendingBuildStatus_ + QStringLiteral(" · ")
+                      + view_->materialReadout()
                 : QStringLiteral("Wind tunnel build failed: %1")
                       .arg(error));
         updateShapeTimer();
@@ -3262,6 +3566,14 @@ void PlaygroundPage::ensureView()
     view_->setLineTensionColoring(showLineTension_->isChecked());
     view_->setFlightLoad(flightLoad_->isChecked());
     view_->setFabricContact(fabricContact_->isChecked());
+    view_->setPilotMassKg(static_cast<double>(pilotMass_->value()));
+    view_->setLaunchMode(
+        launchMode_->currentIndex() == 1 ? LaunchMode::DropFromRest
+                                         : LaunchMode::TrimmedGlide);
+    view_->setSkinModel(
+        skinModel_->currentIndex() == 1
+            ? SkinModel::OrthotropicMembrane
+            : SkinModel::LegacyDistanceTruss);
     view_->setFreeFlight(freeFlight_->isChecked());
     view_->setFlyModeCallbacks(
         // Mirror the live brake input onto the sliders. Signals stay

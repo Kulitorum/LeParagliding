@@ -1072,6 +1072,7 @@ void PneumaticNetwork::coupledSubstep(
     const auto savedNodes = body.nodes_;
     const auto savedConstraints = body.constraints_;
     const auto savedMembranes = body.membraneElements_;
+    const auto savedDihedrals = body.dihedralConstraints_;
     const auto savedMultipliers = body.contactMultipliers_;
     const auto savedRecords = body.contactRecords_;
     const auto savedContactDiagnostics = body.contactDiagnostics_;
@@ -1274,6 +1275,7 @@ void PneumaticNetwork::coupledSubstep(
         body.nodes_ = savedNodes;
         body.constraints_ = savedConstraints;
         body.membraneElements_ = savedMembranes;
+        body.dihedralConstraints_ = savedDihedrals;
         body.contactMultipliers_ = savedMultipliers;
         body.contactRecords_ = savedRecords;
         body.contactDiagnostics_ = savedContactDiagnostics;

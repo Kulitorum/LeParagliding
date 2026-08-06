@@ -1,16 +1,18 @@
-// Unit tests for the Playground's fabric contact pass: two free-floating
-// fabric sheets driven into each other must be stopped at the contact
-// separation with the option on, pass straight through with it off, and
-// sheets DESIGNED closer than the separation (rest-pose exclusions) must
-// be left alone.
+// Deterministic, Qt-free tests for the Playground's bounded cloth contact
+// adapter. These exercise all supported feature families, topology filtering,
+// envelope refresh and honest budget diagnostics without building a whole
+// wing or registering SoftBody's exhaustive contact pipeline.
 
-#include "playground_sim.h"
+#include "playground_contact.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
 
 namespace pg = lep::playground;
+using softwing::Node;
+using softwing::Triangle;
 using softwing::Vec3;
 
 namespace {
@@ -25,149 +27,276 @@ void check(bool condition, const char *what)
     }
 }
 
-// Two 2x1-quad horizontal sheets, sheet B a gap above sheet A. No rib
-// loops, so the pressure field falls back to the uniform stamp — and the
-// controls run it at zero pressure, so the sheets are free cloth in still
-// air with no gravity (pinned mode).
-pg::SimMesh sheetsMesh(double gapMetres)
+Node node(Vec3 position, double inverseMass = 1.0)
 {
-    pg::SimMesh mesh;
-    for (const double z : {0.0, gapMetres}) {
-        for (int row = 0; row < 2; ++row) {
-            for (int column = 0; column < 3; ++column) {
-                mesh.nodes.push_back({0.4 * column, 0.4 * row, z});
-            }
-        }
+    Node result;
+    result.position = position;
+    result.previousPosition = position;
+    result.inverseMass = inverseMass;
+    return result;
+}
+
+struct ContactFixture
+{
+    std::vector<Node> nodes;
+    std::vector<Triangle> triangles;
+    std::vector<pg::PlaygroundContactLine> lines;
+    pg::PlaygroundContactScratch scratch;
+
+    void prepare()
+    {
+        pg::preparePlaygroundContact(scratch, nodes, triangles,
+                                     triangles.size(), lines);
     }
-    const auto node = [](int sheet, int row, int column) {
-        return sheet * 6 + row * 3 + column;
+
+    void detect(double seconds = 1.0 / 60.0)
+    {
+        pg::beginPlaygroundContactFrame(scratch, nodes, triangles,
+                                        triangles.size(), seconds);
+    }
+
+    void project()
+    {
+        pg::projectPlaygroundContact(scratch, nodes, triangles);
+    }
+};
+
+ContactFixture parallelTriangles(double gap)
+{
+    ContactFixture fixture;
+    fixture.nodes = {
+        node({-0.4, -0.3, 0.0}, 0.0),
+        node({0.4, -0.3, 0.0}, 0.0),
+        node({0.0, 0.4, 0.0}, 0.0),
+        node({-0.3, -0.2, gap}),
+        node({0.3, -0.2, gap}),
+        node({0.0, 0.3, gap}),
     };
-    for (int sheet = 0; sheet < 2; ++sheet) {
-        for (int column = 0; column < 2; ++column) {
-            mesh.quads.push_back({node(sheet, 0, column),
-                                  node(sheet, 0, column + 1),
-                                  node(sheet, 1, column + 1),
-                                  node(sheet, 1, column)});
-            mesh.quadSurfaces.push_back(pg::SimSurface::Extrados);
-        }
-    }
-    return mesh;
+    fixture.triangles = {{0, 1, 2, 0.0}, {3, 4, 5, 0.0}};
+    return fixture;
 }
 
-pg::SimControls stillAir()
+void testVertexTriangleProjectionAndVelocity()
 {
-    pg::SimControls controls;
-    controls.pressurePascal = 0.0;
-    return controls;
+    ContactFixture fixture = parallelTriangles(0.0003);
+    for (std::size_t index = 3; index < 6; ++index) {
+        fixture.nodes[index].velocity = {0.0, 0.0, -2.0};
+    }
+    fixture.prepare();
+    fixture.detect();
+    check(fixture.scratch.stats.vertexTriangleCandidates > 0,
+          "vertex-triangle candidates are generated");
+    const double before = fixture.nodes[3].position.z;
+    fixture.project();
+    check(fixture.scratch.stats.activeContacts > 0,
+          "vertex-triangle overlap becomes active");
+    check(fixture.nodes[3].position.z > before,
+          "mass-weighted projection moves the free sheet out");
+    check(fixture.scratch.stats.worstPenetrationAfter
+              < fixture.scratch.stats.worstPenetrationBefore,
+          "projection improves the measured worst penetration");
+    check(fixture.nodes[3].velocity.z > -1.0e-10,
+          "normal closing velocity is removed");
 }
 
-// Mean height of one sheet's nodes.
-double sheetHeight(const pg::SimBody &sim, int sheet)
+void testUnrelatedRestCloseSheetsStillCollide()
 {
-    double total = 0.0;
-    for (int index = 0; index < 6; ++index) {
-        total += sim.body->nodes()[static_cast<std::size_t>(sheet * 6
-                                                            + index)]
-                     .position.z;
-    }
-    return total / 6.0;
+    ContactFixture fixture = parallelTriangles(0.0005);
+    fixture.prepare();
+    fixture.detect(0.0);
+    check(fixture.scratch.stats.vertexTriangleCandidates > 0,
+          "unrelated sheets close in the rest pose are not excluded");
+    fixture.project();
+    check(fixture.scratch.stats.activeContacts > 0,
+          "unrelated rest-close sheets are projected apart");
 }
 
-void driveSheetDown(pg::SimBody &sim, double metresPerSecond)
+void testTopologyExclusions()
 {
-    for (int index = 6; index < 12; ++index) {
-        sim.body->nodes()[static_cast<std::size_t>(index)].velocity = {
-            0.0, 0.0, -metresPerSecond};
-    }
+    ContactFixture fixture;
+    fixture.nodes = {node({0.0, 0.0, 0.0}), node({1.0, 0.0, 0.0}),
+                     node({0.0, 1.0, 0.0}), node({1.0, 1.0, 0.0})};
+    fixture.triangles = {{0, 1, 2, 0.0}, {1, 3, 2, 0.0}};
+    fixture.prepare();
+    fixture.detect(0.0);
+    check(fixture.scratch.candidates.empty(),
+          "incident and one-ring skin features are excluded");
+    check(fixture.scratch.stats.topologyExcludedPairs > 0,
+          "topology exclusions are diagnosed");
+
+    ContactFixture attached = parallelTriangles(0.01);
+    attached.lines.push_back({0, 6});
+    attached.nodes.push_back(node({0.0, 0.0, -0.2}));
+    attached.prepare();
+    attached.detect(0.0);
+    const bool attachedPair = std::any_of(
+        attached.scratch.candidates.begin(),
+        attached.scratch.candidates.end(), [](const auto &candidate) {
+            return candidate.feature
+                       == pg::PlaygroundContactFeature::SegmentTriangle
+                   && candidate.first == 0 && candidate.second == 0;
+        });
+    check(!attachedPair,
+          "authored suspension attachment adjacency is excluded");
 }
 
-void testCrossingBlocked()
+void testEdgeOnlyCrossing()
 {
-    pg::SimControls controls = stillAir();
-    controls.fabricContact = true;
-    pg::SimBody sim = pg::buildSimBody(sheetsMesh(0.05), {}, controls);
-    check(sim.contact.prepared, "the build prepared the contact scratch");
-    check(sim.contact.restExclusions.empty(),
-          "a 5 cm gap is outside the rest-exclusion capture");
-    driveSheetDown(sim, 1.0);
-    for (int frame = 0; frame < 60; ++frame) {
-        pg::stepSimulation(sim, controls);
-    }
-    const double gap = sheetHeight(sim, 1) - sheetHeight(sim, 0);
-    check(gap > 0.0005,
-          "contact stops the falling sheet before it crosses");
-    check(gap < 0.02,
-          "the falling sheet actually reached the other one");
+    ContactFixture fixture;
+    // The long edges cross near the origin while all four endpoints stay far
+    // outside the opposing triangle, so edge-edge is the relevant feature.
+    fixture.nodes = {
+        node({-1.0, 0.0, 0.0}), node({1.0, 0.0, 0.0}),
+        node({-1.0, -0.8, 0.0}),
+        node({0.0, -1.0, 0.0002}), node({0.0, 1.0, 0.0002}),
+        node({0.8, -1.0, 0.0002}),
+    };
+    fixture.triangles = {{0, 1, 2, 0.0}, {3, 4, 5, 0.0}};
+    fixture.prepare();
+    fixture.detect(0.0);
+    check(fixture.scratch.stats.edgeEdgeCandidates > 0,
+          "edge-only crossing produces an edge-edge candidate");
+    fixture.project();
+    check(fixture.scratch.stats.activeContacts > 0,
+          "edge-edge contact projects the crossing");
 }
 
-void testCrossingWithoutContact()
+void testSuspensionSegmentTriangle()
 {
-    pg::SimControls controls = stillAir();
-    controls.fabricContact = false;
-    pg::SimBody sim = pg::buildSimBody(sheetsMesh(0.05), {}, controls);
-    driveSheetDown(sim, 1.0);
-    for (int frame = 0; frame < 60; ++frame) {
-        pg::stepSimulation(sim, controls);
-    }
-    check(sheetHeight(sim, 1) < sheetHeight(sim, 0),
-          "without contact the sheets pass straight through");
+    ContactFixture fixture;
+    fixture.nodes = {
+        node({-0.5, -0.5, 0.0}, 0.0),
+        node({0.5, -0.5, 0.0}, 0.0),
+        node({0.0, 0.5, 0.0}, 0.0),
+        node({0.0, 0.0, -0.1}), node({0.0, 0.0, 0.1}),
+    };
+    fixture.triangles = {{0, 1, 2, 0.0}};
+    fixture.lines = {{3, 4}};
+    fixture.prepare();
+    fixture.detect(0.0);
+    check(fixture.scratch.stats.segmentTriangleCandidates == 1,
+          "authored suspension segment through fabric is detected");
+    fixture.project();
+    check(fixture.scratch.stats.activeContacts == 1,
+          "segment-triangle contact is projected");
 }
 
-void testOverlapRecovery()
+void testHighSpeedCaptureAndEscapeRefresh()
 {
-    // Sheets built 5 cm apart (so no rest exclusions), then sheet B is
-    // teleported to 0.5 mm above sheet A with every velocity zeroed. At
-    // zero approach velocity the inelastic velocity fix is a no-op, so
-    // only the PBD position projection can restore the separation — this
-    // is the test that fails if the position corrections are broken
-    // while the velocity fix still masks it in testCrossingBlocked.
-    pg::SimControls controls = stillAir();
-    controls.fabricContact = true;
-    pg::SimBody sim = pg::buildSimBody(sheetsMesh(0.05), {}, controls);
-    check(sim.contact.restExclusions.empty(),
-          "sheets built 5 cm apart produce no rest exclusions");
-    const double drop = 0.05 - 0.0005;
-    for (int index = 6; index < 12; ++index) {
-        auto &node = sim.body->nodes()[static_cast<std::size_t>(index)];
-        node.position.z -= drop;
-        node.velocity = {0.0, 0.0, 0.0};
+    ContactFixture fixture = parallelTriangles(0.05);
+    for (std::size_t index = 3; index < 6; ++index) {
+        fixture.nodes[index].velocity = {0.0, 0.0, -10.0};
     }
-    for (int frame = 0; frame < 10; ++frame) {
-        pg::stepSimulation(sim, controls);
+    fixture.prepare();
+    fixture.detect();
+    check(fixture.scratch.stats.vertexTriangleCandidates > 0,
+          "swept envelope captures a high-speed approach");
+    for (std::size_t index = 3; index < 6; ++index) {
+        fixture.nodes[index].position.z = -0.01;
     }
-    const double gap = sheetHeight(sim, 1) - sheetHeight(sim, 0);
-    check(gap > 0.0009,
-          "position projection recovers overlapped fabric to separation");
-    check(gap < 0.002,
-          "overlap recovery does not overshoot the separation");
+    fixture.project();
+    check(fixture.nodes[3].position.z > 0.0009,
+          "retained approach side returns a high-speed crossing");
+
+    ContactFixture escaped = parallelTriangles(0.10);
+    escaped.prepare();
+    escaped.detect();
+    check(escaped.scratch.candidates.empty(),
+          "stationary distant sheets start with no candidates");
+    for (std::size_t index = 3; index < 6; ++index) {
+        escaped.nodes[index].position.z = 0.0004;
+    }
+    check(pg::playgroundContactEnvelopeEscaped(escaped.scratch,
+                                                escaped.nodes),
+          "unexpected substep motion escapes the cached envelope");
+    pg::refreshPlaygroundContact(escaped.scratch, escaped.nodes,
+                                 escaped.triangles,
+                                 escaped.triangles.size(), 0.0);
+    check(escaped.scratch.stats.substepRefreshes == 1,
+          "escape triggers a diagnosed substep refresh");
+    check(!escaped.scratch.candidates.empty(),
+          "refresh captures the newly close features");
 }
 
-void testRestAdjacencyExcluded()
+void testBudgetDiagnostics()
 {
-    // Sheets designed 0.5 mm apart — inside the contact separation. The
-    // rest-pose exclusion set must keep contact from pushing designed
-    // geometry apart.
-    pg::SimControls controls = stillAir();
-    controls.fabricContact = true;
-    pg::SimBody sim = pg::buildSimBody(sheetsMesh(0.0005), {}, controls);
-    check(!sim.contact.restExclusions.empty(),
-          "designed-adjacent sheets produce rest exclusions");
-    for (int frame = 0; frame < 60; ++frame) {
-        pg::stepSimulation(sim, controls);
+    ContactFixture fixture;
+    for (int triangle = 0; triangle < 8; ++triangle) {
+        const double offset = 1.0e-5 * triangle;
+        const std::size_t first = fixture.nodes.size();
+        fixture.nodes.push_back(node({-0.3, -0.3, offset}));
+        fixture.nodes.push_back(node({0.3, -0.3, offset}));
+        fixture.nodes.push_back(node({0.0, 0.3, offset}));
+        fixture.triangles.push_back(
+            {first, first + 1, first + 2, 0.0});
     }
-    const double gap = sheetHeight(sim, 1) - sheetHeight(sim, 0);
-    check(std::abs(gap - 0.0005) < 0.00035,
-          "designed-adjacent fabric is not pushed apart");
+    fixture.scratch.limits.maxBroadPhaseTestsPerFeature = 2;
+    fixture.prepare();
+    fixture.detect(0.0);
+    check(!fixture.scratch.stats.coverageComplete,
+          "a broad-phase budget hit honestly marks coverage incomplete");
+    check(fixture.scratch.stats.broadPhaseBudgetHits > 0,
+          "broad-phase overflow is diagnosed");
+
+    ContactFixture candidates = parallelTriangles(0.0001);
+    candidates.scratch.limits.maxCandidatesPerFeature = 1;
+    candidates.prepare();
+    candidates.detect(0.0);
+    check(!candidates.scratch.stats.coverageComplete,
+          "a candidate cap honestly marks coverage incomplete");
+    check(candidates.scratch.stats.candidateBudgetHits > 0,
+          "candidate overflow is diagnosed");
+}
+
+void testRepeatDeterminism()
+{
+    ContactFixture first = parallelTriangles(0.0004);
+    ContactFixture second = parallelTriangles(0.0004);
+    first.prepare();
+    second.prepare();
+    first.detect(0.0);
+    second.detect(0.0);
+    check(first.scratch.candidates.size()
+              == second.scratch.candidates.size(),
+          "repeat candidate counts are deterministic");
+    bool same = first.scratch.candidates.size()
+                == second.scratch.candidates.size();
+    for (std::size_t index = 0;
+         same && index < first.scratch.candidates.size(); ++index) {
+        const auto &a = first.scratch.candidates[index];
+        const auto &b = second.scratch.candidates[index];
+        same = a.feature == b.feature && a.first == b.first
+               && a.second == b.second && a.normal.x == b.normal.x
+               && a.normal.y == b.normal.y && a.normal.z == b.normal.z;
+    }
+    check(same, "repeat candidate keys and sides are bit-identical");
+    first.project();
+    second.project();
+    bool positionsSame = first.nodes.size() == second.nodes.size();
+    for (std::size_t index = 0;
+         positionsSame && index < first.nodes.size(); ++index) {
+        positionsSame = first.nodes[index].position.x
+                            == second.nodes[index].position.x
+                        && first.nodes[index].position.y
+                               == second.nodes[index].position.y
+                        && first.nodes[index].position.z
+                               == second.nodes[index].position.z;
+    }
+    check(positionsSame, "repeat projected positions are bit-identical");
 }
 
 }  // namespace
 
 int main()
 {
-    testCrossingBlocked();
-    testCrossingWithoutContact();
-    testOverlapRecovery();
-    testRestAdjacencyExcluded();
+    testVertexTriangleProjectionAndVelocity();
+    testUnrelatedRestCloseSheetsStillCollide();
+    testTopologyExclusions();
+    testEdgeOnlyCrossing();
+    testSuspensionSegmentTriangle();
+    testHighSpeedCaptureAndEscapeRefresh();
+    testBudgetDiagnostics();
+    testRepeatDeterminism();
     if (failures != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

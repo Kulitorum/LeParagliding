@@ -3,6 +3,8 @@
 
 #include <softwing/soft_body.h>
 
+#include "playground_contact.h"
+
 #include <QByteArray>
 #include <QString>
 
@@ -29,9 +31,41 @@ inline constexpr double fabricArealDensity = 0.045;   // kg/m^2
 // creeping past its own fabric.
 inline constexpr double skinCompliance = 1.0e-8;      // XPBD, m/N
 inline constexpr double lineCompliance = 1.0e-9;
-// Heavy enough that ~1 kN of lift through the cascade keeps a workable
-// mass ratio for the solver (5 g junctions let the wing creep skyward).
-inline constexpr double lineJunctionMass = 0.05;      // kg
+// Prototype woven-fabric membrane controls. These are plausible engineering
+// scales, not a fit to a named cloth and not a certified material model.
+inline constexpr double prototypeWarpStiffness = 8000.0;       // N/m
+inline constexpr double prototypeWeftStiffness = 5000.0;       // N/m
+inline constexpr double prototypeCouplingStiffness = 1000.0;   // N/m
+inline constexpr double prototypeShearStiffness = 1500.0;      // N/m
+// Constraint-space membrane damping is intentionally off for the mixed
+// Playground network. The generic nonzero path is useful for isolated
+// coupons, but at high substep ratios it is not yet stable when membrane,
+// rib and suspension constraints repeatedly move the same nodes.
+inline constexpr double prototypeMembraneDampingSeconds = 0.0;
+inline constexpr double prototypeCompressionStiffnessRatio = 0.05;
+inline constexpr double prototypeBendCompliance = 5.0e-4;
+// Default authored suspension-line mass. The simulation mesh does not yet
+// carry each line material's measured g/m, so P1 uses one explicit physical
+// fallback and lumps half of every unique authored segment onto each end.
+// 1 g/m is representative of a mixed paraglider cascade and, unlike the old
+// 50 g per graph vertex, scales with the actual amount of line.
+inline constexpr double lineLinearDensityKgPerMetre = 0.001;
+// XPBD still needs a positive mass at a zero-length-share or synthetic node.
+// Keep that numerical mass visible and separately diagnosed; it is not
+// presented as physical line or payload mass.
+inline constexpr double lineJunctionNumericalMassKg = 1.0e-4;
+inline constexpr double controlNodeNumericalMassKg = 1.0e-4;
+// Pinned tunnel relaxation only. Gravity is disabled in that mode, so this
+// inertial conditioning cannot alter the static weight/equilibrium. It is
+// diagnosed separately and never enters a free-flight system mass.
+inline constexpr double tunnelLineJunctionRelaxationMassKg = 0.05;
+inline constexpr double defaultPilotMassKg = 90.0;
+inline constexpr double minimumPilotMassKg = 30.0;
+inline constexpr double maximumPilotMassKg = 250.0;
+// Prototype aerodynamic envelope for the exterior surface pressure. Cp=1 is
+// stagnation; the suction-side floor is deliberately explicit and bounded.
+inline constexpr double minimumExteriorPressureCoefficient = -3.0;
+inline constexpr double maximumExteriorPressureCoefficient = 1.0;
 inline constexpr double anchorBandMetres = 0.3;
 inline constexpr double gravityMetresPerSecondSquared = 9.80665;
 // How far the pilot's mass hangs below the carabiners.
@@ -86,6 +120,10 @@ inline constexpr int simulationSubsteps =
     solverQualities[defaultSolverQuality].substeps;
 inline constexpr int simulationIterations =
     solverQualities[defaultSolverQuality].iterations;
+// A suspension cascade is several unilateral-cable graph levels deep. One
+// cheap reverse+forward cable-only pair carries payload reaction through it
+// without paying for six extra full cloth iterations.
+inline constexpr int defaultFreeFlightCableSweepPairs = 3;
 inline constexpr double substepSeconds =
     simulationTimeStep / simulationSubsteps;
 inline constexpr std::size_t noConstraint =
@@ -138,6 +176,9 @@ struct SimMesh
     std::vector<std::vector<std::vector<softwing::Vec3>>> ribHoles;
     std::vector<SimStrap> straps;
     std::vector<SimLine> lines;
+    // Exact/reversed lines discarded while reading an older mesh. Distinct
+    // authored plan/brake roles at the same coordinates remain separate.
+    std::size_t duplicateLineCount = 0;
 };
 
 struct LineSegment
@@ -148,6 +189,10 @@ struct LineSegment
     std::size_t constraint = noConstraint;
     // Row plan carried over from the SimLine, 0 when unknown.
     int plan = 0;
+    // True only for a physical segment authored in the simulation mesh.
+    // Pilot harness ties and synthesized brake controls share the drawing and
+    // contact list but must not be counted across the suspension/riser cut.
+    bool suspension = true;
 };
 
 // A brake line from the pilot to the top of one brake cascade. Pulling the
@@ -169,6 +214,10 @@ struct RenderFace
     // Constraint index per side, noConstraint where the side is not
     // constrained (a rib fan's perimeter is, its rails are not).
     std::array<std::size_t, 3> edges{};
+    // Present only for skin triangles built through the orthotropic membrane
+    // path. Stress/slack metrics read this element's material strains instead
+    // of interpreting distance springs as fabric.
+    std::optional<std::size_t> membraneElement;
 };
 
 // A rib's chord, kept as node indices so it can be re-read from the live
@@ -249,40 +298,65 @@ struct SimBuildOptions
     int ribStationSplit = defaultRibStationSplit;
 };
 
-// One fabric-contact candidate: a skin node against a skin triangle or a
-// suspension-line segment, found by the once-per-frame detection pass and
-// re-projected every substep (see applyFabricContact in the .cpp).
-struct ContactCandidate
+// How a free-flight body leaves its rest pose. TrimmedGlide preserves the
+// smart common-velocity start used by the existing sandbox. DropFromRest is
+// an explicitly pre-inflated release experiment: all solver nodes start at
+// rest and gravity/aerodynamics create the transient.
+enum class LaunchMode
 {
-    std::uint32_t node = 0;
-    // Skin triangle index, or an index into SimBody::lineSegments.
-    std::uint32_t item = 0;
-    bool line = false;
-    // Which side of the triangle the node approached from at detection,
-    // so a fast crossing inside one frame cannot flip the push direction.
-    float side = 1.0F;
+    TrimmedGlide,
+    DropFromRest,
 };
 
-// Scratch for the fabric/line contact pass: sorted cell grids rebuilt per
-// frame, the frame's candidate list, and the build-time preparations —
-// the skin's unique node set, the grid cell size, and the pairs that sit
-// inside the contact thickness in the REST pose (designed-adjacent
-// fabric, e.g. around line attachments, which contact must never fight).
-struct ContactScratch
+[[nodiscard]] const char *launchModeName(LaunchMode mode);
+
+enum class SkinModel
 {
-    std::vector<std::pair<std::uint64_t, std::uint32_t>> triangleCells;
-    std::vector<std::pair<std::uint64_t, std::uint32_t>> segmentCells;
-    std::vector<ContactCandidate> candidates;
-    std::vector<std::uint64_t> restExclusions;   // sorted pair keys
-    std::vector<std::uint32_t> skinNodes;
-    std::vector<float> itemSpeed;   // per-item scratch, m/s
-    // Capture-inflated item AABBs (xyz min, xyz max), triangles first,
-    // then segments — the cheap reject before any closest-point math.
-    std::vector<std::array<float, 6>> itemBounds;
-    std::vector<std::pair<std::uint64_t, std::uint32_t>> nodeCells;
-    std::vector<std::uint64_t> pairScratch;
-    double cellSize = 0.05;
-    bool prepared = false;
+    LegacyDistanceTruss,
+    OrthotropicMembrane,
+};
+
+[[nodiscard]] const char *skinModelName(SkinModel model);
+
+enum class PressureSolveMode
+{
+    BoundedExteriorCp,
+    LegacyIncrementClamp,
+};
+
+struct PressureSolveDiagnostics
+{
+    bool attempted = false;
+    bool valid = false;
+    bool numericalFailure = false;
+    bool legacy = false;
+    std::array<double, 3> authority{0.0, 0.0, 0.0};
+    std::array<double, 3> authorityHint{0.0, 0.0, 0.0};
+    std::array<std::size_t, 3> authorityBackoffs{0, 0, 0};
+    std::array<bool, 3> authorityProbeAccepted{false, false, false};
+    std::array<std::size_t, 3> rank{0, 0, 0};
+    std::array<double, 3> conditionEstimate{0.0, 0.0, 0.0};
+    std::size_t activeLower = 0;
+    std::size_t activeUpper = 0;
+    std::size_t variableCount = 0;
+    std::size_t projectionCalls = 0;
+    std::size_t projectionIterations = 0;
+    double solveMilliseconds = 0.0;
+    double minimumCp = 0.0;
+    double maximumCp = 0.0;
+    softwing::Vec3 requestedForce;
+    softwing::Vec3 achievedForce;
+    softwing::Vec3 forceResidual;
+    double requestedLiftNewtons = 0.0;
+    double requestedDragNewtons = 0.0;
+    double achievedLiftNewtons = 0.0;
+    double achievedDragNewtons = 0.0;
+    double requestedPitchMoment = 0.0;
+    double achievedPitchMoment = 0.0;
+    double pitchResidual = 0.0;
+    std::array<double, 2> requestedHalfDifference{0.0, 0.0};
+    std::array<double, 2> achievedHalfDifference{0.0, 0.0};
+    std::array<double, 2> halfDifferenceResidual{0.0, 0.0};
 };
 
 // A built wing: the solver body plus everything the view and the controls
@@ -291,17 +365,35 @@ struct SimBody
 {
     std::unique_ptr<softwing::SoftBody> body;
     std::size_t skinTriangleCount = 0;
+    SkinModel skinModel = SkinModel::LegacyDistanceTruss;
+    softwing::OrthotropicMembraneMaterial skinMaterial;
+    double skinBendCompliance = 0.0;
+    std::size_t skippedMembraneElements = 0;
+    std::size_t skippedDihedralHinges = 0;
     // Parallel to the skin triangles first, then the rib and strap faces.
     std::vector<RenderFace> renderFaces;
     std::vector<std::size_t> topFaces;
     std::vector<LineSegment> lineSegments;
+    // Duplicates reported by the parser plus any rejected defensively while
+    // building a SimMesh assembled directly in code.
+    std::size_t duplicateLineCount = 0;
     std::vector<BrakeLine> brakeLines;
     // The pilot, or noConstraint when the mesh carried no suspension lines
-    // to hang one from. Nothing in the body is pinned: wing and pilot both
-    // fly, and the pair is translated back to the origin after each step so
-    // the view keeps them (see recentreSystem).
+    // to hang one from. This is a dynamic translational point payload joined
+    // to the carabiners by solved bilateral XPBD constraints: it falls and
+    // pendulums, but has no body orientation/inertia or weight shift yet.
+    // Nothing in the body is pinned: wing and pilot both fly, and the pair is
+    // translated back to the origin after each step so the view keeps them.
     std::size_t pilotNode = noConstraint;
     double pilotMass = 0.0;
+    // Mass audit. Authored line mass is physical length*density; the two
+    // numerical fields are solver floors on authored junctions and generated
+    // brake-control nodes respectively. Harness ties add no mass because the
+    // pilot input already includes the harness.
+    double authoredLineMassKg = 0.0;
+    double lineJunctionFloorMassKg = 0.0;
+    double controlNodeFloorMassKg = 0.0;
+    double tunnelLineSolverBallastKg = 0.0;
     // Nodes below this index belong to the canopy (skin, rib interiors);
     // line junctions, handles and the pilot come after. The aerodynamic
     // relative wind is measured against the canopy's own mean velocity,
@@ -366,6 +458,18 @@ struct SimBody
     // fabric left unloaded, fabric pressed inward by a pressure that does
     // not exist. Empty when the mesh carried no rib chords to stamp from.
     std::vector<double> facePressureFloor;
+    // Final-Cp retrim state, parallel to the skin faces. applyPressure
+    // records the local interior pressure, dynamic pressure and physical
+    // exterior-Cp prior. The bounded solve changes only faceAppliedCp and
+    // reconstructs the final load as p_inside - q*Cp; it never clamps an
+    // already-solved pressure increment after the fact.
+    std::vector<double> faceInteriorPressure;
+    std::vector<double> faceDynamicPressure;
+    std::vector<double> facePriorExternalCp;
+    // The physically clamped legacy load-path proposal used as the bounded
+    // retrim objective prior; exposed for same-frame regression diagnostics.
+    std::vector<double> faceRetrimPreferredCp;
+    std::vector<double> faceAppliedExternalCp;
     // Which half-span each rib belongs to, fixed at build time from its
     // rest station along restSpanAxis: 0 is the low-span (negative mesh x)
     // half, which is the solver's LEFT and the side SimControls::brakeLeft
@@ -378,15 +482,18 @@ struct SimBody
     // planformArea, so two half-passes at equal coefficients impose
     // exactly what the single wing-level pass imposed.
     std::array<double, 2> halfPlanformArea{0.0, 0.0};
+    // Rest projected area attributed to each rib. This is the weighting
+    // used when section-plane incidence is averaged into a half-wing
+    // incidence; using one vote per rib would over-weight the short tips.
+    std::vector<double> ribPlanformArea;
     // Low-passed departure of each half's angle of attack from the
     // wing-level one, radians, and each half's dynamic pressure as a
-    // ratio of the wing's. Both come from the canopy's rigid-body spin,
-    // and between them they are a free-flying wing's whole roll and yaw
-    // damping: a rolling wing has one half descending into the air and
-    // the other rising out of it, a yawing one has a tip running forward
-    // and a tip running back, and until the polar was split per half
-    // nothing in the imposed force knew either. Both are 0 and 1 on a
-    // wing that is not rotating, so a symmetric case is untouched.
+    // ratio of the wing's. Rigid-body spin gives the roll/yaw-rate part;
+    // projecting sideslip into the live images of the rest rib section
+    // planes gives the arc's weathercock part. Per-rib no-beta incidence
+    // and the exact weighted common mode are removed, so these remain 0
+    // and 1 on a wing that is neither rotating nor sideslipping and cannot
+    // move the wing-level trim.
     std::array<double, 2> alphaHalfDeviationRadians{0.0, 0.0};
     std::array<double, 2> halfDynamicPressureRatio{1.0, 1.0};
     // The pull the WING has, left then right, as against the pull
@@ -423,7 +530,7 @@ struct SimBody
     std::vector<SimCell> cells;
     std::vector<double> cellPressure;
     // Fabric/line contact working set; inert until the option is on.
-    ContactScratch contact;
+    PlaygroundContactScratch contact;
     // Chord fraction of the designed hang line: the chord station the
     // carabiners sit under at rest. The imposed aerodynamic resultant
     // acts here at trim and travels aft/forward of it as the angle of
@@ -442,10 +549,6 @@ struct SimBody
     // in-flight trim, from the build-time fixed point. Used to launch the
     // system on the glide instead of at a dead stop.
     double glideAngleRadians = 0.0;
-    // Slow-averaged angle of attack: the washout reference the pitch
-    // anchor damps against. NaN until seeded.
-    double alphaSlowRadians =
-        std::numeric_limits<double>::quiet_NaN();
     // Low-passed wing-level angle of attack, the polar's actual input.
     // NaN until the first free-flight force pass seeds it.
     double alphaFilteredRadians =
@@ -457,10 +560,27 @@ struct SimBody
     // eat into both). Diagnostics only.
     softwing::Vec3 lastForceResidual;
     double lastPitchResidual = 0.0;
+    // Per-stage bounded-Cp authority verified on the preceding frame. Force
+    // starts at zero and probes upward; normally feasible pitch/differential
+    // retain their one-projection full-target fast path from frame one. Live
+    // geometry can deterministically back any stage down.
+    std::array<double, 3> pressureAuthorityHint{0.0, 1.0, 1.0};
+    std::array<std::vector<double>, 3> pressureMultiplierHint;
+    PressureSolveDiagnostics pressureSolve;
     // Filled in by each free-flight force pass, for reporting and the HUD.
     softwing::Vec3 lastAeroForce;
     double lastLift = 0.0;
     double lastDrag = 0.0;
+    // In bounded free flight only, the positive baseline finite-wing polar
+    // drag that the pressure field could not realize, spread over the skin by
+    // area along the relative wind. The target excludes the separate fabric-
+    // deformation drag heuristic. This is external tangential traction, not
+    // synthesized lift and not part of the pressure solve's achieved-force
+    // diagnostic. Its air-relative power must be non-positive.
+    softwing::Vec3 lastPolarDragTractionForce;
+    double lastPolarDragTargetNewtons = 0.0;
+    double lastPolarDragTractionNewtons = 0.0;
+    double lastPolarDragTractionPowerWatts = 0.0;
     // The fabric-drag resultant this frame, and the extra frontal area it
     // came from. Zero on a wing holding its designed shape; it is what a
     // folded canopy has that a flying one does not.
@@ -469,6 +589,16 @@ struct SimBody
     double lastGlideRatio = 0.0;
     double lastAlphaDegrees = 0.0;
     double lastAirspeed = 0.0;
+    // TrimmedGlide's unstepped rest-geometry calibration. Speed and q respond
+    // to the complete simulated system weight through the bounded field's
+    // achieved vertical wing force. DropFromRest leaves these zero.
+    double trimmedLaunchAirspeed = 0.0;
+    double trimmedLaunchDynamicPressure = 0.0;
+    double trimmedLaunchEffectiveLiftCoefficient = 0.0;
+    double trimmedLaunchHorizontalResidualNewtons = 0.0;
+    double trimmedLaunchVerticalResidualNewtons = 0.0;
+    int trimmedLaunchCalibrationIterations = 0;
+    int trimmedLaunchRelaxationFrames = 0;
     // How far the AIR has travelled past the wing since the build, in the
     // wing's own frame. Free flight re-centres the whole system on the
     // origin every frame and the tunnel never moves at all, so neither
@@ -502,6 +632,23 @@ struct SimBody
 // without touching the build.
 struct SimControls
 {
+    // Structural skin choice. Legacy preserves the calibrated bilateral
+    // distance truss. OrthotropicMembrane is an explicit prototype: one
+    // material element per valid skin triangle plus true dihedral hinges.
+    SkinModel skinModel = SkinModel::LegacyDistanceTruss;
+    double warpStiffness = prototypeWarpStiffness;
+    double weftStiffness = prototypeWeftStiffness;
+    double couplingStiffness = prototypeCouplingStiffness;
+    double shearStiffness = prototypeShearStiffness;
+    double membraneDampingSeconds = prototypeMembraneDampingSeconds;
+    double compressionStiffnessRatio =
+        prototypeCompressionStiffnessRatio;
+    double bendCompliance = prototypeBendCompliance;
+    // The bounded final-exterior-Cp projection is the production path.
+    // The old unbounded increment solve followed by pressure clamping is
+    // retained only as an explicitly selected regression oracle.
+    PressureSolveMode pressureSolveMode =
+        PressureSolveMode::BoundedExteriorCp;
     // Dynamic pressure q = ½ρV². It sets the whole load field, because in
     // this model both sides of the fabric are referred to it: the cell
     // interior is fed toward ram (stagnation) pressure — per cell through
@@ -511,6 +658,15 @@ struct SimControls
     // 0.7–2.3 mbar this way, not the 0.1 bar that gets quoted — 0.1 bar
     // would need 460 km/h.
     double pressurePascal = 80.0;
+    // Velocity of the surrounding air in world coordinates. Free flight
+    // sees only this air mass; pressurePascal remains a reference speed for
+    // load calibration and trimmed launch, not a second moving atmosphere.
+    // In the tunnel the prescribed reference flow is added to it.
+    softwing::Vec3 ambientAirVelocityWorld;
+    // Pilot plus harness/instruments. This is a build-time structural input,
+    // not a value fitted from the same polar that is meant to carry it.
+    double pilotMassKg = defaultPilotMassKg;
+    LaunchMode launchMode = LaunchMode::TrimmedGlide;
     // Angle of the airflow to the wing's rest chord, in degrees. Replaces
     // the old fake follower "lift" force: the load now comes out of the
     // pressure field, and this is what tilts that field. In free flight it
@@ -544,21 +700,17 @@ struct SimControls
     // hand on the one mechanism that re-inflates a sealed cell so its
     // effect can be seen rather than argued about.
     double crossPortGain = 1.0;
-    // Fabric self-contact plus fabric-versus-line contact, as a runtime
-    // option: folded fabric stops passing through itself and through the
-    // suspension lines, which is what lets a cravat clear. This is the
-    // Playground's own thin-cloth pass (once-per-frame detection, per-
-    // substep projection), NOT the engine's certified contact machinery —
-    // that pipeline re-enumerates every vertex-triangle and edge-edge
-    // combination serially in every constraint iteration, which is five
-    // orders of magnitude over the frame budget on a real wing, and once
-    // a pair is registered it cannot be turned off. Off skips the pass
-    // entirely and steps exactly as before.
+    // Opt-in thin-cloth contact: skin vertex/triangle, skin edge/edge and
+    // authored suspension segment/triangle. Topology/attachment exclusions,
+    // bounded broad phase and coverage diagnostics live in the Qt-free
+    // playground_contact module. Line/line and friction are unsupported.
+    // Off skips the pass entirely and steps exactly as before.
     bool fabricContact = false;
     double brakeLeft = 0.0;
     double brakeRight = 0.0;
     int substeps = simulationSubsteps;
     int constraintIterations = simulationIterations;
+    int freeFlightCableSweepPairs = defaultFreeFlightCableSweepPairs;
     // 0 keeps the core's serial sweep. See playgroundWorkerThreads().
     unsigned workerThreads = 0;
     softwing::StepPerformanceProfile *performanceProfile = nullptr;
@@ -614,7 +766,36 @@ struct WingAeroSample
     softwing::Vec3 windDirection;    // unit, pointing downstream
     softwing::Vec3 liftDirection;    // unit, normal to the wind
     softwing::Vec3 spanAxis;         // unit, live, oriented like the rest one
+    softwing::Vec3 chordDirection;   // unit, live, normal to spanAxis
 };
+
+// Central air-state contract. referenceFlowVelocity is the q-derived test/
+// launch vector. airVelocityWorld adds that vector only in the tunnel;
+// free flight sees ambientAirVelocityWorld alone. relativeAirVelocity keeps
+// the sign convention used throughout: air velocity minus surface velocity,
+// pointing downstream as seen by that surface.
+[[nodiscard]] softwing::Vec3 referenceFlowVelocity(
+    const SimBody &sim, const SimControls &controls);
+[[nodiscard]] softwing::Vec3 airVelocityWorld(
+    const SimBody &sim, const SimControls &controls);
+[[nodiscard]] softwing::Vec3 relativeAirVelocity(
+    const softwing::Vec3 &airVelocity,
+    const softwing::Vec3 &surfaceVelocity);
+
+struct HalfAeroKinematics
+{
+    bool valid = false;
+    std::array<double, 2> alphaDeviationRadians{0.0, 0.0};
+    std::array<double, 2> dynamicPressureRatio{1.0, 1.0};
+};
+
+// Raw (unfiltered) two-half kinematics. Each rest rib section plane is
+// carried into the live rigid wing frame, so spanwise sideslip meets the
+// mirrored arc at opposite incidences. The exact planform-weighted common
+// mode is removed; this helper can therefore affect only the differential
+// force path.
+[[nodiscard]] HalfAeroKinematics sampleHalfAeroKinematics(
+    const SimBody &sim, const WingAeroSample &sample);
 [[nodiscard]] WingAeroSample sampleWingAero(const SimBody &sim,
                                             const SimControls &controls);
 
@@ -622,20 +803,21 @@ struct WingAeroSample
 // lifting body recovers full leading-edge suction and no viscous loss —
 // d'Alembert's paradox — so its resultant is lift-poor and thrust-rich, and
 // no suction tuning fixes it (lift and spurious thrust scale together). So
-// the pressure field is not asked for the system force at all: its net
-// resultant is cancelled and a classical finite-wing polar (C_L(α) with
-// stall roll-off, C_D0 + C_L²/(π·AR·e)) is imposed in its place, spread
-// over the skin by area, plus bluff-body pilot drag on the pilot node. The
-// pressure field keeps the job it is good at — shaping the fabric — and
-// the polar sets the trim and the glide. Clears the body's external forces
-// and replaces them, so it owns that channel; call it once per frame,
-// immediately before stepping.
+// a classical finite-wing polar (C_L(α) with stall roll-off,
+// C_D0 + C_L²/(π·AR·e)) supplies the requested system force. The bounded
+// final-Cp solve introduces as much of that target as its physical/trust
+// authority permits and reports the achieved force and residual; it does not
+// promise that the pressure resultant was fully replaced. Bluff-body pilot
+// drag acts on the pilot node. Clears the body's external forces and replaces
+// them, so it owns that channel; call it once per frame, immediately before
+// stepping.
 void applyAerodynamicForces(SimBody &sim, const SimControls &controls);
 
 // Lift and drag resolved along the airflow, and the glide ratio they imply.
-// In free flight these are the imposed polar's numbers (recorded by
-// applyAerodynamicForces); pinned, they are the raw pressure resultant,
-// which carries no drag model and no glide ratio worth reading.
+// With the production bounded solve these are the actually achieved pressure
+// force plus pilot drag; the explicit legacy mode retains its historical
+// requested-polar readout. With neither flight mode enabled, they are the raw
+// pressure resultant, which carries no drag model and no useful glide ratio.
 struct AeroSummary
 {
     softwing::Vec3 force;   // pressure + drag, newtons

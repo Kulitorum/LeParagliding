@@ -384,6 +384,34 @@ struct QuantizedSegmentHash
     }
 };
 
+// A coincident segment may intentionally carry a different authored row or
+// brake role.  Geometry alone is therefore not enough to identify a duplicate
+// in the Playground handoff: keep those semantic alternatives, while folding
+// repeated captures (including reversed endpoints) of the same physical line.
+struct QuantizedSemanticSegment
+{
+    QuantizedSegment geometry;
+    int planIndex = 0;
+    bool brake = false;
+
+    bool operator==(const QuantizedSemanticSegment &) const = default;
+};
+
+struct QuantizedSemanticSegmentHash
+{
+    std::size_t operator()(
+        const QuantizedSemanticSegment &segment) const noexcept
+    {
+        QuantizedSegmentHash hash;
+        std::size_t result = hash(segment.geometry);
+        result ^= std::hash<int>{}(segment.planIndex) + 0x9e3779b9U
+                  + (result << 6U) + (result >> 2U);
+        result ^= std::hash<bool>{}(segment.brake) + 0x9e3779b9U
+                  + (result << 6U) + (result >> 2U);
+        return result;
+    }
+};
+
 QuantizedPoint quantize(const gp_Pnt &point)
 {
     constexpr double scale = 1.0 / pointToleranceMillimetres;
@@ -3790,25 +3818,30 @@ public:
 
         json << "\n],\n\"lines\": [";
         bool firstLine = true;
+        std::unordered_set<QuantizedSemanticSegment,
+                           QuantizedSemanticSegmentHash> emittedLines;
         for (const CapturedLine &line : capturedLines_) {
-            const bool onCentre =
-                std::abs(line.start.X()) < 0.05
-                && std::abs(line.end.X()) < 0.05;
-            for (const bool mirror : {false, true}) {
-                if (mirror && onCentre) {
-                    continue;
-                }
-                const double sign = mirror ? -1.0 : 1.0;
-                json << (firstLine ? "\n" : ",\n")
-                     << "{\"a\":[" << sign * line.start.X() << ','
-                     << line.start.Y() << ',' << line.start.Z()
-                     << "],\"b\":[" << sign * line.end.X() << ','
-                     << line.end.Y() << ',' << line.end.Z()
-                     << "],\"label\":\"" << escaped(line.label)
-                     << "\",\"plan\":" << line.planIndex
-                     << ",\"brake\":" << (line.brake ? 1 : 0) << '}';
-                firstLine = false;
+            const QuantizedSemanticSegment key{
+                quantizeSegment(line.start, line.end),
+                line.planIndex,
+                line.brake,
+            };
+            if (!emittedLines.insert(key).second) {
+                continue;
             }
+            // The legacy drawing pass has already visited both sides of the
+            // full wing. Mirroring here used to emit every physical segment
+            // twice. Preserve first-seen order and metadata from that full
+            // captured stream instead.
+            json << (firstLine ? "\n" : ",\n")
+                 << "{\"a\":[" << line.start.X() << ','
+                 << line.start.Y() << ',' << line.start.Z()
+                 << "],\"b\":[" << line.end.X() << ','
+                 << line.end.Y() << ',' << line.end.Z()
+                 << "],\"label\":\"" << escaped(line.label)
+                 << "\",\"plan\":" << line.planIndex
+                 << ",\"brake\":" << (line.brake ? 1 : 0) << '}';
+            firstLine = false;
         }
         json << "\n]\n}\n";
 

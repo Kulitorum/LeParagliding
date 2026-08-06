@@ -144,6 +144,31 @@ SymmetricMatrix3 OrthotropicMembraneMaterial::complianceMatrix() const {
     return checkedInverse(stiffnessMatrix());
 }
 
+SymmetricMatrix3 effectiveMembraneStiffness(
+    const OrthotropicMembraneMaterial& material,
+    const Vec3& greenStrain) {
+    const SymmetricMatrix3 stiffness = material.stiffnessMatrix();
+    // This branch is deliberately exact. Existing generic membrane users
+    // retain both the same matrix and the same downstream arithmetic.
+    if (material.compressionStiffnessRatio == 1.0) {
+        return stiffness;
+    }
+
+    const double retained = std::sqrt(material.compressionStiffnessRatio);
+    const double warpScale = greenStrain.x < 0.0 ? retained : 1.0;
+    const double weftScale = greenStrain.y < 0.0 ? retained : 1.0;
+    // Engineering shear belongs to both material directions. Its D entry is
+    // the geometric mean of their normal entries: one compressed direction
+    // softens shear partially, both soften it by the full retained factor.
+    const double shearScale = std::sqrt(warpScale * weftScale);
+    return {stiffness.xx * warpScale * warpScale,
+            stiffness.yy * weftScale * weftScale,
+            stiffness.zz * shearScale * shearScale,
+            stiffness.xy * warpScale * weftScale,
+            stiffness.xz * warpScale * shearScale,
+            stiffness.yz * weftScale * shearScale};
+}
+
 void validateOrthotropicMembraneMaterial(
     const OrthotropicMembraneMaterial& material) {
     const double values[]{material.warpStiffness,
@@ -152,7 +177,8 @@ void validateOrthotropicMembraneMaterial(
                           material.shearStiffness,
                           material.warpPreTension,
                           material.weftPreTension,
-                          material.dampingTime};
+                          material.dampingTime,
+                          material.compressionStiffnessRatio};
     for (const double value : values) {
         if (!std::isfinite(value)) {
             throw std::invalid_argument("Membrane material values must be finite");
@@ -167,6 +193,8 @@ void validateOrthotropicMembraneMaterial(
         material.warpPreTension < 0.0 || material.warpPreTension >= 0.25 ||
         material.weftPreTension < 0.0 || material.weftPreTension >= 0.25 ||
         material.dampingTime < 0.0 ||
+        !(material.compressionStiffnessRatio > 0.0) ||
+        material.compressionStiffnessRatio > 1.0 ||
         !isPositiveDefinite(material.stiffnessMatrix())) {
         throw std::invalid_argument("Invalid orthotropic membrane material");
     }

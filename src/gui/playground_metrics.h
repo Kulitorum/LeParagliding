@@ -144,8 +144,8 @@ struct RowLoad
 {
     QChar row;               // 'A'..'F'; brake cascade reports as 'F'
     bool brake = false;
-    double leftNewtons = 0.0;   // mesh -x side
-    double rightNewtons = 0.0;  // mesh +x side
+    double leftNewtons = 0.0;   // vector resultant, mesh -x side
+    double rightNewtons = 0.0;  // vector resultant, mesh +x side
     int segments = 0;           // riser-level segments in this row
     int slackSegments = 0;
 };
@@ -176,16 +176,22 @@ struct ShapeReport
     double worstTwistDegrees = 0.0;
     std::size_t worstTwistRib = 0;
 
-    // Sum of riser-level line tensions, and how many riser segments hang
-    // slack.
+    // Magnitude of the vector reaction through the authored riser cut, and
+    // how many physical riser segments at that cut hang slack.
     double lineLoadNewtons = 0.0;
     int slackRiserSegments = 0;
 
-    // The imposed polar's numbers when the flight-load pass ran (copied
-    // from SimBody::last*); zero otherwise.
+    // The selected flight-load path's reported numbers (copied from
+    // SimBody::last*): achieved force for bounded production, historical
+    // requested-polar values for the explicit legacy oracle; zero otherwise.
     double liftNewtons = 0.0;
     double dragNewtons = 0.0;
     double glideRatio = 0.0;
+    // Bounded-Cp authority/rank/bounds and physical residuals from the
+    // same force pass as the shape sample. Kept structured rather than
+    // folded into flags: saturation is an honest model limit, not a shape
+    // defect, while numericalFailure is a solver fault.
+    PressureSolveDiagnostics pressureSolve;
 
     std::vector<RibShape> ribs;
     std::vector<RowLoad> rows;
@@ -268,17 +274,25 @@ struct KinkReport
 [[nodiscard]] KinkReport sharpestKink(const SimBody &sim);
 
 // What the lines are carrying. In flight the risers hold the pilot up, so
-// riserNewtons sits at his weight; far below it means the system is
+// riserNewtons sits near his payload weight; far below it means the system is
 // falling faster than the canopy can hold it and nothing is pulling the
 // wing back into shape.
 struct LineLoadReport
 {
+    softwing::Vec3 riserForce;
     double riserNewtons = 0.0;
     std::size_t slackSegments = 0;
     std::size_t totalSegments = 0;
 };
 [[nodiscard]] LineLoadReport lineLoads(const SimBody &sim,
                                        const SimControls &controls);
+
+// Sum of the masses represented by dynamic solver nodes. In free flight this
+// is the complete simulated system (fabric, rib interiors, line junctions,
+// controls and pilot), unlike planform-area estimates used by older bench
+// output. Fixed tunnel anchors intentionally have no recoverable mass in the
+// SoftBody node contract and are excluded.
+[[nodiscard]] double simulatedMassKilograms(const SimBody &sim);
 
 // Step until the measurement converges (quiescent, or stationary in
 // agitation and resultant) or maxSeconds of simulated time has passed,

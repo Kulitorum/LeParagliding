@@ -100,6 +100,25 @@ struct DistanceConstraint {
     ConstraintKind kind = ConstraintKind::Distance;
 };
 
+// Four-node discrete-shell hinge. a-b is the shared edge; c belongs to the
+// oriented face (a,b,c), d to (b,a,d). The signed angle is zero when those
+// face normals agree. It resists fold without adding an in-plane diagonal.
+struct DihedralBendingConstraint {
+    std::size_t a = 0;
+    std::size_t b = 0;
+    std::size_t c = 0;
+    std::size_t d = 0;
+    double restAngleRadians = 0.0;
+    double compliance = 0.0;
+    double accumulatedLambda = 0.0;
+};
+
+struct DihedralBendingDiagnostics {
+    double angleRadians = 0.0;
+    std::array<Vec3, 4> angleGradient{};
+    bool valid = false;
+};
+
 // Optional wall-clock instrumentation for locating runtime cost. This is a
 // caller-owned observation sink: it is never serialized, hashed, consulted by
 // physics, or populated unless StepSettings::performanceProfile is non-null.
@@ -119,7 +138,9 @@ struct StepPerformanceProfile {
     std::uint64_t softBodyTransactionSnapshotNanoseconds = 0;
     std::uint64_t predictionNanoseconds = 0;
     std::uint64_t distanceConstraintNanoseconds = 0;
+    std::uint64_t cableConstraintNanoseconds = 0;
     std::uint64_t membraneConstraintNanoseconds = 0;
+    std::uint64_t bendingConstraintNanoseconds = 0;
     std::uint64_t suspensionConstraintNanoseconds = 0;
     std::uint64_t contactConstraintNanoseconds = 0;
     std::uint64_t contactCertificationNanoseconds = 0;
@@ -130,7 +151,9 @@ struct StepPerformanceProfile {
     std::uint64_t structuralSubsteps = 0;
     std::uint64_t constraintIterations = 0;
     std::uint64_t distanceConstraintVisits = 0;
+    std::uint64_t cableConstraintVisits = 0;
     std::uint64_t membraneConstraintVisits = 0;
+    std::uint64_t bendingConstraintVisits = 0;
     std::uint64_t suspensionConstraintVisits = 0;
     std::uint64_t contactConstraintVisits = 0;
 
@@ -158,6 +181,12 @@ struct StepSettings {
     double timeStep = 1.0 / 120.0;
     int substeps = 2;
     int constraintIterations = 12;
+    // Extra serial reverse+forward passes over unilateral cable constraints,
+    // distributed before the general structural sweeps. A deep suspension
+    // cascade otherwise needs one whole cloth iteration per graph level before
+    // a payload reaction reaches the canopy. Zero preserves the historical
+    // solver byte-for-byte.
+    int cableConstraintSweepPairs = 0;
     Vec3 gravity{0.0, 0.0, -9.80665};
     double velocityDampingPerSecond = 0.25;
     // What the damping decays node velocity toward. Zero — the default, and
@@ -237,6 +266,13 @@ public:
                                    std::size_t b,
                                    double maximumLength,
                                    double compliance = 0.0);
+    std::size_t addDihedralBendingConstraint(
+        std::size_t a,
+        std::size_t b,
+        std::size_t c,
+        std::size_t d,
+        double restAngleRadians,
+        double compliance = 0.0);
 
     [[nodiscard]] SurfaceGroup surfaceGroup(std::size_t firstTriangle,
                                             std::size_t triangleCount) const;
@@ -250,6 +286,8 @@ public:
     [[nodiscard]] MembraneGroupDiagnostics membraneDiagnostics(
         const MembraneGroup& group,
         const Vec3& momentOrigin = {}) const;
+    [[nodiscard]] DihedralBendingDiagnostics dihedralDiagnostics(
+        std::size_t constraintIndex) const;
 
     [[nodiscard]] ContactSurfaceHandle addContactSurface(
         const SurfaceGroup& surface,
@@ -368,6 +406,10 @@ public:
     }
     [[nodiscard]] const std::vector<MembraneElement>& membraneElements() const {
         return membraneElements_;
+    }
+    [[nodiscard]] const std::vector<DihedralBendingConstraint>&
+    dihedralConstraints() const {
+        return dihedralConstraints_;
     }
     // Builds the colouring if it is not current, so it reports what a
     // parallel step would actually run.
@@ -496,6 +538,8 @@ private:
     void solveMembraneElement(MembraneElement& element, double dt);
     void updateMembraneSolverDiagnostics(MembraneElement& element,
                                          double dt);
+    void solveDihedralConstraint(DihedralBendingConstraint& constraint,
+                                 double inverseTimeStepSquared);
 
     // The same colouring idea applied to the distance/cable constraints.
     // Constraints sharing a colour share no node, so a colour is one
@@ -589,6 +633,7 @@ private:
     std::vector<Triangle> triangles_;
     std::vector<DistanceConstraint> constraints_;
     std::vector<MembraneElement> membraneElements_;
+    std::vector<DihedralBendingConstraint> dihedralConstraints_;
     std::vector<RegisteredContactSurface> contactSurfaces_;
     std::vector<RegisteredContactLine> contactLines_;
     std::vector<RegisteredContactPair> contactPairs_;

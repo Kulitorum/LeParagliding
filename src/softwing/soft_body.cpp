@@ -201,7 +201,7 @@ MembraneEvaluation evaluateMembraneElement(
 
     Vec3 resultant;
     if (detail == MembraneEvaluationDetail::Full) {
-        resultant = element.material.stiffnessMatrix() * strain;
+        resultant = effectiveMembraneStiffness(element.material, strain) * strain;
         evaluation.diagnostics.constitutiveResultant = resultant;
         evaluation.diagnostics.elasticEnergy =
             0.5 * element.referenceArea * dot(strain, resultant);
@@ -456,6 +456,27 @@ std::size_t SoftBody::addCableConstraint(std::size_t a,
     return constraints_.size() - 1;
 }
 
+std::size_t SoftBody::addDihedralBendingConstraint(
+    std::size_t a,
+    std::size_t b,
+    std::size_t c,
+    std::size_t d,
+    double restAngleRadians,
+    double compliance) {
+    requireNodeIndex(a, nodes_.size());
+    requireNodeIndex(b, nodes_.size());
+    requireNodeIndex(c, nodes_.size());
+    requireNodeIndex(d, nodes_.size());
+    if (a == b || a == c || a == d || b == c || b == d || c == d ||
+        !std::isfinite(restAngleRadians) || !std::isfinite(compliance) ||
+        compliance < 0.0) {
+        throw std::invalid_argument("Invalid dihedral bending constraint");
+    }
+    dihedralConstraints_.push_back(
+        {a, b, c, d, restAngleRadians, compliance, 0.0});
+    return dihedralConstraints_.size() - 1;
+}
+
 SurfaceGroup SoftBody::surfaceGroup(std::size_t firstTriangle,
                                     std::size_t triangleCount) const {
     if (triangleCount == 0) {
@@ -628,6 +649,7 @@ void SoftBody::step(const StepSettings& settings) {
     if (!(settings.timeStep > 0.0) || !std::isfinite(settings.timeStep) ||
         settings.substeps <= 0 ||
         settings.constraintIterations < 0 ||
+        settings.cableConstraintSweepPairs < 0 ||
         (!contactPairs_.empty() && settings.constraintIterations == 0) ||
         settings.velocityDampingPerSecond < 0.0 ||
         !std::isfinite(settings.velocityDampingPerSecond) ||
@@ -668,6 +690,7 @@ void SoftBody::stepCoupled(const StepSettings& settings,
     suspension.requireOwner(*this);
     if (!(settings.timeStep > 0.0) || !std::isfinite(settings.timeStep) ||
         settings.substeps <= 0 || settings.constraintIterations < 0 ||
+        settings.cableConstraintSweepPairs < 0 ||
         settings.constraintIterations == 0 ||
         settings.velocityDampingPerSecond < 0.0 ||
         !std::isfinite(settings.velocityDampingPerSecond) ||
@@ -730,6 +753,8 @@ void SoftBody::integrateSubstep(double dt,
     const std::vector<Node> savedNodes = nodes_;
     const std::vector<DistanceConstraint> savedConstraints = constraints_;
     const std::vector<MembraneElement> savedMembranes = membraneElements_;
+    const std::vector<DihedralBendingConstraint> savedDihedrals =
+        dihedralConstraints_;
     const auto savedMultipliers = contactMultipliers_;
     const auto savedRecords = contactRecords_;
     const ContactDiagnostics savedDiagnostics = contactDiagnostics_;
@@ -744,6 +769,7 @@ void SoftBody::integrateSubstep(double dt,
         nodes_ = savedNodes;
         constraints_ = savedConstraints;
         membraneElements_ = savedMembranes;
+        dihedralConstraints_ = savedDihedrals;
         contactMultipliers_ = savedMultipliers;
         contactRecords_ = savedRecords;
         contactDiagnostics_ = savedDiagnostics;
@@ -835,7 +861,8 @@ void SoftBody::integrateSubstepTrial(double dt,
         // impulses inside the bracketed constraint loop with their reaction
         // on the payload, so the guard stands down rather than erase them.
         preserveFreeMembraneMomentum =
-            suspension == nullptr && !membraneElements_.empty() &&
+            suspension == nullptr
+            && (!membraneElements_.empty() || !dihedralConstraints_.empty()) &&
             contactPairs_.empty() &&
             std::all_of(nodes_.begin(), nodes_.end(), [](const Node& node) {
                 return node.inverseMass > 0.0;
@@ -852,6 +879,9 @@ void SoftBody::integrateSubstepTrial(double dt,
             element.solverResultantEstimate = {};
             element.normalizedResidual = 0.0;
         }
+        for (DihedralBendingConstraint& constraint : dihedralConstraints_) {
+            constraint.accumulatedLambda = 0.0;
+        }
         if (!contactPairs_.empty()) beginContactSubstep();
     }
 
@@ -861,9 +891,22 @@ void SoftBody::integrateSubstepTrial(double dt,
         profile->distanceConstraintVisits +=
             static_cast<std::uint64_t>(settings.constraintIterations) *
             constraints_.size();
+        const std::size_t cableCount = static_cast<std::size_t>(
+            std::count_if(
+                constraints_.begin(), constraints_.end(),
+                [](const DistanceConstraint& constraint) {
+                    return constraint.kind == ConstraintKind::Cable;
+                }));
+        profile->cableConstraintVisits +=
+            2ULL
+            * static_cast<std::uint64_t>(settings.cableConstraintSweepPairs)
+            * cableCount;
         profile->membraneConstraintVisits +=
             static_cast<std::uint64_t>(settings.constraintIterations) *
             membraneElements_.size();
+        profile->bendingConstraintVisits +=
+            static_cast<std::uint64_t>(settings.constraintIterations) *
+            dihedralConstraints_.size();
         if (suspension != nullptr)
             profile->suspensionConstraintVisits +=
                 static_cast<std::uint64_t>(settings.constraintIterations) *
@@ -873,11 +916,12 @@ void SoftBody::integrateSubstepTrial(double dt,
                 static_cast<std::uint64_t>(settings.constraintIterations);
     }
 
-    // Membrane, contact and suspension all move nodes inside the iteration
+    // Membrane, bending, contact and suspension all move nodes inside the iteration
     // loop, so the packed constraint state is only coherent when none of them
     // is present -- which is exactly the mass-spring cloth case it is for.
     const bool packedConstraints =
-        !constraints_.empty() && membraneElements_.empty() &&
+        !constraints_.empty() && membraneElements_.empty()
+        && dihedralConstraints_.empty() &&
         contactPairs_.empty() && suspension == nullptr;
     if (packedConstraints) {
         PerformanceScope distance(profileField(
@@ -889,7 +933,47 @@ void SoftBody::integrateSubstepTrial(double dt,
     // constraint on every iteration.
     const double inverseTimeStepSquared = 1.0 / (dt * dt);
 
+    const auto solveCablePair = [&] {
+        PerformanceScope cable(profileField(
+            profile, &StepPerformanceProfile::cableConstraintNanoseconds));
+        const auto solveCable = [&](DistanceConstraint& constraint) {
+            if (constraint.kind != ConstraintKind::Cable) {
+                return;
+            }
+            if (packedConstraints) {
+                solveConstraintPacked(constraint, inverseTimeStepSquared);
+            } else {
+                solveConstraint(constraint, inverseTimeStepSquared);
+            }
+        };
+        // Reverse first propagates the payload reaction up an authored
+        // canopy-to-riser cascade; forward returns the corrected support
+        // position down to the payload in the same substep.
+        for (auto constraint = constraints_.rbegin();
+             constraint != constraints_.rend(); ++constraint) {
+            solveCable(*constraint);
+        }
+        for (DistanceConstraint& constraint : constraints_) {
+            solveCable(constraint);
+        }
+    };
+
     for (int iteration = 0; iteration < settings.constraintIterations; ++iteration) {
+        // Distribute the cheap graph-depth passes BEFORE the general sweep.
+        // The skin/rib constraints below can then react to the line load in
+        // this same iteration instead of receiving it only after their final
+        // solve of the substep.
+        const int cablePairs =
+            settings.cableConstraintSweepPairs
+                / std::max(1, settings.constraintIterations)
+            + (iteration
+                   < settings.cableConstraintSweepPairs
+                         % std::max(1, settings.constraintIterations)
+                   ? 1
+                   : 0);
+        for (int pair = 0; pair < cablePairs; ++pair) {
+            solveCablePair();
+        }
         {
             PerformanceScope distance(profileField(
                 profile,
@@ -924,6 +1008,19 @@ void SoftBody::integrateSubstepTrial(double dt,
                 }
             }
         }
+        {
+            PerformanceScope bending(profileField(
+                profile,
+                &StepPerformanceProfile::bendingConstraintNanoseconds));
+            // Deliberately serial for the initial bounded hinge path. Stable
+            // insertion order is deterministic and avoids extending the
+            // membrane colouring with four-node adjacency prematurely.
+            for (DihedralBendingConstraint& constraint :
+                 dihedralConstraints_) {
+                solveDihedralConstraint(constraint,
+                                        inverseTimeStepSquared);
+            }
+        }
         if (suspension != nullptr) {
             PerformanceScope line(profileField(
                 profile,
@@ -936,6 +1033,11 @@ void SoftBody::integrateSubstepTrial(double dt,
                 profile,
                 &StepPerformanceProfile::contactConstraintNanoseconds));
             solveContactIteration(dt, settings);
+        }
+    }
+    if (settings.constraintIterations == 0) {
+        for (int pair = 0; pair < settings.cableConstraintSweepPairs; ++pair) {
+            solveCablePair();
         }
     }
     if (packedConstraints) {
@@ -1174,7 +1276,93 @@ inline void projectDistanceConstraint(DistanceConstraint& constraint,
     positionB += (inverseMassB * scale) * difference;
 }
 
+struct DihedralEvaluation {
+    double angle = 0.0;
+    std::array<Vec3, 4> gradient{};
+    bool valid = false;
+};
+
+DihedralEvaluation evaluateDihedral(const Vec3& a,
+                                    const Vec3& b,
+                                    const Vec3& c,
+                                    const Vec3& d) {
+    const Vec3 edge = b - a;
+    const Vec3 toC = c - a;
+    const Vec3 toD = d - a;
+    const Vec3 firstArea = cross(edge, toC);
+    const Vec3 secondArea = cross(toD, edge);
+    const double edgeLength = length(edge);
+    const double firstLength = length(firstArea);
+    const double secondLength = length(secondArea);
+    if (!(edgeLength > kMinimumLength) ||
+        !(firstLength > kMinimumLength * edgeLength) ||
+        !(secondLength > kMinimumLength * edgeLength)) {
+        return {};
+    }
+
+    const Vec3 edgeUnit = edge / edgeLength;
+    const Vec3 firstNormal = firstArea / firstLength;
+    const Vec3 secondNormal = secondArea / secondLength;
+    const double cosine = std::clamp(dot(firstNormal, secondNormal), -1.0, 1.0);
+    const double sine = dot(edgeUnit, cross(firstNormal, secondNormal));
+
+    // Reverse-mode derivative of atan2(sine, cosine). Unit normals keep
+    // sine^2+cosine^2 at one, so dtheta = cosine*dsine-sine*dcosine.
+    const Vec3 normalOneAdjoint =
+        cosine * cross(secondNormal, edgeUnit) - sine * secondNormal;
+    const Vec3 normalTwoAdjoint =
+        cosine * cross(edgeUnit, firstNormal) - sine * firstNormal;
+    const Vec3 edgeUnitAdjoint =
+        cosine * cross(firstNormal, secondNormal);
+    const Vec3 areaOneAdjoint =
+        (normalOneAdjoint
+         - dot(normalOneAdjoint, firstNormal) * firstNormal)
+        / firstLength;
+    const Vec3 areaTwoAdjoint =
+        (normalTwoAdjoint
+         - dot(normalTwoAdjoint, secondNormal) * secondNormal)
+        / secondLength;
+    Vec3 edgeAdjoint =
+        (edgeUnitAdjoint - dot(edgeUnitAdjoint, edgeUnit) * edgeUnit)
+        / edgeLength;
+    edgeAdjoint += cross(toC, areaOneAdjoint);
+    const Vec3 cAdjoint = cross(areaOneAdjoint, edge);
+    edgeAdjoint += cross(areaTwoAdjoint, toD);
+    const Vec3 dAdjoint = cross(edge, areaTwoAdjoint);
+
+    DihedralEvaluation result;
+    result.angle = std::atan2(sine, cosine);
+    result.gradient[1] = edgeAdjoint;
+    result.gradient[2] = cAdjoint;
+    result.gradient[3] = dAdjoint;
+    result.gradient[0] = -1.0 * (edgeAdjoint + cAdjoint + dAdjoint);
+    result.valid = std::isfinite(result.angle)
+                   && std::all_of(result.gradient.begin(),
+                                  result.gradient.end(),
+                                  [](const Vec3& value) {
+                                      return std::isfinite(value.x)
+                                             && std::isfinite(value.y)
+                                             && std::isfinite(value.z);
+                                  });
+    return result;
+}
+
 }  // namespace
+
+DihedralBendingDiagnostics SoftBody::dihedralDiagnostics(
+    std::size_t constraintIndex) const {
+    if (constraintIndex >= dihedralConstraints_.size()) {
+        throw std::out_of_range("Dihedral constraint index is out of range");
+    }
+    const DihedralBendingConstraint& constraint =
+        dihedralConstraints_[constraintIndex];
+    const DihedralEvaluation evaluation = evaluateDihedral(
+        nodes_[constraint.a].position,
+        nodes_[constraint.b].position,
+        nodes_[constraint.c].position,
+        nodes_[constraint.d].position);
+    return {evaluation.angle, evaluation.gradient, evaluation.valid};
+}
 
 void SoftBody::solveConstraint(DistanceConstraint& constraint,
                                double inverseTimeStepSquared) {
@@ -1198,6 +1386,46 @@ void SoftBody::solveConstraintPacked(DistanceConstraint& constraint,
                               b.position,
                               b.inverseMass,
                               inverseTimeStepSquared);
+}
+
+void SoftBody::solveDihedralConstraint(
+    DihedralBendingConstraint& constraint,
+    double inverseTimeStepSquared) {
+    const std::array<std::size_t, 4> indices{
+        constraint.a, constraint.b, constraint.c, constraint.d};
+    const DihedralEvaluation evaluation = evaluateDihedral(
+        nodes_[constraint.a].position,
+        nodes_[constraint.b].position,
+        nodes_[constraint.c].position,
+        nodes_[constraint.d].position);
+    if (!evaluation.valid) {
+        return;
+    }
+
+    double inverseMassGradient = 0.0;
+    for (std::size_t corner = 0; corner < indices.size(); ++corner) {
+        inverseMassGradient += nodes_[indices[corner]].inverseMass
+                               * lengthSquared(evaluation.gradient[corner]);
+    }
+    const double alpha = constraint.compliance * inverseTimeStepSquared;
+    const double denominator = inverseMassGradient + alpha;
+    if (!(denominator > 0.0) || !std::isfinite(denominator)) {
+        return;
+    }
+    constexpr double twoPi = 6.283185307179586476925286766559;
+    const double value =
+        std::remainder(evaluation.angle - constraint.restAngleRadians, twoPi);
+    const double deltaLambda =
+        (-value - alpha * constraint.accumulatedLambda) / denominator;
+    if (!std::isfinite(deltaLambda)) {
+        return;
+    }
+    for (std::size_t corner = 0; corner < indices.size(); ++corner) {
+        Node& node = nodes_[indices[corner]];
+        node.position += node.inverseMass * deltaLambda
+                         * evaluation.gradient[corner];
+    }
+    constraint.accumulatedLambda += deltaLambda;
 }
 
 void SoftBody::packConstraintSolveNodes(WorkerPool* pool) {
@@ -1276,8 +1504,13 @@ std::array<Vec3, 3> SoftBody::membraneElementCorrections(
     }
 
     const double inverseTimeStepSquared = 1.0 / (dt * dt);
+    const SymmetricMatrix3 stateCompliance =
+        element.material.compressionStiffnessRatio == 1.0
+            ? element.complianceMatrix
+            : checkedInverse(effectiveMembraneStiffness(
+                  element.material, evaluation.diagnostics.greenStrain));
     const SymmetricMatrix3 alphaTilde =
-        inverseTimeStepSquared * element.complianceMatrix;
+        inverseTimeStepSquared * stateCompliance;
     const double gamma = element.material.dampingTime / dt;
     const SymmetricMatrix3 system =
         (1.0 + gamma) * inverseMassMatrix + alphaTilde;
@@ -2506,6 +2739,12 @@ void AerodynamicVerificationTestAccess::permuteSoftBodyStorage(
     }
     for (auto& element : body.membraneElements_)
         element.triangle = triangle(element.triangle);
+    for (auto& constraint : body.dihedralConstraints_) {
+        constraint.a = node(constraint.a);
+        constraint.b = node(constraint.b);
+        constraint.c = node(constraint.c);
+        constraint.d = node(constraint.d);
+    }
     for (auto& surface : body.contactSurfaces_) {
         if (surface.triangleCount > 0) {
             std::size_t first = body.triangles_.size();
@@ -2606,7 +2845,8 @@ std::string AerodynamicVerificationTestAccess::softBodyState(
     };
     out << "SOFT " << body.nodes_.size() << ' ' << body.triangles_.size()
         << ' ' << body.constraints_.size() << ' '
-        << body.membraneElements_.size() << '\n';
+        << body.membraneElements_.size() << ' '
+        << body.dihedralConstraints_.size() << '\n';
     for (const Node& node : body.nodes_) {
         vec(node.position); vec(node.previousPosition); vec(node.velocity);
         vec(node.force); out << node.inverseMass << '\n';
@@ -2628,6 +2868,7 @@ std::string AerodynamicVerificationTestAccess::softBodyState(
             << material.couplingStiffness << ' ' << material.shearStiffness
             << ' ' << material.warpPreTension << ' '
             << material.weftPreTension << ' ' << material.dampingTime << ' '
+            << material.compressionStiffnessRatio << ' '
             << static_cast<int>(element.role) << ' ' << element.referenceArea
             << ' ' << element.inverseReferenceMatrix.m00 << ' '
             << element.inverseReferenceMatrix.m01 << ' '
@@ -2635,6 +2876,13 @@ std::string AerodynamicVerificationTestAccess::softBodyState(
             << element.inverseReferenceMatrix.m11 << ' ';
         vec(element.multiplier); vec(element.solverResultantEstimate);
         out << element.normalizedResidual << '\n';
+    }
+    for (const DihedralBendingConstraint& constraint :
+         body.dihedralConstraints_) {
+        out << constraint.a << ' ' << constraint.b << ' ' << constraint.c
+            << ' ' << constraint.d << ' ' << constraint.restAngleRadians
+            << ' ' << constraint.compliance << ' '
+            << constraint.accumulatedLambda << '\n';
     }
     out << "SURFACES " << body.contactSurfaces_.size() << '\n';
     for (const auto& surface : body.contactSurfaces_) {
