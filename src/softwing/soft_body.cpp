@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <locale>
 #include <map>
+#include <queue>
 #include <sstream>
 #include <set>
 #include <stdexcept>
@@ -415,6 +416,9 @@ void SoftBody::fixNode(std::size_t nodeIndex) {
     node.inverseMass = 0.0;
     node.velocity = {};
     node.previousPosition = node.position;
+    // Fixed nodes are roots of the suspension load-path ordering.
+    loadPathOrdering_.builtForNodeCount =
+        std::numeric_limits<std::size_t>::max();
 }
 
 std::size_t SoftBody::addTriangle(std::size_t a,
@@ -454,6 +458,124 @@ std::size_t SoftBody::addCableConstraint(std::size_t a,
     constraints_.push_back(
         {a, b, maximumLength, compliance, 0.0, ConstraintKind::Cable});
     return constraints_.size() - 1;
+}
+
+std::size_t SoftBody::addSuspensionTieConstraint(
+    std::size_t a,
+    std::size_t b,
+    double restLength,
+    double compliance) {
+    requireNodeIndex(a, nodes_.size());
+    requireNodeIndex(b, nodes_.size());
+    if (a == b || restLength < 0.0 || compliance < 0.0) {
+        throw std::invalid_argument("Invalid suspension tie constraint");
+    }
+    constraints_.push_back(
+        {a, b, restLength, compliance, 0.0,
+         ConstraintKind::SuspensionTie});
+    return constraints_.size() - 1;
+}
+
+const std::vector<std::size_t>& SoftBody::loadPathConstraintOrder() const {
+    if (loadPathOrdering_.builtForConstraintCount == constraints_.size()
+        && loadPathOrdering_.builtForNodeCount == nodes_.size()
+        && loadPathOrdering_.builtForTriangleCount == triangles_.size()
+        && loadPathOrdering_.builtForDihedralCount
+               == dihedralConstraints_.size()) {
+        return loadPathOrdering_.constraints;
+    }
+
+    LoadPathOrdering rebuilt;
+    rebuilt.builtForConstraintCount = constraints_.size();
+    rebuilt.builtForNodeCount = nodes_.size();
+    rebuilt.builtForTriangleCount = triangles_.size();
+    rebuilt.builtForDihedralCount = dihedralConstraints_.size();
+
+    std::vector<std::vector<std::size_t>> adjacency(nodes_.size());
+    std::vector<bool> structuralNode(nodes_.size(), false);
+    for (std::size_t node = 0; node < nodes_.size(); ++node) {
+        structuralNode[node] = nodes_[node].inverseMass == 0.0;
+    }
+    for (const Triangle& triangle : triangles_) {
+        structuralNode[triangle.a] = true;
+        structuralNode[triangle.b] = true;
+        structuralNode[triangle.c] = true;
+    }
+    for (std::size_t index = 0; index < constraints_.size(); ++index) {
+        const DistanceConstraint& constraint = constraints_[index];
+        if (constraint.kind == ConstraintKind::Distance) {
+            structuralNode[constraint.a] = true;
+            structuralNode[constraint.b] = true;
+            continue;
+        }
+        rebuilt.constraints.push_back(index);
+        adjacency[constraint.a].push_back(constraint.b);
+        adjacency[constraint.b].push_back(constraint.a);
+    }
+    for (const DihedralBendingConstraint& constraint :
+         dihedralConstraints_) {
+        structuralNode[constraint.a] = true;
+        structuralNode[constraint.b] = true;
+        structuralNode[constraint.c] = true;
+        structuralNode[constraint.d] = true;
+    }
+
+    constexpr std::size_t unknownDepth =
+        std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> depth(nodes_.size(), unknownDepth);
+    std::queue<std::size_t> pending;
+    for (std::size_t node = 0; node < nodes_.size(); ++node) {
+        if (structuralNode[node] && !adjacency[node].empty()) {
+            depth[node] = 0;
+            pending.push(node);
+        }
+    }
+    const auto visitComponent = [&] {
+        while (!pending.empty()) {
+            const std::size_t node = pending.front();
+            pending.pop();
+            for (const std::size_t neighbour : adjacency[node]) {
+                if (depth[neighbour] == unknownDepth) {
+                    depth[neighbour] = depth[node] + 1;
+                    pending.push(neighbour);
+                }
+            }
+        }
+    };
+    visitComponent();
+
+    // A standalone cable graph may have no structural skin or fixed anchor.
+    // Root each such component at its heaviest node so its order is still
+    // deterministic and better conditioned than arbitrary insertion order.
+    for (;;) {
+        std::size_t root = nodes_.size();
+        double smallestInverseMass = std::numeric_limits<double>::infinity();
+        for (std::size_t node = 0; node < nodes_.size(); ++node) {
+            if (depth[node] == unknownDepth && !adjacency[node].empty()
+                && nodes_[node].inverseMass < smallestInverseMass) {
+                root = node;
+                smallestInverseMass = nodes_[node].inverseMass;
+            }
+        }
+        if (root == nodes_.size()) {
+            break;
+        }
+        depth[root] = 0;
+        pending.push(root);
+        visitComponent();
+    }
+
+    const auto constraintDepth = [&](std::size_t index) {
+        const DistanceConstraint& constraint = constraints_[index];
+        return std::max(depth[constraint.a], depth[constraint.b]);
+    };
+    std::stable_sort(
+        rebuilt.constraints.begin(), rebuilt.constraints.end(),
+        [&](std::size_t left, std::size_t right) {
+            return constraintDepth(left) < constraintDepth(right);
+        });
+    loadPathOrdering_ = std::move(rebuilt);
+    return loadPathOrdering_.constraints;
 }
 
 std::size_t SoftBody::addDihedralBendingConstraint(
@@ -885,22 +1007,18 @@ void SoftBody::integrateSubstepTrial(double dt,
         if (!contactPairs_.empty()) beginContactSubstep();
     }
 
+    const std::vector<std::size_t>& loadPathOrder =
+        loadPathConstraintOrder();
     if (profile) {
         profile->constraintIterations +=
             static_cast<std::uint64_t>(settings.constraintIterations);
         profile->distanceConstraintVisits +=
             static_cast<std::uint64_t>(settings.constraintIterations) *
             constraints_.size();
-        const std::size_t cableCount = static_cast<std::size_t>(
-            std::count_if(
-                constraints_.begin(), constraints_.end(),
-                [](const DistanceConstraint& constraint) {
-                    return constraint.kind == ConstraintKind::Cable;
-                }));
         profile->cableConstraintVisits +=
             2ULL
             * static_cast<std::uint64_t>(settings.cableConstraintSweepPairs)
-            * cableCount;
+            * loadPathOrder.size();
         profile->membraneConstraintVisits +=
             static_cast<std::uint64_t>(settings.constraintIterations) *
             membraneElements_.size();
@@ -936,38 +1054,51 @@ void SoftBody::integrateSubstepTrial(double dt,
     const auto solveCablePair = [&] {
         PerformanceScope cable(profileField(
             profile, &StepPerformanceProfile::cableConstraintNanoseconds));
-        const auto solveCable = [&](DistanceConstraint& constraint) {
-            if (constraint.kind != ConstraintKind::Cable) {
-                return;
-            }
+        const auto solveLoadPathConstraint = [&](std::size_t index) {
+            DistanceConstraint& constraint = constraints_[index];
             if (packedConstraints) {
                 solveConstraintPacked(constraint, inverseTimeStepSquared);
             } else {
                 solveConstraint(constraint, inverseTimeStepSquared);
             }
         };
-        // Reverse first propagates the payload reaction up an authored
-        // canopy-to-riser cascade; forward returns the corrected support
-        // position down to the payload in the same substep.
-        for (auto constraint = constraints_.rbegin();
-             constraint != constraints_.rend(); ++constraint) {
-            solveCable(*constraint);
+        // Reverse depth order propagates the payload reaction to the canopy;
+        // forward depth order returns the corrected support to the payload.
+        for (auto constraint = loadPathOrder.rbegin();
+             constraint != loadPathOrder.rend(); ++constraint) {
+            solveLoadPathConstraint(*constraint);
         }
-        for (DistanceConstraint& constraint : constraints_) {
-            solveCable(constraint);
+        for (const std::size_t constraint : loadPathOrder) {
+            solveLoadPathConstraint(constraint);
         }
     };
 
+    // Reserve three quarters of the pairs for final load-path closure. Canopy
+    // attachment and
+    // harness ties are solved late in a general forward sweep; without this
+    // closing passes they can move a cable endpoint after that cable's last
+    // visit, leaving centimetres of apparent line stretch. One final pair
+    // reduced but did not converge branching cascades; several are required
+    // after the final cloth movement. The remaining quarter stays interleaved
+    // before general sweeps so the cloth still reacts to suspension load
+    // within the same substep.
+    const int closingCablePairs =
+        settings.cableConstraintSweepPairs > 0
+            ? settings.cableConstraintSweepPairs
+                  - settings.cableConstraintSweepPairs / 4
+            : 0;
+    const int interleavedCablePairs =
+        settings.cableConstraintSweepPairs - closingCablePairs;
     for (int iteration = 0; iteration < settings.constraintIterations; ++iteration) {
         // Distribute the cheap graph-depth passes BEFORE the general sweep.
         // The skin/rib constraints below can then react to the line load in
         // this same iteration instead of receiving it only after their final
         // solve of the substep.
         const int cablePairs =
-            settings.cableConstraintSweepPairs
+            interleavedCablePairs
                 / std::max(1, settings.constraintIterations)
             + (iteration
-                   < settings.cableConstraintSweepPairs
+                   < interleavedCablePairs
                          % std::max(1, settings.constraintIterations)
                    ? 1
                    : 0);
@@ -1035,7 +1166,11 @@ void SoftBody::integrateSubstepTrial(double dt,
             solveContactIteration(dt, settings);
         }
     }
-    if (settings.constraintIterations == 0) {
+    if (settings.constraintIterations > 0) {
+        for (int pair = 0; pair < closingCablePairs; ++pair) {
+            solveCablePair();
+        }
+    } else if (settings.constraintIterations == 0) {
         for (int pair = 0; pair < settings.cableConstraintSweepPairs; ++pair) {
             solveCablePair();
         }

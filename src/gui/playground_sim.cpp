@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <queue>
 #include <set>
 #include <utility>
@@ -963,6 +964,18 @@ SimBody buildSimBody(const SimMesh &mesh,
             constraintKey(a, b),
             body->addDistanceConstraint(a, b, restLength, compliance));
     };
+    const auto suspensionTie = [&](std::size_t a,
+                                   std::size_t b,
+                                   double restLength,
+                                   double compliance) {
+        if (a == b || edgeConstraints.count(constraintKey(a, b)) != 0) {
+            return;
+        }
+        edgeConstraints.emplace(
+            constraintKey(a, b),
+            body->addSuspensionTieConstraint(
+                a, b, restLength, compliance));
+    };
     const auto addEdge = [&](int a, int b) {
         if (a == b) {
             return;
@@ -1800,6 +1813,43 @@ SimBody buildSimBody(const SimMesh &mesh,
     // Everything added so far is canopy; lines and pilot follow.
     sim.canopyNodeCount = body->nodes().size();
 
+    // An inflated wing does not accelerate only its few kilograms of cloth:
+    // it also accelerates a substantial surrounding/entrained air volume.
+    // Omitting that added mass gave the canopy roughly a 20:1 payload mass
+    // ratio, so a pressure change flung it ahead of the pilot, unloaded every
+    // line, and the later re-catch produced a multi-kN pulse. Use the
+    // classical flat-planform normal added-mass estimate as scalar solver
+    // inertia. It is distributed by skin area and its gravity is cancelled
+    // in applyAerodynamicForces, so launch weight and static line loads remain
+    // those of the actual fabric/lines/payload.
+    if (controls.freeFlight && sim.planformArea > 0.0
+        && sim.aspectRatio > 0.0) {
+        const double projectedSpan =
+            std::sqrt(sim.aspectRatio * sim.planformArea);
+        const double chordSquaredIntegral =
+            projectedSpan > 0.0
+                ? sim.planformArea * sim.planformArea / projectedSpan
+                : 0.0;
+        sim.virtualAddedAirMassKg =
+            canopyAddedMassCoefficient * (kPi / 4.0) * kAirDensity
+            * chordSquaredIntegral;
+        sim.virtualAddedAirMassByNode.assign(body->nodes().size(), 0.0);
+        const double skinMass = std::accumulate(
+            masses.begin(), masses.end(), 0.0);
+        if (skinMass > 0.0 && sim.virtualAddedAirMassKg > 0.0) {
+            for (std::size_t node = 0; node < masses.size(); ++node) {
+                const double share =
+                    sim.virtualAddedAirMassKg * masses[node] / skinMass;
+                sim.virtualAddedAirMassByNode[node] = share;
+                softwing::Node &bodyNode = body->nodes()[node];
+                if (bodyNode.inverseMass > 0.0) {
+                    const double physicalMass = 1.0 / bodyNode.inverseMass;
+                    bodyNode.inverseMass = 1.0 / (physicalMass + share);
+                }
+            }
+        }
+    }
+
     // Suspension lines: reject legacy duplicates, lump the physical mass of
     // each authored segment equally onto its welded endpoints, then create
     // the cable graph. The old 50 g-per-junction rule made line mass depend
@@ -1888,7 +1938,7 @@ SimBody buildSimBody(const SimMesh &mesh,
             }
         }
         if (bestSkinNode >= 0) {
-            body->addDistanceConstraint(
+            body->addSuspensionTieConstraint(
                 node,
                 static_cast<std::size_t>(bestSkinNode),
                 bestDistance,
@@ -1967,7 +2017,8 @@ SimBody buildSimBody(const SimMesh &mesh,
                                    maximumPilotMassKg);
         sim.pilotNode = body->addNode(pilotPlace, sim.pilotMass);
         for (const std::size_t node : carabiners) {
-            tie(sim.pilotNode,
+            suspensionTie(
+                sim.pilotNode,
                 node,
                 length(body->nodes()[node].position - pilotPlace),
                 lineCompliance);
@@ -2052,10 +2103,10 @@ SimBody buildSimBody(const SimMesh &mesh,
         // In free flight the pilot holds the handle, so a brake pull reacts
         // into his mass. Pinned, the handle is nailed down instead.
         if (sim.pilotNode != noConstraint) {
-            tie(handle,
-                sim.pilotNode,
-                length(handlePosition - pilotPlace),
-                lineCompliance);
+            suspensionTie(handle,
+                          sim.pilotNode,
+                          length(handlePosition - pilotPlace),
+                          lineCompliance);
         }
         brakeHandles.push_back(handle);
         for (const std::size_t top : brakeTops) {
@@ -2205,6 +2256,8 @@ SimBody buildSimBody(const SimMesh &mesh,
                 systemMass += 1.0 / node.inverseMass;
             }
         }
+        systemMass = std::max(
+            0.0, systemMass - sim.virtualAddedAirMassKg);
         const double systemWeight =
             systemMass * gravityMetresPerSecondSquared;
         const double maximumQ =
@@ -3327,6 +3380,25 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         return;
     }
     sim.body->clearExternalForces();
+
+    // The canopy's added-air term is solver inertia, not structural mass.
+    // SoftBody applies gravity through inverse mass, so cancel exactly the
+    // gravity that it would otherwise apply to the virtual share. Do this
+    // before sampling the flow so a drop from rest still has ordinary g and
+    // all physical parts of the system remain in the same free-fall frame.
+    if (controls.freeFlight && sim.virtualAddedAirMassKg > 0.0) {
+        const std::size_t count = std::min(
+            sim.virtualAddedAirMassByNode.size(), sim.body->nodes().size());
+        for (std::size_t node = 0; node < count; ++node) {
+            const double virtualMass = sim.virtualAddedAirMassByNode[node];
+            if (virtualMass > 0.0) {
+                sim.body->addForce(
+                    node,
+                    {0.0, 0.0,
+                     virtualMass * gravityMetresPerSecondSquared});
+            }
+        }
+    }
     sim.lastAeroForce = {};
     sim.lastLift = 0.0;
     sim.lastDrag = 0.0;
@@ -3673,12 +3745,10 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         + fabricDrag * sample.windDirection;
 
     // What the polar requests minus what the pressure field already made.
-    // With full pressure authority this replaces the lift-poor,
-    // thrust-rich inviscid resultant with the finite-wing polar. The bounded
-    // production solve may saturate before that target, in which case its
-    // achieved force and residual below are authoritative. The fabric-drag
-    // request belongs in wingForce as well; otherwise a full-authority solve
-    // would cancel it with the original pressure resultant.
+    // The tunnel uses this common-mode correction as its prescribed force
+    // target. Free flight deliberately preserves the calibrated live pressure
+    // force below; only missing positive polar drag is later added as
+    // dissipative skin traction.
     const softwing::Vec3 correction = wingForce - aerodynamicForce(sim);
 
     // THE HALVES DISAGREE, and that disagreement is the turn. Each half
@@ -3709,10 +3779,9 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
            + (leftQ * leftSide.drag - rightQ * rightSide.drag)
                  * sample.windDirection);
 
-    // Where the total resultant must act: the hang-line-derived fraction
-    // of the live mean chord. The line geometry was drawn for a wing whose
-    // resultant sits there; making that true here is what lets the
-    // designed lines set the trim angle.
+    // The tunnel's common-mode target acts at this hang-line-derived fraction
+    // of the live mean chord. Free flight keeps the pressure field's natural
+    // centre, but the half-wing steering solve still uses local anchors.
     softwing::Vec3 leadingMean;
     softwing::Vec3 trailingMean;
     for (const RibChord &rib : sim.ribChords) {
@@ -3832,19 +3901,30 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         }
     }
 
-    // The correction enters the canopy the only way fabric carries load
-    // gracefully: as pressure. Every body-force or point-force shortcut
-    // was measured damaging the canopy. The production path below solves
-    // FINAL exterior Cp directly, within its physical [-3, 1] envelope,
-    // and reconstructs every face as p_inside - q*Cp. A deterministic
-    // weighted projection introduces force, pitch, then L-R differential
-    // equalities in that order; a later stage freezes what the earlier one
-    // physically achieved. The old 4x4 increment plus post-clamp path is
-    // retained in the explicit LegacyIncrementClamp regression mode only.
-    static const bool noCouple =
+    // The bounded path solves FINAL exterior Cp directly, within its physical
+    // [-3, 1] envelope, and reconstructs every face as p_inside - q*Cp. A
+    // deterministic weighted projection preserves or introduces force, pitch,
+    // then L-R differential equalities in that order; a later stage freezes
+    // what the earlier one physically achieved. The old 4x4 increment plus
+    // post-clamp path is retained only as an explicit regression mode.
+    // applyPressure already evaluates a section aerodynamic law from the
+    // canopy's motion through the air. In free flight, replacing that lift a
+    // second time with the wing-level polar and forcing its centre onto a
+    // synthetic pitch anchor created two competing feedback controllers:
+    // pressure, line load and slackness alternated until the wing folded.
+    // Keep the section pressure's force and natural centre of pressure in
+    // flight. The polar still supplies only its missing dissipative drag
+    // below, and its asymmetric half-span terms still steer. The tunnel keeps
+    // the prescribed polar correction used by its measurement acceptance
+    // path; the environment switches remain useful regression oracles there.
+    static const bool disablePolarPitchCorrection =
         qEnvironmentVariableIsSet("LEP_AERO_NO_COUPLE");
-    static const bool noCorrection =
+    static const bool disablePolarForceCorrection =
         qEnvironmentVariableIsSet("LEP_AERO_NO_CORRECTION");
+    const bool preserveNaturalPressurePitch =
+        controls.freeFlight || disablePolarPitchCorrection;
+    const bool preserveNaturalPressureForce =
+        controls.freeFlight || disablePolarForceCorrection;
 
     std::vector<softwing::Vec3> areaVector(sim.skinTriangleCount);
     std::vector<softwing::Vec3> faceCentre(sim.skinTriangleCount);
@@ -3864,13 +3944,15 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
 
     PressureSolveDiagnostics pressureDiagnostics;
     pressureDiagnostics.requestedForce =
-        noCorrection ? aerodynamicForce(sim) : wingForce;
+        preserveNaturalPressureForce ? aerodynamicForce(sim) : wingForce;
     pressureDiagnostics.requestedLiftNewtons =
         dot(pressureDiagnostics.requestedForce, sample.liftDirection);
     pressureDiagnostics.requestedDragNewtons =
         dot(pressureDiagnostics.requestedForce, sample.windDirection);
     pressureDiagnostics.requestedPitchMoment =
-        noCouple ? dot(pressureMoment, sample.spanAxis) : 0.0;
+        preserveNaturalPressurePitch
+            ? dot(pressureMoment, sample.spanAxis)
+            : 0.0;
     pressureDiagnostics.variableCount = sim.skinTriangleCount;
 
     softwing::Vec3 priorHalfDifference;
@@ -3973,11 +4055,16 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                         * dot(halfArm, sample.spanAxis);
                 }
             }
-            proposalSystem[0][4] = noCorrection ? 0.0 : correction.x;
-            proposalSystem[1][4] = noCorrection ? 0.0 : correction.y;
-            proposalSystem[2][4] = noCorrection ? 0.0 : correction.z;
+            proposalSystem[0][4] =
+                preserveNaturalPressureForce ? 0.0 : correction.x;
+            proposalSystem[1][4] =
+                preserveNaturalPressureForce ? 0.0 : correction.y;
+            proposalSystem[2][4] =
+                preserveNaturalPressureForce ? 0.0 : correction.z;
             proposalSystem[3][4] =
-                noCouple ? 0.0 : -dot(pressureMoment, sample.spanAxis);
+                preserveNaturalPressurePitch
+                    ? 0.0
+                    : -dot(pressureMoment, sample.spanAxis);
             const auto solveProposal4x4 = [](
                 double matrix[4][5], double solution[4]) {
                 for (int pivot = 0; pivot < 4; ++pivot) {
@@ -4153,13 +4240,15 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                     // small clipped resultant/pitch errors, bounded enough that
                     // missing authority is reported instead of purchased by
                     // concentrating load at a nose or trailing edge.
-                    constexpr double kCpTrustRadius = 0.05;
+                    // The tunnel is a shape instrument, so its narrow local
+                    // window protects the calibrated pressure topology.
+                    constexpr double cpTrustRadius = 0.05;
                     problem.lower[face] = std::max(
                         minimumExteriorPressureCoefficient,
-                        priorCp - kCpTrustRadius);
+                        priorCp - cpTrustRadius);
                     problem.upper[face] = std::min(
                         maximumExteriorPressureCoefficient,
-                        priorCp + kCpTrustRadius);
+                        priorCp + cpTrustRadius);
                 }
 
                 // Integral squared change from the calibrated proposal.
@@ -4298,11 +4387,16 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
                 halfBasis[column] * dot(halfArm, sample.spanAxis);
         }
     }
-    system[0][4] = noCorrection ? 0.0 : correction.x;
-    system[1][4] = noCorrection ? 0.0 : correction.y;
-    system[2][4] = noCorrection ? 0.0 : correction.z;
+    system[0][4] =
+        disablePolarForceCorrection ? 0.0 : correction.x;
+    system[1][4] =
+        disablePolarForceCorrection ? 0.0 : correction.y;
+    system[2][4] =
+        disablePolarForceCorrection ? 0.0 : correction.z;
     system[3][4] =
-        noCouple ? 0.0 : -dot(pressureMoment, sample.spanAxis);
+        disablePolarPitchCorrection
+            ? 0.0
+            : -dot(pressureMoment, sample.spanAxis);
 
     // Gaussian elimination with partial pivoting; a singular system (a
     // degenerate skin) just skips the retrim.
@@ -4516,10 +4610,9 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
             == PressureSolveMode::BoundedExteriorCp
         && controls.freeFlight && q > 1.0e-9) {
         // Close only the finite-wing polar's viscous drag deficit. The
-        // separate deformation/frontal-area heuristic is already requested
-        // through wingForce's pressure path; reinjecting its full residual as
-        // shear made harmless early cloth breathing become hundreds of
-        // newtons of extra drag and a self-amplifying collapse.
+        // deformation/frontal-area heuristic remains diagnostic: applying its
+        // full residual as shear made harmless early cloth breathing become
+        // hundreds of newtons of extra drag and a self-amplifying collapse.
         sim.lastPolarDragTargetNewtons =
             q * area * sample.dragCoefficient;
         const double missingDrag = std::max(

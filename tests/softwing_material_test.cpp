@@ -297,10 +297,16 @@ softwing::SoftBody cableCascade() {
     for (int level = 1; level <= 7; ++level) {
         body.addNode({0.0, 0.0, -static_cast<double>(level)},
                      level == 7 ? 90.0 : 0.05);
-        body.addCableConstraint(
-            static_cast<std::size_t>(level - 1),
-            static_cast<std::size_t>(level), 1.0, 0.0);
     }
+    // Match the Playground's intentionally non-topological build order:
+    // authored cables first, then the canopy attachment and harness ties.
+    for (int level = 1; level < 6; ++level) {
+        body.addCableConstraint(
+            static_cast<std::size_t>(level),
+            static_cast<std::size_t>(level + 1), 1.0, 0.0);
+    }
+    body.addSuspensionTieConstraint(0, 1, 1.0, 0.0);
+    body.addSuspensionTieConstraint(6, 7, 1.0, 0.0);
     body.addForce(7, {0.0, 0.0, -9000.0});
     return body;
 }
@@ -332,7 +338,7 @@ void testCableCascadeSweeps() {
     softwing::SoftBody again = cableCascade();
     again.step(settings);
     check(again.nodes()[7].position.z == plain.nodes()[7].position.z,
-          "cable sweeps: zero extra pairs preserve deterministic legacy path");
+          "load-path sweeps: zero pairs preserve deterministic legacy path");
 
     softwing::StepPerformanceProfile profile;
     settings.cableConstraintSweepPairs = 3;
@@ -341,12 +347,12 @@ void testCableCascadeSweeps() {
     conditioned.step(settings);
     const double conditionedExtension = worstCableExtension(conditioned);
     check(conditionedExtension < 0.85 * plainExtension,
-          "cable sweeps: reverse/forward passes condition a seven-level load path");
+          "load-path sweeps: reverse/forward passes condition seven levels");
     check(profile.cableConstraintVisits == 42,
-          "cable sweeps: targeted visits count only the cable subset");
+          "load-path sweeps: visits count cables and suspension ties");
     for (const softwing::Node& node : conditioned.nodes()) {
         check(finite(node.position) && finite(node.velocity),
-              "cable sweeps: conditioned cascade stays finite");
+              "load-path sweeps: conditioned cascade stays finite");
     }
 }
 

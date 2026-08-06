@@ -89,6 +89,10 @@ void validateMembraneElementDefinitions(
 enum class ConstraintKind {
     Distance,
     Cable,
+    // Bilateral tie which belongs to a deep suspension/load path. It has
+    // ordinary distance physics, but participates in the targeted
+    // reverse/forward load-path sweeps together with unilateral cables.
+    SuspensionTie,
 };
 
 struct DistanceConstraint {
@@ -181,10 +185,10 @@ struct StepSettings {
     double timeStep = 1.0 / 120.0;
     int substeps = 2;
     int constraintIterations = 12;
-    // Extra serial reverse+forward passes over unilateral cable constraints,
-    // distributed before the general structural sweeps. A deep suspension
-    // cascade otherwise needs one whole cloth iteration per graph level before
-    // a payload reaction reaches the canopy. Zero preserves the historical
+    // Extra serial reverse+forward passes over the suspension load path:
+    // unilateral cables plus bilateral canopy/harness ties. A deep cascade
+    // otherwise needs one whole cloth iteration per graph level before a
+    // payload reaction reaches the canopy. Zero preserves the historical
     // solver byte-for-byte.
     int cableConstraintSweepPairs = 0;
     Vec3 gravity{0.0, 0.0, -9.80665};
@@ -266,6 +270,10 @@ public:
                                    std::size_t b,
                                    double maximumLength,
                                    double compliance = 0.0);
+    std::size_t addSuspensionTieConstraint(std::size_t a,
+                                           std::size_t b,
+                                           double restLength,
+                                           double compliance = 0.0);
     std::size_t addDihedralBendingConstraint(
         std::size_t a,
         std::size_t b,
@@ -513,6 +521,14 @@ private:
     void solveConstraint(DistanceConstraint& constraint,
                          double inverseTimeStepSquared);
 
+    // Suspension constraints form a deep, branching graph whose authored
+    // insertion order is not a load-propagation order. Build a stable order
+    // by graph depth from structural/fixed canopy nodes so one reverse/forward
+    // pair actually travels payload-to-canopy and back. Cached topology only;
+    // changing a rest length or multiplier does not invalidate it.
+    [[nodiscard]] const std::vector<std::size_t>&
+    loadPathConstraintOrder() const;
+
     // A distance/cable projection reads exactly two things per node: its
     // position and its inverse mass. A Node is 104 bytes, so a sweep over it
     // drags four times that through the cache for nothing -- and the sweep is
@@ -646,6 +662,14 @@ private:
     bool interiorPressurePartitions_ = false;
     std::vector<SolveNode> constraintSolveNodes_;
     mutable TriangleIncidence triangleIncidence_;
+    struct LoadPathOrdering {
+        std::vector<std::size_t> constraints;
+        std::size_t builtForConstraintCount = 0;
+        std::size_t builtForNodeCount = 0;
+        std::size_t builtForTriangleCount = 0;
+        std::size_t builtForDihedralCount = 0;
+    };
+    mutable LoadPathOrdering loadPathOrdering_;
     mutable ConstraintColouring constraintColouring_;
     mutable MembraneColouring membraneColouring_;
     MembraneJacobiScratch membraneJacobiScratch_;

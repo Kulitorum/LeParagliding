@@ -26,6 +26,11 @@ namespace lep::playground {
 
 inline constexpr double metresPerMillimetre = 0.001;
 inline constexpr double fabricArealDensity = 0.045;   // kg/m^2
+// Scalar approximation of the canopy's aerodynamic added mass. Potential
+// flow gives pi/4*rho*integral(chord^2 ds) for normal acceleration; the
+// constant-chord planform approximation is used here. It changes inertia,
+// not weight: its artificial gravity is cancelled exactly during flight.
+inline constexpr double canopyAddedMassCoefficient = 1.0;
 // Tuned on the Swoop harness: at 1e-8/1e-9 with 4 substeps and 25
 // iterations the wing settles at +23% volume under 80 Pa instead of
 // creeping past its own fabric.
@@ -120,10 +125,10 @@ inline constexpr int simulationSubsteps =
     solverQualities[defaultSolverQuality].substeps;
 inline constexpr int simulationIterations =
     solverQualities[defaultSolverQuality].iterations;
-// A suspension cascade is several unilateral-cable graph levels deep. One
-// cheap reverse+forward cable-only pair carries payload reaction through it
-// without paying for six extra full cloth iterations.
-inline constexpr int defaultFreeFlightCableSweepPairs = 3;
+// A suspension cascade spans several graph levels, including bilateral
+// canopy/harness ties. Cheap reverse+forward passes close that entire load
+// path after the cloth sweep without paying for extra full cloth iterations.
+inline constexpr int defaultFreeFlightCableSweepPairs = 96;
 inline constexpr double substepSeconds =
     simulationTimeStep / simulationSubsteps;
 inline constexpr std::size_t noConstraint =
@@ -393,6 +398,11 @@ struct SimBody
     double authoredLineMassKg = 0.0;
     double lineJunctionFloorMassKg = 0.0;
     double controlNodeFloorMassKg = 0.0;
+    // Entrained/accelerated air carried as solver inertia on canopy nodes.
+    // Per-node shares parallel the body's node table at build time. This is
+    // not structural mass and contributes no gravity or launch weight.
+    std::vector<double> virtualAddedAirMassByNode;
+    double virtualAddedAirMassKg = 0.0;
     double tunnelLineSolverBallastKg = 0.0;
     // Nodes below this index belong to the canopy (skin, rib interiors);
     // line junctions, handles and the pilot come after. The aerodynamic
@@ -799,15 +809,12 @@ struct HalfAeroKinematics
 [[nodiscard]] WingAeroSample sampleWingAero(const SimBody &sim,
                                             const SimControls &controls);
 
-// The free-flight force pass. Integrating an inviscid pressure field over a
-// lifting body recovers full leading-edge suction and no viscous loss —
-// d'Alembert's paradox — so its resultant is lift-poor and thrust-rich, and
-// no suction tuning fixes it (lift and spurious thrust scale together). So
-// a classical finite-wing polar (C_L(α) with stall roll-off,
-// C_D0 + C_L²/(π·AR·e)) supplies the requested system force. The bounded
-// final-Cp solve introduces as much of that target as its physical/trust
-// authority permits and reports the achieved force and residual; it does not
-// promise that the pressure resultant was fully replaced. Bluff-body pilot
+// The aerodynamic force pass. In free flight the calibrated section-pressure
+// field supplies lift and its natural pitch moment; a finite-wing polar adds
+// only missing positive viscous drag, while the two half-wing terms provide
+// steering. Replacing the live pressure force with a second polar target made
+// the pressure and suspension load paths fight each other. The tunnel retains
+// its prescribed polar force/pitch target for measurement. Bluff-body pilot
 // drag acts on the pilot node. Clears the body's external forces and replaces
 // them, so it owns that channel; call it once per frame, immediately before
 // stepping.
@@ -815,9 +822,10 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls);
 
 // Lift and drag resolved along the airflow, and the glide ratio they imply.
 // With the production bounded solve these are the actually achieved pressure
-// force plus pilot drag; the explicit legacy mode retains its historical
-// requested-polar readout. With neither flight mode enabled, they are the raw
-// pressure resultant, which carries no drag model and no useful glide ratio.
+// force plus distributed viscous and pilot drag; the explicit legacy mode
+// retains its historical requested-polar readout. With neither flight mode
+// enabled, they are the raw pressure resultant, which carries no drag model
+// and no useful glide ratio.
 struct AeroSummary
 {
     softwing::Vec3 force;   // pressure + drag, newtons

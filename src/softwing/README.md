@@ -49,10 +49,11 @@ count; `workerThreads == 0` still selects the untouched serial sweep):
   system's bulk velocity so fabric ringing is damped without the damping
   acting as a fake drag on the glide.
 - `StepSettings::cableConstraintSweepPairs` — optional serial reverse/forward
-  unilateral-cable passes distributed before the general structural sweeps.
-  They condition deep suspension load propagation without paying for extra
-  cloth iterations. Zero bypasses the path exactly and preserves historical
-  arithmetic; Playground free flight currently requests three pairs.
+  suspension-load-path passes distributed before and after the general
+  structural sweeps. They include unilateral cables and the bilateral canopy
+  and harness ties, conditioning deep load propagation without paying for
+  extra cloth iterations. Zero bypasses the path exactly and preserves
+  historical arithmetic; Playground free flight currently requests 96 pairs.
 - `OrthotropicMembraneMaterial::compressionStiffnessRatio` — an SPD-safe
   `D*K*D` compression reduction. The default `1.0` bypasses the new branch and
   preserves the original bilateral stiffness matrix exactly; the shear scale

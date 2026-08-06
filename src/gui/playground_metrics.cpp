@@ -584,8 +584,29 @@ LineLoadReport lineLoads(const SimBody &sim, const SimControls &controls)
             continue;
         }
         ++report.totalSegments;
+        if (segment.constraint >= sim.body->constraints().size()
+            || segment.a >= sim.body->nodes().size()
+            || segment.b >= sim.body->nodes().size()) {
+            continue;
+        }
+        const softwing::DistanceConstraint &constraint =
+            sim.body->constraints()[segment.constraint];
+        const double extension = std::max(
+            0.0,
+            length(sim.body->nodes()[segment.b].position
+                   - sim.body->nodes()[segment.a].position)
+                - constraint.restLength);
+        report.maximumExtensionMetres = std::max(
+            report.maximumExtensionMetres, extension);
+        if (constraint.restLength > 1.0e-12) {
+            report.maximumExtensionFraction = std::max(
+                report.maximumExtensionFraction,
+                extension / constraint.restLength);
+        }
         const double tension =
             constraintTensionNewtons(sim, controls, segment.constraint);
+        report.maximumTensionNewtons = std::max(
+            report.maximumTensionNewtons, tension);
         if (tension < 1.0) {
             ++report.slackSegments;
         }
@@ -609,7 +630,7 @@ double simulatedMassKilograms(const SimBody &sim)
             mass += 1.0 / node.inverseMass;
         }
     }
-    return mass;
+    return std::max(0.0, mass - sim.virtualAddedAirMassKg);
 }
 
 ShapeReport measureShape(const SimBody &sim,

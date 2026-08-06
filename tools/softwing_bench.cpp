@@ -1305,10 +1305,21 @@ int main(int argc, char **argv)
                         sim.trimmedLaunchVerticalResidualNewtons,
                         sim.trimmedLaunchCalibrationIterations,
                         sim.trimmedLaunchRelaxationFrames);
+            std::printf("flight rig      %.1f%% chord resultant, trim alpha %.2f deg,"
+                        " glide path %.2f deg\n",
+                        100.0 * sim.resultantChordFraction,
+                        sim.alphaTrimRadians * 180.0
+                            / 3.14159265358979323846,
+                        sim.glideAngleRadians * 180.0
+                            / 3.14159265358979323846);
         }
         std::printf("system mass     %.1f kg (%zu duplicate lines rejected)\n",
                     pg::simulatedMassKilograms(sim),
                     sim.duplicateLineCount);
+        if (sim.virtualAddedAirMassKg > 0.0) {
+            std::printf("added air       %.1f kg solver inertia (zero weight)\n",
+                        sim.virtualAddedAirMassKg);
+        }
         std::printf("line mass       %.3f kg authored + %.4f kg junction"
                     " floor + %.4f kg control floor\n",
                     sim.authoredLineMassKg,
@@ -1317,7 +1328,7 @@ int main(int argc, char **argv)
         std::printf("system          %.2f m^2 planform, AR %.2f\n\n",
                     sim.planformArea,
                     sim.aspectRatio);
-        std::printf("solver          %d x %d + %d cable sweep pair%s\n\n",
+        std::printf("solver          %d x %d + %d load-path sweep pair%s\n\n",
                     controls.substeps, controls.constraintIterations,
                     controls.freeFlightCableSweepPairs,
                     controls.freeFlightCableSweepPairs == 1 ? "" : "s");
@@ -1492,6 +1503,7 @@ int main(int argc, char **argv)
             std::printf("           risers %6.0f N; pilot %.0f N,"
                         " system %.0f N weight,"
                         "  %zu of %zu line segments slack,"
+                        "  max cable error %.2f mm/%.2f%% at %.0f N,"
                         "  fabric drag %5.0f N over %.1f m2,"
                         "  polar skin drag %5.0f/%5.0f N (%+.0f W)\n",
                         lineReport.riserNewtons,
@@ -1499,6 +1511,9 @@ int main(int argc, char **argv)
                         systemWeight,
                         lineReport.slackSegments,
                         lineReport.totalSegments,
+                        1000.0 * lineReport.maximumExtensionMetres,
+                        100.0 * lineReport.maximumExtensionFraction,
+                        lineReport.maximumTensionNewtons,
                         sim.lastFabricDragNewtons,
                         sim.lastExcessFrontalArea,
                         sim.lastPolarDragTractionNewtons,
@@ -1817,7 +1832,7 @@ int main(int argc, char **argv)
                    profile.distanceConstraintNanoseconds,
                    total,
                    options.frames);
-        reportLine("  cable-only sweeps",
+        reportLine("  load-path sweeps",
                    profile.cableConstraintNanoseconds,
                    total,
                    options.frames);

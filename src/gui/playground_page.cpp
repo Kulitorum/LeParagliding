@@ -452,6 +452,11 @@ public:
             << " kg junction floor + "
             << QString::number(sim.controlNodeFloorMassKg, 'f', 4)
             << " kg control floor\n";
+        if (sim.virtualAddedAirMassKg > 0.0) {
+            out << "added air      "
+                << QString::number(sim.virtualAddedAirMassKg, 'f', 1)
+                << " kg solver inertia (zero weight)\n";
+        }
         if (sim.tunnelLineSolverBallastKg > 0.0) {
             out << "line relaxation "
                 << QString::number(sim.tunnelLineSolverBallastKg, 'f', 3)
@@ -463,7 +468,7 @@ public:
             << controls.constraintIterations << " iterations";
         if (controls.freeFlight && controls.freeFlightCableSweepPairs > 0) {
             out << " + " << controls.freeFlightCableSweepPairs
-                << " reverse/forward cable-only pair"
+                << " reverse/forward load-path pair"
                 << (controls.freeFlightCableSweepPairs == 1 ? "" : "s");
         }
         out << "\n"
@@ -2979,7 +2984,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     quality_->setToolTip(QStringLiteral(
         "Substeps x iterations per frame. More substeps hold the fabric "
         "closer to its designed length; fewer keep the wing interactive. "
-        "Free flight also adds a cable-only reverse/forward suspension pass "
+        "Free flight also adds reverse/forward suspension load-path passes "
         "so payload load reaches the canopy without extra cloth iterations."));
     skinModel_ = new QComboBox(this);
     skinModel_->addItem(QStringLiteral("Legacy distance truss"));

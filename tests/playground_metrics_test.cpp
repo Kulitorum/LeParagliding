@@ -14,6 +14,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <numeric>
 #include <vector>
 
 namespace pg = lep::playground;
@@ -449,6 +450,17 @@ void testRiserCutAndMass()
           "riser: harness reaction is not double-counted");
     check(loads.totalSegments == 2 && loads.slackSegments == 0,
           "riser: only authored suspension segments are diagnosed");
+    check(loads.maximumExtensionMetres == 0.0
+              && loads.maximumExtensionFraction == 0.0
+              && std::abs(loads.maximumTensionNewtons - 5.0) < 1.0e-12,
+          "riser: cable solve error and peak tension are diagnosed");
+
+    sim.body->nodes()[upperLeft].position = {-0.66, 0.0, 0.88};
+    const pg::LineLoadReport stretched = pg::lineLoads(sim, controls);
+    check(std::abs(stretched.maximumExtensionMetres - 0.1) < 1.0e-12
+              && std::abs(stretched.maximumExtensionFraction - 0.1)
+                     < 1.0e-12,
+          "riser: maximum authored-cable length error is measured");
 
     check(std::abs(pg::simulatedMassKilograms(sim) - 80.3001) < 1.0e-12,
           "mass: actual nodes include the line junction");
@@ -498,6 +510,41 @@ void testPayloadMassLineMassAndLaunch(const pg::SimMesh &mesh)
           "line mass: a mesh without brakes has no generated control mass");
     check(released.tunnelLineSolverBallastKg == 0.0,
           "line mass: free flight carries no tunnel relaxation ballast");
+    check(released.virtualAddedAirMassKg > 0.0,
+          "added air: free flight carries canopy solver inertia");
+    const double solverInertialMass = std::accumulate(
+        released.body->nodes().begin(), released.body->nodes().end(), 0.0,
+        [](double sum, const softwing::Node &node) {
+            return sum + (node.inverseMass > 0.0
+                              ? 1.0 / node.inverseMass
+                              : 0.0);
+        });
+    check(std::abs(solverInertialMass
+                   - pg::simulatedMassKilograms(released)
+                   - released.virtualAddedAirMassKg)
+              < 1.0e-10,
+          "added air: solver inertia is excluded from physical mass");
+
+    pg::SimControls stillAirDrop = drop;
+    stillAirDrop.pressurePascal = 0.0;
+    pg::SimBody falling = pg::buildSimBody(mesh, {}, stillAirDrop);
+    pg::applyAerodynamicForces(falling, stillAirDrop);
+    bool addedAirGravityCancelled = true;
+    for (std::size_t node = 0;
+         node < falling.virtualAddedAirMassByNode.size(); ++node) {
+        const double virtualMass = falling.virtualAddedAirMassByNode[node];
+        if (virtualMass <= 0.0) {
+            continue;
+        }
+        const softwing::Vec3 expected{
+            0.0, 0.0,
+            virtualMass * pg::gravityMetresPerSecondSquared};
+        addedAirGravityCancelled =
+            addedAirGravityCancelled
+            && length(falling.body->nodes()[node].force - expected) < 1.0e-12;
+    }
+    check(addedAirGravityCancelled,
+          "added air: virtual gravity is cancelled before free fall");
     double endpointMass = 0.0;
     for (const std::size_t endpoint : endpoints) {
         endpointMass += 1.0 / released.body->nodes()[endpoint].inverseMass;
@@ -860,9 +907,14 @@ void testBoundedPressureRetrim(const pg::SimMesh &mesh)
         node.velocity = calibrationVelocity;
     }
     pg::applyPressure(flying, flyingControls);
+    const Vec3 stampedFreeFlightForce = pg::aerodynamicForce(flying);
     pg::applyAerodynamicForces(flying, flyingControls);
     const pg::WingAeroSample flyingSample =
         pg::sampleWingAero(flying, flyingControls);
+    check(length(flying.pressureSolve.requestedForce
+                 - stampedFreeFlightForce)
+              < 1.0e-8,
+          "pressure: free flight preserves the section-pressure lift field");
     check(flyingSample.valid
               && std::abs(flying.lastPolarDragTargetNewtons
                           - flyingSample.dynamicPressure

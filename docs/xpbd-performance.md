@@ -474,13 +474,11 @@ so it is a change of origin and not a brake on the system). The Playground
 exposes it as the **Free flight** checkbox on the Solver row, with a live
 readout (airspeed, sink, glide ratio, angle of attack, pilot mass).
 
-**It flies.** gnuC2 holds a steady glide — α 8–11°, glide ratio ≈ 7
-hands-up / ≈ 5.5 with light brake, sink ~1.2 m/s, span and enclosed volume
-within a few percent of the pinned wing, pilot steady 6.9 m under the
-canopy — verified with `softwing-bench --glide` (and `--brake N`,
-`--polar`). A little symmetric brake steadies it indefinitely; hands-up, a
-weakly damped surge mode grows over tens of seconds and can finally fold
-the wing, which is roughly what an unpiloted paraglider does.
+**It flies.** Production checks use `softwing-bench --glide` (and
+`--brake N`, `--polar`) and require pressure support, span, enclosed volume
+and suspension error to remain bounded together. Swoop 22 and both Hegala
+fixtures now hold their span and volume through the ten-second hands-up
+check instead of entering the pressure/slack/stress limit cycle.
 
 ### The bug that doomed everything before it
 
@@ -496,8 +494,9 @@ going to work until this was fixed. The convention is now physical
 
 ### Architecture
 
-The pressure field keeps the only job it is good at — shaping the fabric —
-and a classical finite-wing polar sets the system-level force:
+The calibrated section-pressure field shapes the fabric and supplies the
+free-flight lift at its natural centre of pressure. A classical finite-wing
+polar supplements that field where it is useful without replacing it:
 
 - C_L(α) with camber offset and stall roll-off (wing-level stall at ~20°,
   the section law's earlier roll-off stays for the local field), floored
@@ -507,17 +506,16 @@ and a classical finite-wing polar sets the system-level force:
 - C_D = parasitic + brake flap drag + induced (projected aspect ratio) +
   post-stall plate drag; bluff-body pilot drag acts at the pilot node
   against the pilot's own relative wind.
-- The difference between the polar's force and the pressure field's
-  resultant is imposed as a per-face **pressure retrim** δp_i = n̂_i·v +
-  μ·s_i, with (v, μ) solved 4×4 each frame so the increment lands the
-  exact force and zeroes the pitch moment about a hang-line anchor. Every
-  other application was measured failing: point loads at line attachments
-  dent the intrados, area-spread body forces lean the canopy over, fabric
-  "couples" crush the nose. Fabric carries pressure; feed it pressure.
-- The anchor sits on the designed hang line, travels with α deviation from
-  the build-time trim fixed point (static pitch stability) and with α rate
-  (Cmq damping), both on a low-passed α (the wake's timescale, not the
-  fabric's).
+- In free flight the bounded final-Cp solve preserves the section field's
+  total force and natural pitch moment. It uses the half-wing polar terms
+  only for asymmetric steering, then adds any missing positive viscous drag
+  as area-weighted, dissipative skin traction. Replacing the live pressure
+  force and moment with a second polar target made the two feedback paths
+  fight: pressure, stress and line slack oscillated in phase until collapse.
+- The tunnel still uses the hang-line anchor and prescribed polar force/pitch
+  retrim because it is a measurement instrument, not a freely moving coupled
+  system. The explicit legacy increment-and-clamp mode remains a regression
+  oracle only.
 - Relative wind is measured against the **canopy's** own mean velocity —
   against the whole system's (pilot-dominated) mean, the canopy's pendulum
   swing was invisible to the air and undamped. Per-node feedback remains
@@ -531,10 +529,18 @@ and a classical finite-wing polar sets the system-level force:
   dynamic-node weight, then runs eight co-moving quasi-static load frames and
   recalibrates on the retained geometry. DropFromRest remains an untouched
   pre-inflated zero-velocity release.
+- The canopy carries a potential-flow planform estimate of aerodynamic added
+  air mass as scalar solver inertia. Its artificial gravity is cancelled per
+  node, so it changes acceleration without changing system weight, launch
+  support or static line load. Omitting it left a few kilograms of cloth
+  reacting against a 90 kg pilot and turned small pressure changes into large
+  catch-and-release pulses.
 - `StepSettings::cableConstraintSweepPairs` adds deterministic serial
-  reverse/forward cable-only passes before structural sweeps. Playground free
-  flight uses three pairs so the payload reaction crosses its deep suspension
-  graph at 30x2; zero is the exact historical/tunnel bypass.
+  graph-depth reverse/forward passes over the complete suspension load path:
+  unilateral line cables plus bilateral canopy, harness and brake-handle ties.
+  Some passes are interleaved with cloth iterations and most close the path
+  after the final cloth sweep. Playground free flight uses 96 pairs at 30x2;
+  zero is the exact historical/tunnel bypass.
 
 Three earlier lessons that still stand:
 

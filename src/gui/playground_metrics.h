@@ -281,17 +281,23 @@ struct LineLoadReport
 {
     softwing::Vec3 riserForce;
     double riserNewtons = 0.0;
+    // Positive geometric violation of an authored unilateral cable after
+    // the final XPBD substep. This is solver length error, not the physical
+    // elastic extension implied by compliance (C = compliance * tension).
+    double maximumExtensionMetres = 0.0;
+    double maximumExtensionFraction = 0.0;
+    double maximumTensionNewtons = 0.0;
     std::size_t slackSegments = 0;
     std::size_t totalSegments = 0;
 };
 [[nodiscard]] LineLoadReport lineLoads(const SimBody &sim,
                                        const SimControls &controls);
 
-// Sum of the masses represented by dynamic solver nodes. In free flight this
-// is the complete simulated system (fabric, rib interiors, line junctions,
-// controls and pilot), unlike planform-area estimates used by older bench
-// output. Fixed tunnel anchors intentionally have no recoverable mass in the
-// SoftBody node contract and are excluded.
+// Sum of physical masses represented by dynamic solver nodes. In free flight
+// this is the complete gravitational system (fabric, rib interiors, line
+// junctions, controls and pilot), unlike planform-area estimates used by older
+// bench output. Aerodynamic added-air inertia and fixed tunnel anchors are
+// intentionally excluded.
 [[nodiscard]] double simulatedMassKilograms(const SimBody &sim);
 
 // Step until the measurement converges (quiescent, or stationary in
