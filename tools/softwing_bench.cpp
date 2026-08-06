@@ -428,7 +428,9 @@ WorstSection worstSection(const pg::SimBody &sim)
 {
     const auto &nodes = sim.body->nodes();
     WorstSection worst;
-    for (const pg::SimCell &cell : sim.cells) {
+    for (std::size_t cellIndex = 0; cellIndex < sim.cells.size();
+         ++cellIndex) {
+        const pg::SimCell &cell = sim.cells[cellIndex];
         if (cell.restSectionArea <= 0.0 || cell.restVolume <= 0.0) {
             continue;
         }
@@ -444,10 +446,9 @@ WorstSection worstSection(const pg::SimBody &sim)
             area += 0.5 * length(sum);
         }
         const double ratio = 0.5 * area / cell.restSectionArea;
-        const double spacing = length(
-            nodes[sim.ribChords[cell.ribs[1]].leadingNode].position
-            - nodes[sim.ribChords[cell.ribs[0]].leadingNode].position);
-        const double volume = 0.5 * area * spacing / cell.restVolume;
+        const double volume = cellIndex < sim.cellVolumeRatio.size()
+                                  ? sim.cellVolumeRatio[cellIndex]
+                                  : 1.0;
         worst.ratio = std::min(worst.ratio, ratio);
         worst.volume = std::min(worst.volume, volume);
         if (volume < 0.55) {
@@ -1520,13 +1521,17 @@ int main(int argc, char **argv)
                         sim.lastPolarDragTargetNewtons,
                         sim.lastPolarDragTractionPowerWatts);
             std::printf("           weakest cell #%zu at x %+.2f m: "
-                        "section %.0f%% of rest, %.0f Pa;"
+                        "section %.0f%%, volume %.0f%%, p/ram %.0f/%.0f Pa, "
+                        "mouth %.0f%%;"
                         "  kink %.0f deg at rib %zu"
                         " (span %.2f, x %+.2f m)\n",
                         weak.index,
                         weak.x,
                         100.0 * weak.sectionRatio,
+                        100.0 * weak.volumeRatio,
                         weak.pressurePascal,
+                        weak.ramPressurePascal,
+                        100.0 * weak.intakeOpening,
                         kink.degrees,
                         kink.rib,
                         kink.spanFraction,

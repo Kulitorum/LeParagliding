@@ -823,6 +823,53 @@ void testBoundedPressureRetrim(const pg::SimMesh &mesh)
                      <= pg::maximumExteriorPressureCoefficient + 1.0e-9,
           "pressure: final exterior Cp respects physical bounds");
 
+    std::vector<float> interiorField;
+    std::vector<float> exteriorField;
+    std::vector<float> fabricField;
+    pg::faceInteriorPressureField(sim, interiorField);
+    pg::faceExteriorPressureCoefficientField(sim, exteriorField);
+    pg::facePressureDifferenceField(sim, fabricField);
+    check(interiorField.size() == sim.renderFaces.size()
+              && exteriorField.size() == sim.renderFaces.size()
+              && fabricField.size() == sim.renderFaces.size(),
+          "pressure fields: all display fields follow render-face topology");
+    double displayFieldError = 0.0;
+    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+        displayFieldError = std::max(
+            {displayFieldError,
+             std::abs(static_cast<double>(interiorField[face])
+                      - sim.faceInteriorPressure[face]),
+             std::abs(static_cast<double>(exteriorField[face])
+                      - sim.faceAppliedExternalCp[face]),
+             std::abs(static_cast<double>(fabricField[face])
+                      - sim.body->triangles()[face].pressureDifference)});
+    }
+    check(displayFieldError < 1.0e-4,
+          "pressure fields: internal p, external Cp and fabric delta-p stay distinct");
+
+    pg::SimControls cellControls = controls;
+    cellControls.cellPressureModel = true;
+    pg::SimBody cellSim = pg::buildSimBody(mesh, {}, cellControls);
+    pg::applyAerodynamicForces(cellSim, cellControls);
+    std::vector<double> firstCellValue(
+        cellSim.cells.size(), std::numeric_limits<double>::quiet_NaN());
+    bool cellInteriorUniform = !cellSim.cells.empty();
+    for (std::size_t face = 0; face < cellSim.skinTriangleCount; ++face) {
+        const std::size_t cell = cellSim.faceAero[face].cell;
+        const double value = cellSim.faceInteriorPressure[face];
+        if (cell >= firstCellValue.size()) {
+            cellInteriorUniform = false;
+            continue;
+        }
+        if (std::isnan(firstCellValue[cell])) {
+            firstCellValue[cell] = value;
+        } else if (std::abs(firstCellValue[cell] - value) > 1.0e-12) {
+            cellInteriorUniform = false;
+        }
+    }
+    check(cellInteriorUniform,
+          "pressure fields: internal gauge pressure is uniform within each cell");
+
     Vec3 integrated;
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const double reconstructed =

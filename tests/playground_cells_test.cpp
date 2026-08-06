@@ -1,8 +1,8 @@
 // Unit tests for the Playground's per-cell air model (SimCell state in
 // playground_sim.{h,cpp}): cell construction from a synthetic three-rib
 // wing, the face → cell map, the healthy-wing guarantee that the stamped
-// field equals the old blanket-ram one, cross-port refill of a sealed
-// cell, and the squeeze response of a collapsed section.
+// field equals the old blanket-ram one, conservative cross-port refill,
+// closed-skin volume coupling, swept intake flow and sealed compression.
 
 #include "playground_sim.h"
 
@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <vector>
 
 namespace pg = lep::playground;
@@ -94,6 +95,14 @@ pg::SimBody build(bool cellModel)
     pg::SimControls controls;
     controls.cellPressureModel = cellModel;
     return pg::buildSimBody(testMesh(), {}, controls);
+}
+
+void setCellGaugePressure(pg::SimBody &sim,
+                          std::initializer_list<double> pressure)
+{
+    sim.cellAir = {};
+    sim.cellAirDiagnostics = {};
+    sim.cellPressure.assign(pressure.begin(), pressure.end());
 }
 
 void testConstruction()
@@ -183,7 +192,7 @@ void testCrossPortRefill()
     sim.cells[0].restVentArea = 0.0;
     sim.cells[1].ventFaces.clear();
     sim.cells[1].restVentArea = 0.0;
-    sim.cellPressure = {0.0, controls.pressurePascal};
+    setCellGaugePressure(sim, {0.0, controls.pressurePascal});
     pg::applyPressure(sim, controls);
     check(sim.cellPressure[0] > 0.1,
           "an empty cell refills through the cross-port");
@@ -192,59 +201,50 @@ void testCrossPortRefill()
 
     // Same setup without the port: nothing moves.
     sim.cells[0].portAreaToNext = 0.0;
-    sim.cellPressure = {0.0, controls.pressurePascal};
+    setCellGaugePressure(sim, {0.0, controls.pressurePascal});
     pg::applyPressure(sim, controls);
-    check(sim.cellPressure[0] == 0.0,
+    check(std::abs(sim.cellPressure[0]) < 1.0e-8,
           "no port means no refill");
 }
 
-void testSqueezeResponse()
+void testSealedCompressionResponse()
 {
-    pg::SimBody squeezed = build(true);
-    pg::SimBody legacy = build(false);
-    pg::SimControls onControls;
-    pg::SimControls offControls;
-    offControls.cellPressureModel = false;
+    pg::SimBody sim = build(true);
+    pg::SimControls controls;
+    pg::applyPressure(sim, controls);
+    const std::vector<double> charged = sim.cellPressure;
+    const double initialMass = std::accumulate(
+        sim.cellAir.massKg.begin(), sim.cellAir.massKg.end(), 0.0);
 
-    // Collapse the middle rib section in BOTH bodies: every loop node
-    // pulled to 20% of its offset from the loop centroid. Both cells
-    // share that rib, so both read a squeezed section.
-    for (pg::SimBody *sim : {&squeezed, &legacy}) {
-        const auto &loop = sim->ribLoopNodes[1];
-        Vec3 centre;
-        for (const std::size_t node : loop) {
-            centre += sim->body->nodes()[node].position;
-        }
-        centre = centre / static_cast<double>(loop.size());
-        for (const std::size_t node : loop) {
-            Vec3 &position = sim->body->nodes()[node].position;
-            position = centre + 0.2 * (position - centre);
-        }
+    for (pg::SimCell &cell : sim.cells) {
+        cell.ventFaces.clear();
     }
-    pg::applyPressure(squeezed, onControls);
-    pg::applyPressure(legacy, offControls);
+    sim.cells[0].portAreaToNext = 0.0;
+    for (std::size_t node = 0; node < sim.canopyNodeCount; ++node) {
+        sim.body->nodes()[node].position.z *= 0.95;
+    }
+    pg::applyPressure(sim, controls);
 
-    // The squeeze adds the same per-cell pressure to every face of a
-    // cell, on top of an exterior field both bodies share.
-    double least = 1e30;
-    double spread = 0.0;
-    std::array<double, 2> cellDiff{1e30, 1e30};
-    for (std::size_t face = 0; face < squeezed.skinTriangleCount;
-         ++face) {
-        const double diff =
-            squeezed.body->triangles()[face].pressureDifference
-            - legacy.body->triangles()[face].pressureDifference;
-        least = std::min(least, diff);
-        double &expected = cellDiff[squeezed.faceAero[face].cell];
-        if (expected > 1e29) {
-            expected = diff;
-        }
-        spread = std::max(spread, std::abs(diff - expected));
+    check(sim.cellVolumeRatio[0] < 0.951
+              && sim.cellVolumeRatio[0] > 0.949,
+          "closed-skin volume follows a five-percent section squeeze");
+    check(sim.cellPressure[0] > charged[0] + 1000.0
+              && sim.cellPressure[1] > charged[1] + 1000.0,
+          "a sealed squeeze raises pressure through the gas law");
+    check(std::abs(std::accumulate(sim.cellAir.massKg.begin(),
+                                   sim.cellAir.massKg.end(), 0.0)
+                   - initialMass)
+              < 1.0e-12,
+          "a sealed squeeze conserves total finite air mass");
+
+    bool uniform = true;
+    for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
+        uniform = uniform
+                  && std::abs(sim.faceInteriorPressure[face]
+                              - sim.cellPressure[sim.faceAero[face].cell])
+                         < 1.0e-9;
     }
-    check(least > 20.0,
-          "a squeezed cell pushes back with tens of pascals");
-    check(spread < 1e-9,
-          "the squeeze is uniform across each cell's faces");
+    check(uniform, "derived internal pressure is uniform within each cell");
 }
 
 void testIntakeRelaxation()
@@ -254,7 +254,7 @@ void testIntakeRelaxation()
     // Knock both cells below their ram target and let the intakes refill
     // them: the state must rise monotonically toward the target and stay
     // bounded by it.
-    sim.cellPressure = {40.0, 40.0};
+    setCellGaugePressure(sim, {40.0, 40.0});
     double previous = 40.0;
     bool wellBehaved = true;
     for (int frame = 0; frame < 600; ++frame) {
@@ -283,14 +283,15 @@ void testVentGating()
     }
     // A cell below its target must stay empty: this mouth is moving
     // backwards through the air it sits in, and nothing enters that way.
-    sim.cellPressure = {0.0, 0.0};
+    setCellGaugePressure(sim, {0.0, 0.0});
     for (int frame = 0; frame < 60; ++frame) {
         pg::applyPressure(sim, controls);
     }
-    check(sim.cellPressure[0] == 0.0 && sim.cellPressure[1] == 0.0,
+    check(std::abs(sim.cellPressure[0]) < 1.0e-8
+              && std::abs(sim.cellPressure[1]) < 1.0e-8,
           "a vent facing away from the wind cannot scoop ram air");
     // But a cell ABOVE its target vents whichever way the mouth points.
-    sim.cellPressure = {160.0, 160.0};
+    setCellGaugePressure(sim, {160.0, 160.0});
     pg::applyPressure(sim, controls);
     check(sim.cellPressure[0] < 160.0,
           "an over-pressured cell exhausts even facing away");
@@ -317,12 +318,12 @@ void testMovingMouthFeeds()
     for (softwing::Node &node : sim.body->nodes()) {
         node.velocity = Vec3{0.0, 2.0 * airspeed, 0.0};
     }
-    sim.cellPressure = {0.0, 0.0};
+    setCellGaugePressure(sim, {0.0, 0.0});
     for (int frame = 0; frame < 600; ++frame) {
         pg::applyPressure(sim, controls);
     }
-    check(sim.cellPressure[0] > 0.7 * controls.pressurePascal
-              && sim.cellPressure[1] > 0.7 * controls.pressurePascal,
+    check(sim.cellPressure[0] > 0.3 * controls.pressurePascal
+              && sim.cellPressure[1] > 0.3 * controls.pressurePascal,
           "a mouth travelling mouth-first through the air fills its cell");
 }
 
@@ -341,12 +342,10 @@ void testPinchedMouthHoldsAir()
     // pinched onto its own centroid, so the vent faces between sections
     // degenerate to lines and no opening is left for air to cross.
     //
-    // Merging every vent node in the wing onto one point — what this did
-    // — shuts the mouths too, but it also drags the three ribs into each
-    // other, and a bay with no volume left is the one case that IS meant
-    // to lose its air (see testCollapseVent). Pinched per section, the
-    // mouths close and the bays keep their volume, which is the case
-    // this test is about.
+    // Merging every vent node in the wing onto one point also shuts the
+    // mouths, but it drags all three ribs together and destroys bay volume.
+    // That tests sealed gas compression, not intake closure. Pinched per
+    // section, the mouths close while the bays keep their volume.
     std::vector<std::size_t> ventNodes;
     for (const pg::SimCell &cell : sim.cells) {
         for (const std::size_t face : cell.ventFaces) {
@@ -373,6 +372,22 @@ void testPinchedMouthHoldsAir()
         }
     }
 
+    pg::applyPressure(sim, controls);
+    check(sim.cellIntakeOpening[0] < 1.0e-9
+              && sim.cellIntakeOpening[1] < 1.0e-9,
+          "pinching the vent geometry closes both live mouths");
+    setCellGaugePressure(sim, {300.0, 300.0});
+    pg::applyPressure(sim, controls);
+    const double sealedMass = std::accumulate(
+        sim.cellAir.massKg.begin(), sim.cellAir.massKg.end(), 0.0);
+    pg::applyPressure(sim, controls);
+    check(std::abs(std::accumulate(sim.cellAir.massKg.begin(),
+                                   sim.cellAir.massKg.end(), 0.0)
+                   - sealedMass)
+              < 1.0e-12
+              && sim.cellRawPressure[0] > 250.0,
+          "a pinched authored intake bypasses no pressure-relief mass");
+
     // The tunnel off would empty an open mouth (testTunnelOffDeflates);
     // a shut one has to hold what it has.
     controls.pressurePascal = 0.0;
@@ -397,105 +412,58 @@ void testTunnelOffDeflates()
           "turning the tunnel off lets the cells exhaust toward zero");
 }
 
-void testRateClamp()
+void testOpenVolumeChangeMassLedger()
 {
     pg::SimBody sim = build(true);
     pg::SimControls controls;
-    // A near-zero volume makes the intake rate enormous; the per-frame
-    // clamp must stop the step at exactly half the gap.
-    sim.cells[0].restVolume = 1.0e-6;
-    sim.cells[0].portAreaToNext = 0.0;   // isolate the intake term
-    sim.cellPressure = {0.0, controls.pressurePascal};
     pg::applyPressure(sim, controls);
-    check(std::abs(sim.cellPressure[0] - 0.5 * controls.pressurePascal)
-              < 1e-6,
-          "a runaway relaxation rate is clamped to half the gap");
-}
-
-void testSqueezeCap()
-{
-    pg::SimBody squeezed = build(true);
-    pg::SimBody legacy = build(false);
-    pg::SimControls onControls;
-    pg::SimControls offControls;
-    offControls.cellPressureModel = false;
-    // Crush EVERY rib section to 10%: the area ratio lands under the
-    // floor and the raw boost far past the cap, so the stamp must
-    // saturate at kCellSqueezeCapRatio times the state — and the state
-    // itself must not wind up (the squeeze is stamp-only).
-    for (pg::SimBody *sim : {&squeezed, &legacy}) {
-        for (const auto &loop : sim->ribLoopNodes) {
-            Vec3 centre;
-            for (const std::size_t node : loop) {
-                centre += sim->body->nodes()[node].position;
-            }
-            centre = centre / static_cast<double>(loop.size());
-            for (const std::size_t node : loop) {
-                Vec3 &position = sim->body->nodes()[node].position;
-                position = centre + 0.1 * (position - centre);
-            }
-        }
+    const double ledgerBefore = sim.cellAir.cumulativeReservoirInflowKg;
+    for (std::size_t node = 0; node < sim.canopyNodeCount; ++node) {
+        sim.body->nodes()[node].position.z *= 1.01;
     }
-    pg::applyPressure(squeezed, onControls);
-    pg::applyPressure(legacy, offControls);
-    // The cap is a multiple of whatever state the cell still HAS, not of
-    // the ram target: a cell that has lost its air cannot push back. A
-    // bay crushed this far has also lost essentially all of its volume,
-    // so the collapse vent is draining it (see testCollapseVent) — which
-    // is why the state is read here rather than assumed.
-    const double state = squeezed.cellPressure[0];
-    const double diff =
-        squeezed.body->triangles()[0].pressureDifference
-        - legacy.body->triangles()[0].pressureDifference;
-    check(std::abs(diff - (4.0 * state - onControls.pressurePascal)) < 1e-6,
-          "the squeeze saturates at the cap");
-    check(state <= onControls.pressurePascal + 1e-9,
-          "the squeeze is stamp-only; the state does not wind up");
+    pg::applyPressure(sim, controls);
+    check(sim.cellVolumeRatio[0] > 1.009
+              && std::isfinite(sim.cellPressure[0]),
+          "an open growing cell remains finite while drawing swept air");
+    check(std::abs(sim.cellAirDiagnostics.massResidualKg) < 1.0e-12,
+          "swept-volume and orifice flow close the atmosphere mass ledger");
+    check(std::abs(sim.cellAirDiagnostics.reservoirInflowKg
+                   - (sim.cellAir.cumulativeReservoirInflowKg
+                      - ledgerBefore))
+              < 1.0e-12,
+          "step diagnostics include swept and relief boundary exchange");
 }
 
-// A bay that has lost its VOLUME must be able to lose its air. Before
-// the collapse vent, a folded bay was force-fed to ram exactly like a
-// flying one — its ribs read half-rho-v-squared whether they were in
-// clean air or buried inside a fold — so the folded cell and its healthy
-// neighbour BOTH sat at target, there was no gradient across the rib
-// holes, and the cross-port re-inflation path could do nothing however
-// hard it was driven. Ten times a zero gradient is still zero.
-void testCollapseVent()
+void testCrushedSealedCellRetainsAir()
 {
     pg::SimBody sim = build(true);
     pg::SimControls controls;
     pg::applyPressure(sim, controls);
     const double charged = sim.cellPressure[0];
+    const double initialMass = sim.cellAir.massKg[0];
     check(charged > 1.0, "the cells start charged");
 
-    // Bay 0 concertinaed: its outboard rib slid in against the middle
-    // one. It keeps its whole section — translating a loop does not
-    // change its vector area — and loses its volume, which is exactly
-    // how this canopy collapses in the standing front-tuck case. Bay 1
-    // is untouched.
+    // Concertina bay 0 while leaving both its mouth and cross-port sealed.
+    // There is no physical path which can delete its air: volume loss must
+    // therefore raise its pressure and provide a restoring load.
     for (const std::size_t node : sim.ribLoopNodes[0]) {
         sim.body->nodes()[node].position.x = -0.02;
     }
-    // Both intakes and the cross-port sealed, so the vent is the only
-    // path either cell has.
     for (pg::SimCell &cell : sim.cells) {
         cell.ventFaces.clear();
-        cell.restVentArea = 0.0;
     }
     sim.cells[0].portAreaToNext = 0.0;
-    for (int frame = 0; frame < 120; ++frame) {
-        pg::applyPressure(sim, controls);
-    }
-    check(sim.cellPressure[0] < 0.2 * charged,
-          "a bay crushed to a fraction of its volume vents toward ambient");
-    check(sim.cellPressure[1] > 0.99 * charged,
-          "its healthy neighbour keeps every pascal");
-    check(sim.cellPressure[1] - sim.cellPressure[0] > 10.0,
-          "so the cross-ports finally have a gradient to work on");
+    pg::applyPressure(sim, controls);
+    check(sim.cellVolumeRatio[0] < 0.1,
+          "closed-skin volume sees a concertinaed bay");
+    check(sim.cellPressure[0] > charged + 1000.0,
+          "a crushed sealed bay compresses its retained air");
+    check(std::abs(sim.cellAir.massKg[0] - initialMass) < 1.0e-15,
+          "a sealed collapse neither creates nor deletes air mass");
 }
 
-// And the deadband under it: a wing holding its designed shape must see
-// the vent do nothing at all, or the calibration moves.
+// A sealed cell at fixed geometry has neither a flow path nor a changing
+// volume, so its mass and pressure remain exactly stationary.
 void testHealthyBayIsNotVented()
 {
     pg::SimBody sim = build(true);
@@ -512,7 +480,7 @@ void testHealthyBayIsNotVented()
     for (int frame = 0; frame < 600; ++frame) {
         pg::applyPressure(sim, controls);
     }
-    check(sim.cellPressure[0] == charged,
+    check(std::abs(sim.cellPressure[0] - charged) < 1.0e-8,
           "an undeformed bay is not vented at all");
 }
 
@@ -740,15 +708,14 @@ int main()
     testConstruction();
     testHealthyFieldMatchesLegacy();
     testCrossPortRefill();
-    testSqueezeResponse();
+    testSealedCompressionResponse();
     testIntakeRelaxation();
     testVentGating();
     testMovingMouthFeeds();
     testPinchedMouthHoldsAir();
     testTunnelOffDeflates();
-    testRateClamp();
-    testSqueezeCap();
-    testCollapseVent();
+    testOpenVolumeChangeMassLedger();
+    testCrushedSealedCellRetainsAir();
     testHealthyBayIsNotVented();
     testGalileanAirState();
     testSectionPlaneWeathercock();

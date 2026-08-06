@@ -175,6 +175,7 @@ endif()
 # simulation used by the Playground tab's toy live-wing model.
 add_library(softwing_core STATIC
     src/softwing/canopy.cpp
+    src/softwing/cell_volume.cpp
     src/softwing/contact.cpp
     src/softwing/membrane.cpp
     src/softwing/parallel.cpp
@@ -201,6 +202,14 @@ add_library(playground_pressure STATIC
 target_include_directories(playground_pressure PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui)
 
+add_library(playground_cell_air STATIC
+    src/gui/playground_cell_air.cpp
+    src/gui/playground_cell_air.h
+)
+target_link_libraries(playground_cell_air PUBLIC softwing_core)
+target_include_directories(playground_cell_air PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui)
+
 add_library(playground_sim STATIC
     src/gui/playground_sim.cpp
     src/gui/playground_sim.h
@@ -216,6 +225,7 @@ target_include_directories(playground_contact PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
 )
 target_link_libraries(playground_sim PUBLIC
+    playground_cell_air
     playground_pressure
     Qt6::Core
     softwing_core
@@ -391,10 +401,20 @@ add_executable(playground-pressure-solve-test
 )
 target_link_libraries(playground-pressure-solve-test PRIVATE playground_pressure)
 
+add_executable(playground-cell-air-test
+    tests/playground_cell_air_test.cpp
+)
+target_link_libraries(playground-cell-air-test PRIVATE playground_cell_air)
+
 add_executable(softwing-material-test
     tests/softwing_material_test.cpp
 )
 target_link_libraries(softwing-material-test PRIVATE softwing_core)
+
+add_executable(softwing-cell-volume-test
+    tests/softwing_cell_volume_test.cpp
+)
+target_link_libraries(softwing-cell-volume-test PRIVATE softwing_core)
 
 add_executable(playground-cells-test
     tests/playground_cells_test.cpp
@@ -518,7 +538,9 @@ set_target_properties(
     airfoil-file-test
     playground-metrics-test
     playground-pressure-solve-test
+    playground-cell-air-test
     softwing-material-test
+    softwing-cell-volume-test
     playground-cells-test
     playground-material-test
     playground-contact-test
@@ -542,7 +564,9 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         airfoil-file-test
         playground-metrics-test
         playground-pressure-solve-test
+        playground-cell-air-test
         softwing-material-test
+        softwing-cell-volume-test
         playground-cells-test
         playground-material-test
         playground-contact-test
@@ -647,7 +671,9 @@ add_test(NAME airfoil_file COMMAND airfoil-file-test
     "${CMAKE_CURRENT_SOURCE_DIR}/Data/gnua.txt")
 add_test(NAME playground_metrics COMMAND playground-metrics-test)
 add_test(NAME playground_pressure_solve COMMAND playground-pressure-solve-test)
+add_test(NAME playground_cell_air COMMAND playground-cell-air-test)
 add_test(NAME softwing_material COMMAND softwing-material-test)
+add_test(NAME softwing_cell_volume COMMAND softwing-cell-volume-test)
 add_test(NAME playground_cells COMMAND playground-cells-test)
 add_test(NAME playground_material COMMAND playground-material-test)
 add_test(NAME playground_contact COMMAND playground-contact-test)

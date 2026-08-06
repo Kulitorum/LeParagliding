@@ -133,16 +133,25 @@ const std::array<QVector3D, 5> kRampStops{
     QVector3D(0.16F, 0.29F, 0.62F), QVector3D(0.16F, 0.60F, 0.62F),
     QVector3D(0.30F, 0.68F, 0.33F), QVector3D(0.90F, 0.68F, 0.20F),
     QVector3D(0.83F, 0.24F, 0.20F)};
+// Signed pressure quantities use an actual diverging scale: negative Cp or
+// inward fabric load is blue, zero is neutral, and positive Cp or outward
+// load is red. Reusing the sequential ramp painted every negative Cp as the
+// same "unloaded" blue and hid its magnitude completely.
+const QVector3D kSignedNegativeTint(0.16F, 0.29F, 0.62F);
+const QVector3D kSignedNeutralTint(0.66F, 0.68F, 0.66F);
+const QVector3D kSignedPositiveTint(0.83F, 0.24F, 0.20F);
 
 // One calibrated colour bar of the legend: what is plotted, the ramp's
-// full-scale value, the live peak, and how to print a value in the
-// bar's own unit.
+// numeric range, the live extreme, and how to print a value in the bar's
+// own unit. Diverging bars put neutral zero at its true place in the range.
 struct LegendBar
 {
     QString title;
-    double fullScale = 1.0;
-    double peak = 0.0;
+    double minimum = 0.0;
+    double maximum = 1.0;
+    double marker = 0.0;
     std::function<QString(double)> format;
+    bool diverging = false;
 };
 } // namespace
 
@@ -218,8 +227,9 @@ public:
         // Everything paintGL needs, in render precision.
         std::vector<QVector3D> positions;
         // For the mode in fieldMode: per NODE (metres for deviation,
-        // strain for stress/slack) or per FACE (pascals for pressure);
-        // empty in Plain mode. The tag lets the GUI keep interpreting
+        // strain for stress/slack) or per FACE (pascals for internal/fabric
+        // pressure, dimensionless for exterior Cp); empty in Plain mode.
+        // The tag lets the GUI keep interpreting
         // the field under the ramp that produced it during the window
         // between a mode switch and the worker's recomputation.
         std::vector<float> colourField;
@@ -522,8 +532,8 @@ public:
                "125 ms it is 7x slow.\n"
             << "\n"
             << "   sim s   real ms   q Pa  alpha    brakeL/R cm   "
-               "airspeed  sink   L/D   span  vol%   cells Pa   "
-               "risers N  slack   weak cell            kink        "
+               "airspeed  sink   L/D   span  vol%   resolved Pa "
+               "risers N  slack   weak cell s/v/m      kink        "
                "fabric N polarD A/T/W      Cp range       authority F/P/D\n";
         log_.restart(header);
     }
@@ -662,7 +672,9 @@ public:
             << field(lines.riserNewtons, 10, 0)
             << field(static_cast<double>(lines.slackSegments), 7, 0) << "  #"
             << weak.index << " x" << field(weak.x, 6, 2) << " "
-            << field(100.0 * weak.sectionRatio, 4, 0) << "%  "
+            << field(100.0 * weak.sectionRatio, 3, 0) << "/"
+            << field(100.0 * weak.volumeRatio, 3, 0) << "/"
+            << field(100.0 * weak.intakeOpening, 3, 0) << "%  "
             << field(kink.degrees, 4, 0) << "deg@" << kink.rib << " s"
             << field(kink.spanFraction, 4, 2)
             << field(sim.lastFabricDragNewtons, 9, 0)
@@ -1010,10 +1022,16 @@ private:
                 // alternated a fresh field with a stale one and the
                 // heatmap flickered.
                 if (colorMode == 4) {
-                    // Per FACE, unsmoothed on purpose: the cell-by-cell
-                    // pressure structure is the thing being examined.
-                    lep::playground::facePressureField(sim,
-                                                       currentField_);
+                    // Per FACE and deliberately flat: every face belonging
+                    // to one lumped pneumatic cell receives the same value.
+                    lep::playground::faceInteriorPressureField(
+                        sim, currentField_);
+                } else if (colorMode == 5) {
+                    lep::playground::faceExteriorPressureCoefficientField(
+                        sim, currentField_);
+                } else if (colorMode == 6) {
+                    lep::playground::facePressureDifferenceField(
+                        sim, currentField_);
                 } else if (colorMode == 2) {
                     lep::playground::nodeDeviationField(
                         sim, baseline, currentField_);
@@ -1607,7 +1625,9 @@ public:
         Stress,
         Deviation,
         Slack,
-        Pressure,
+        CellInteriorPressure,
+        ExteriorPressureCoefficient,
+        FabricPressureDifference,
     };
 
     void setColorMode(ColorMode mode)
@@ -1815,7 +1835,6 @@ public:
         update();
     }
 
-    // Peak stretch across the wing right now, for the legend.
     // Highest cable load in the wing right now, for the legend.
     double peakLineTension() const
     {
@@ -1828,7 +1847,7 @@ public:
 
     // Legend peaks over the cached fields — fresh only while their mode is
     // active, which is the only time the legend quotes them.
-    double peakStrain() const
+    double peakPositiveField() const
     {
         float peak = 0.0F;
         for (const float value : front_.colourField) {
@@ -1844,6 +1863,19 @@ public:
             peak = std::max(peak, value);
         }
         return peak;
+    }
+
+    // Signed pressure fields need the value furthest from zero, preserving
+    // its sign so the marker lands on the correct side of the legend.
+    double extremeFieldValue() const
+    {
+        float extreme = 0.0F;
+        for (const float value : front_.colourField) {
+            if (std::abs(value) > std::abs(extreme)) {
+                extreme = value;
+            }
+        }
+        return extreme;
     }
 
     // Positive compression fraction; the field stores strain (negative
@@ -1883,12 +1915,14 @@ public:
         switch (displayMode()) {
         case ColorMode::Stress:
             bars.push_back({QStringLiteral("edge stretch"),
+                            0.0,
                             std::max(stressFullScale_, 1.0e-6),
-                            peakStrain(), percent});
+                            peakPositiveField(), percent});
             break;
         case ColorMode::Deviation:
             bars.push_back(
-                {QStringLiteral("deviation"), deviationFullScaleMetres(),
+                {QStringLiteral("deviation"), 0.0,
+                 deviationFullScaleMetres(),
                  peakDeviation(), [](double value) {
                      return QStringLiteral("%1 mm").arg(value * 1000.0, 0,
                                                         'f', 0);
@@ -1896,22 +1930,46 @@ public:
             break;
         case ColorMode::Slack:
             bars.push_back({QStringLiteral("compression"),
+                            0.0,
                             std::max(stressFullScale_, 1.0e-6),
                             peakSlackCompression(), percent});
             break;
-        case ColorMode::Pressure:
-            bars.push_back({QStringLiteral("cell pressure"),
-                            pressureFullScalePascal(), peakStrain(),
+        case ColorMode::CellInteriorPressure:
+        {
+            const double scale = pressureFullScalePascal();
+            bars.push_back({QStringLiteral("resolved cell p"),
+                            -scale, scale, extremeFieldValue(),
                             [](double value) {
                                 return QStringLiteral("%1 Pa").arg(
                                     value, 0, 'f', 0);
-                            }});
+                            }, true});
             break;
+        }
+        case ColorMode::ExteriorPressureCoefficient:
+            bars.push_back(
+                {QStringLiteral("external Cp"),
+                 lep::playground::minimumExteriorPressureCoefficient,
+                 lep::playground::maximumExteriorPressureCoefficient,
+                 extremeFieldValue(), [](double value) {
+                     return QString::number(value, 'f', 2);
+                 }, true});
+            break;
+        case ColorMode::FabricPressureDifference: {
+            const double scale = pressureFullScalePascal();
+            bars.push_back({QStringLiteral("fabric Δp (in−out)"),
+                            -scale, scale, extremeFieldValue(),
+                            [](double value) {
+                                return QStringLiteral("%1 Pa").arg(
+                                    value, 0, 'f', 0);
+                            }, true});
+            break;
+        }
         case ColorMode::Plain:
             break;
         }
         if (lineTensionColoring_) {
             bars.push_back({QStringLiteral("line tension"),
+                            0.0,
                             std::max(lineFullScaleNewtons_, 1.0e-6),
                             peakLineTension(), [](double value) {
                                 return QStringLiteral("%1 N").arg(
@@ -2085,18 +2143,21 @@ protected:
             // VERTEX from per-node fields: a face-flat colour renders the
             // skin as facets, the node-scattered same data shades
             // smoothly across them.
+            const bool pressureFaceMode =
+                paintMode == ColorMode::CellInteriorPressure
+                || paintMode == ColorMode::ExteriorPressureCoefficient
+                || paintMode == ColorMode::FabricPressureDifference;
             const bool faceColoured =
                 paintMode == ColorMode::Deviation
-                || (paintMode == ColorMode::Pressure
+                || (pressureFaceMode
                         ? faceIndex < topo_.skinTriangleCount
                         : paintMode != ColorMode::Plain
                               && colourable(face));
-            // Pressure is a per-FACE quantity — the field is indexed by
-            // face, every corner wears the same tint, and the sharp
-            // steps at cell boundaries are the display's point.
-            const float facePressure =
-                paintMode == ColorMode::Pressure
-                        && faceIndex < front_.colourField.size()
+            // Pressure fields are per FACE: every corner wears the same tint.
+            // Internal pressure therefore stays exactly flat within a cell;
+            // exterior Cp and fabric Δp expose their own discretisation.
+            const float faceValue =
+                pressureFaceMode && faceIndex < front_.colourField.size()
                     ? front_.colourField[faceIndex]
                     : 0.0F;
             for (int corner = 0; corner < 3; ++corner) {
@@ -2121,10 +2182,23 @@ protected:
                         tint = rampTint(fieldValue
                                         / deviationFullScaleMetres());
                         break;
-                    case ColorMode::Pressure:
-                        tint = rampTint(facePressure
-                                        / pressureFullScalePascal());
+                    case ColorMode::CellInteriorPressure:
+                    {
+                        const double scale = pressureFullScalePascal();
+                        tint = signedPressureTint(faceValue, -scale, scale);
                         break;
+                    }
+                    case ColorMode::ExteriorPressureCoefficient:
+                        tint = signedPressureTint(
+                            faceValue,
+                            lep::playground::minimumExteriorPressureCoefficient,
+                            lep::playground::maximumExteriorPressureCoefficient);
+                        break;
+                    case ColorMode::FabricPressureDifference: {
+                        const double scale = pressureFullScalePascal();
+                        tint = signedPressureTint(faceValue, -scale, scale);
+                        break;
+                    }
                     case ColorMode::Plain:
                         break;
                     }
@@ -2243,9 +2317,9 @@ protected:
     }
 
     // One calibrated colour bar per active colouring, top-right in the
-    // viewport: quantity, unit, ticks and a live peak marker — a peak
-    // past full scale parks at the top with its true value printed, so
-    // saturation reads as saturation.
+    // viewport: quantity, unit, ticks and a live extreme marker. A value
+    // outside the displayed range parks at the corresponding end with its
+    // true value printed, so saturation reads as saturation.
     void drawLegendOverlay(QPainter &painter)
     {
         const std::vector<LegendBar> bars = legendBars();
@@ -2281,13 +2355,34 @@ protected:
                                   barHeight);
             QLinearGradient ramp(gradient.bottomLeft(),
                                  gradient.topLeft());
-            for (std::size_t stop = 0; stop < kRampStops.size();
-                 ++stop) {
-                const QVector3D &colour = kRampStops[stop];
+            if (bar.diverging) {
+                const double range = bar.maximum - bar.minimum;
+                const double zero = range > 0.0
+                                        ? std::clamp(-bar.minimum / range,
+                                                     0.0, 1.0)
+                                        : 0.5;
                 ramp.setColorAt(
-                    static_cast<double>(stop) / (kRampStops.size() - 1),
-                    QColor::fromRgbF(colour.x(), colour.y(),
-                                     colour.z()));
+                    0.0, QColor::fromRgbF(kSignedNegativeTint.x(),
+                                          kSignedNegativeTint.y(),
+                                          kSignedNegativeTint.z()));
+                ramp.setColorAt(
+                    zero, QColor::fromRgbF(kSignedNeutralTint.x(),
+                                           kSignedNeutralTint.y(),
+                                           kSignedNeutralTint.z()));
+                ramp.setColorAt(
+                    1.0, QColor::fromRgbF(kSignedPositiveTint.x(),
+                                          kSignedPositiveTint.y(),
+                                          kSignedPositiveTint.z()));
+            } else {
+                for (std::size_t stop = 0; stop < kRampStops.size();
+                     ++stop) {
+                    const QVector3D &colour = kRampStops[stop];
+                    ramp.setColorAt(
+                        static_cast<double>(stop)
+                            / (kRampStops.size() - 1),
+                        QColor::fromRgbF(colour.x(), colour.y(),
+                                         colour.z()));
+                }
             }
             painter.setPen(Qt::NoPen);
             painter.setBrush(ramp);
@@ -2307,12 +2402,18 @@ protected:
                                panel.right() - gradient.right() - 9,
                                16),
                         Qt::AlignLeft | Qt::AlignVCenter,
-                        bar.format(fraction * bar.fullScale));
+                        bar.format(bar.minimum
+                                   + fraction
+                                         * (bar.maximum - bar.minimum)));
                 }
             }
 
+            const double range = bar.maximum - bar.minimum;
             const double peakFraction =
-                std::clamp(bar.peak / bar.fullScale, 0.0, 1.0);
+                range > 0.0
+                    ? std::clamp((bar.marker - bar.minimum) / range,
+                                 0.0, 1.0)
+                    : 0.0;
             const double peakY =
                 gradient.bottom() - peakFraction * gradient.height();
             QPolygonF marker;
@@ -2330,7 +2431,7 @@ protected:
                 QRectF(gradient.right() + 7, labelY,
                        panel.right() - gradient.right() - 9, 16),
                 Qt::AlignLeft | Qt::AlignVCenter,
-                QStringLiteral("◂ %1").arg(bar.format(bar.peak)));
+                QStringLiteral("◂ %1").arg(bar.format(bar.marker)));
 
             top += static_cast<int>(panel.height()) + 8;
         }
@@ -2498,15 +2599,38 @@ private:
                + kRampStops[stop + 1] * blend;
     }
 
+    static QVector3D signedPressureTint(double value,
+                                        double minimum,
+                                        double maximum)
+    {
+        if (value <= 0.0) {
+            const double fraction = minimum < 0.0
+                                        ? std::clamp(
+                                              (value - minimum) / -minimum,
+                                              0.0, 1.0)
+                                        : 1.0;
+            return kSignedNegativeTint
+                       * static_cast<float>(1.0 - fraction)
+                   + kSignedNeutralTint * static_cast<float>(fraction);
+        }
+        const double fraction = maximum > 0.0
+                                    ? std::clamp(value / maximum, 0.0, 1.0)
+                                    : 1.0;
+        return kSignedNeutralTint * static_cast<float>(1.0 - fraction)
+               + kSignedPositiveTint * static_cast<float>(fraction);
+    }
+
     QVector3D stressTint(double strain) const
     {
         return rampTint(strain / std::max(stressFullScale_, 1.0e-6));
     }
 
-    // One scale slider serves four ramps. Its integer value is
+    // One scale slider serves five adjustable ramps. Its integer value is
     // hundredths of a percent for the strain modes (10..500 -> 0.1%..5%
-    // strain), millimetres for deviation (10..500 mm), and pascals for
-    // cell pressure (10..500 Pa). stressFullScale_ stores value/10000.
+    // strain), millimetres for deviation (10..500 mm), and pascals for the
+    // signed internal-pressure/fabric-Δp ranges (10..500 Pa). Exterior Cp
+    // keeps its fixed physical -3..1 range. stressFullScale_ stores
+    // value/10000.
     double deviationFullScaleMetres() const
     {
         return std::max(stressFullScale_ * 10.0, 1.0e-4);
@@ -2939,18 +3063,25 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     colorBy_->addItem(QStringLiteral("Stress"));
     colorBy_->addItem(QStringLiteral("Deviation"));
     colorBy_->addItem(QStringLiteral("Slack"));
-    colorBy_->addItem(QStringLiteral("Pressure"));
+    colorBy_->addItem(QStringLiteral("Cell resolved p"));
+    colorBy_->addItem(QStringLiteral("External Cp"));
+    colorBy_->addItem(QStringLiteral("Fabric Δp"));
     colorBy_->setToolTip(QStringLiteral(
         "Colour the skin by edge stretch (Stress), by distance from the "
         "designed shape (Deviation), by compressed — wrinkled — fabric "
-        "(Slack), or by the pressure difference across each cell's "
-        "fabric (Pressure) — each cell carries its own internal "
-        "pressure, fed through its intake and the rib cross-port "
-        "holes, so a tucked cell visibly loses its feed and a "
-        "collapsed side is re-fed by its neighbours."));
+        "(Slack), or by one of three distinct pressure quantities: "
+        "Cell resolved p is the uniform gauge pressure applied inside each "
+        "cell. It follows the calibrated ram field in healthy flight, then "
+        "the finite-mass/live-volume gas state takes over as the cell loses "
+        "volume, mouth opening or ram recovery. External Cp is the signed "
+        "outside aerodynamic "
+        "pressure coefficient; Fabric Δp is the actual signed load across "
+        "each triangle, p_inside − q·Cp. Blue/red on signed modes means "
+        "negative/positive."));
     // Full-scale for the ramp. Read as hundredths of a percent strain for
     // Stress and Slack (so the low end, where fabric actually works, still
-    // has resolution) and as millimetres for Deviation.
+    // has resolution), as millimetres for Deviation, and as pascals for the
+    // two adjustable pressure modes. External Cp uses fixed physical bounds.
     stressScale_ = new QSlider(Qt::Horizontal, this);
     stressScale_->setRange(
         10, static_cast<int>(maximumStressFullScaleStrain * 10000.0));
@@ -3411,7 +3542,9 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
                     view_->setColorMode(
                         static_cast<PlaygroundView::ColorMode>(index));
                 }
-                stressScale_->setVisible(index != 0);
+                // External Cp has a fixed physical -3..1 scale; all other
+                // non-plain fields use this slider in their own units.
+                stressScale_->setVisible(index != 0 && index != 5);
             });
     connect(lineScale_, &QSlider::valueChanged, this, [this](int value) {
         if (view_ != nullptr) {

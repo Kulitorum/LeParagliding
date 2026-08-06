@@ -571,6 +571,25 @@ pressures as a host upload rather than mirroring this model in a kernel — a
 per-face constant is 63 KB a frame — so on that path the field is only as
 fresh as the last readback. That does not affect what its timings measure.
 
+The colour selector keeps the three pressure quantities separate:
+
+- **Cell resolved p** is the spatially uniform gauge pressure applied inside
+  each cell. The solver also retains the raw `mRT/V` gas pressure. In healthy
+  flight the applied value uses the calibrated ram field as a prior; authority
+  shifts continuously to the finite-mass value as the bay loses volume, mouth
+  opening or ram recovery. Faces in one cell therefore have one colour
+  spatially, while the value changes over time and from cell to cell. Its map
+  is signed because a transient under-pressure is possible.
+- **External Cp** is the signed, dimensionless outside aerodynamic pressure
+  coefficient on a fixed physical -3..1 scale.
+- **Fabric Δp** is the actual signed triangle load in pascals,
+  `p_inside - q*Cp`. It varies around a cell because the outside Cp varies;
+  a uniform internal pressure does not imply a uniform fabric load.
+
+The signed maps are blue below zero, neutral at zero and red above zero.
+Keeping these as separate fields avoids presenting the upper-surface suction
+band as if it were a spanwise difference in cell inflation.
+
 The Solver control sits on a row of its own. Both existing rows are already
 full edge to edge at a near-maximised window — the filter row runs to the
 legend, and the wing row's four sliders stretch until whatever follows them

@@ -215,13 +215,18 @@ void nodeDeviationField(const SimBody &sim,
 // taut), skin surfaces only. Feeds the "Slack fabric" heatmap.
 void faceSlackField(const SimBody &sim, std::vector<float> &strainOut);
 
-// Per-render-face pressure DIFFERENCE across the fabric in pascals
-// (cell gauge pressure minus the outer Cp share), skin faces only, 0
-// elsewhere. Deliberately per face and unsmoothed: the point of the
-// pressure heatmap is to examine how inflation load lands cell by
-// cell, and the discontinuities at section boundaries are the
-// finding, not an artefact to blur away.
-void facePressureField(const SimBody &sim, std::vector<float> &pascalOut);
+// Three deliberately separate per-render-face pressure fields. The first is
+// the cell's spatially uniform internal gauge pressure, the second is the
+// dimensionless final outside-surface Cp, and the third is the actual load on
+// the fabric: p_inside - q*Cp in pascals. Skin faces only; zero elsewhere.
+// They stay face-flat so real cell boundaries and the aerodynamic
+// discretisation remain visible instead of being smoothed into one another.
+void faceInteriorPressureField(const SimBody &sim,
+                               std::vector<float> &pascalOut);
+void faceExteriorPressureCoefficientField(const SimBody &sim,
+                                           std::vector<float> &coefficientOut);
+void facePressureDifferenceField(const SimBody &sim,
+                                 std::vector<float> &pascalOut);
 
 // Per-NODE fabric strain over the constrained edges touching each
 // node: the LENGTH-WEIGHTED mean tension into tensileOut (>= 0) and
@@ -257,7 +262,10 @@ struct WeakCellReport
     std::size_t index = 0;
     double x = 0.0;             // mesh x of the bay's leading edge, m
     double sectionRatio = 1.0;  // live / rest section area
+    double volumeRatio = 1.0;   // closed-skin live / rest cell volume
     double pressurePascal = 0.0;
+    double ramPressurePascal = 0.0;
+    double intakeOpening = 0.0;
 };
 [[nodiscard]] WeakCellReport weakestCell(const SimBody &sim);
 

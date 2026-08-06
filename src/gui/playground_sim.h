@@ -3,6 +3,7 @@
 
 #include <softwing/soft_body.h>
 
+#include "playground_cell_air.h"
 #include "playground_contact.h"
 
 #include <QByteArray>
@@ -260,20 +261,20 @@ struct FaceAero
 };
 
 // One pneumatic cell: the bay between two spanwise-adjacent ribs. The
-// cells carry the wing's internal air as a per-cell gauge pressure state
-// instead of the old blanket assumption that every cell sits at ram
-// pressure: a cell is fed through its leading-edge intake only while that
-// intake actually faces the airflow, neighbouring cells exchange air
-// through the rib's cross-port holes, and a cell squeezed below its rest
-// section reacts with extra pressure. Together those are what let a
-// collapsed side re-inflate — the old open-loop stamp held a fold shut
-// forever, because a flat cell was stamped exactly like an inflated one.
+// cells carry finite air mass instead of assuming every bay sits at ram
+// pressure. Gauge pressure is derived from mass and live closed-skin volume;
+// the moving intake exchanges air with a recovered-pressure reservoir and
+// neighbouring cells exchange equal-and-opposite mass through rib ports.
 struct SimCell
 {
     // The two bounding ribs, as indices into ribChords, in span order.
     std::array<std::size_t, 2> ribs{0, 0};
     // Skin triangles of this cell's leading-edge intake (Vent surface).
     std::vector<std::size_t> ventFaces;
+    // Skin triangles bounding the bay, excluding authored end-cap faces.
+    // Virtual caps at the two rib loops close this surface for live-volume
+    // measurement, so a mid-cell cave is visible to the air model.
+    std::vector<std::size_t> skinFaces;
     // Rest magnitudes the live signals are measured against.
     double restVentArea = 0.0;      // m², sum of vent face areas
     // The volume of air the designed mouth scoops per metre of travel, m²
@@ -289,7 +290,10 @@ struct SimCell
     // mouth points somewhere else now" and "the mouth is closed".
     double restVentAperture = 0.0;
     double restSectionArea = 0.0;   // m², mean of the two rib loop areas
-    double restVolume = 0.0;        // m³, section area × rib spacing
+    // Closed-skin volume at build time. The rib-area × spacing proxy is
+    // retained only as a fallback for malformed imported topology.
+    double restVolume = 0.0;
+    double restProxyVolume = 0.0;
     // Cross-port area through the rib shared with the NEXT cell in span
     // order, summed from that rib's hole outlines. Zero when the design
     // has no holes there — an unported rib genuinely blocks cross-flow.
@@ -533,12 +537,20 @@ struct SimBody
     // is balanced against lagged by a quarter second — so a fast release
     // reversed the couple's sign for exactly that quarter second.
     std::array<double, 2> brakeFilteredMetres{0.0, 0.0};
-    // The pneumatic cells in span order, and their internal gauge pressure
-    // in pascals — the state applyPressure integrates each frame. Empty
-    // until the first stamp initialises it (cells pre-inflated to their
-    // ram target, so a fresh build behaves exactly like the old model).
+    // The pneumatic cells in span order. Finite air mass is persistent.
+    // cellRawPressure is the direct mRT/V gauge pressure; cellPressure is the
+    // resolved pressure applied to the cloth, using the calibrated ram field
+    // as a healthy-flight prior and handing authority to the gas state as a
+    // cell loses volume, mouth opening or ram recovery.
     std::vector<SimCell> cells;
+    CellAirState cellAir;
+    CellAirStepDiagnostics cellAirDiagnostics;
     std::vector<double> cellPressure;
+    std::vector<double> cellRawPressure;
+    std::vector<double> cellLiveVolume;
+    std::vector<double> cellVolumeRatio;
+    std::vector<double> cellIntakeOpening;
+    std::vector<double> cellRamPressure;
     // Fabric/line contact working set; inert until the option is on.
     PlaygroundContactScratch contact;
     // Chord fraction of the designed hang line: the chord station the
@@ -697,12 +709,10 @@ struct SimControls
     // untouched; the GUI turns it on. Ignored in free flight, which has
     // its own force pass.
     bool flightLoad = false;
-    // Per-cell internal air model: intake gating, cross-port flow between
-    // neighbouring cells, and a volume-deficit pressure response. On a
-    // healthy wing the stamped field converges to exactly the old
-    // uniform-ram one; it differs only in distress (a tucked cell seals
-    // its own intake, a collapsed side is re-fed by its neighbours). Off
-    // reproduces the old blanket ram-pressure stamp bit for bit.
+    // Per-cell finite-air-mass model: live closed volume, moving intake and
+    // conservative cross-port flow. A sealed squeeze raises pressure; an
+    // open mouth fills or exhausts according to its recovered ram pressure.
+    // Off reproduces the old blanket ram-pressure stamp bit for bit.
     bool cellPressureModel = true;
     // Multiplier on the rib cross-port flow — the path by which an
     // inflated cell re-feeds a collapsed neighbour. 1 is the area the

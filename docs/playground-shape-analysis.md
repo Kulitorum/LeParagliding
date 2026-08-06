@@ -74,35 +74,36 @@ lose pressure, so it also cannot re-inflate: a folded region kept being
 stamped exactly like a healthy one, the fold carried no strain energy,
 and the field pinned it shut forever (measured: after a −6° excursion the
 wing parked at −21% volume with one side's A row unloaded and never came
-back). `SimCell` replaces the assumption with one gauge-pressure state
-per bay between adjacent ribs, advanced once per frame in
-`applyPressure` by three effects — all positional and all restoring, so
-none re-opens the velocity loops the stability stack exists to avoid:
+back). `SimCell` now stores finite air mass per bay. Its raw gauge pressure is
+derived from `p = mRT/V - p_atmosphere`, where `V` is the live closed-skin
+volume measured from that bay's skin triangles plus virtual rib caps.
 
-- **Intake**: the cell relaxes toward its section's ram target, gated by
-  how much of its Vent-tagged skin still projects into the oncoming air
-  (normalised so the designed pose counts as fully open). A tucked nose
-  seals its own intake instead of being force-fed.
-- **Cross-ports**: neighbouring cells exchange pressure through the rib
-  hole area the design actually declares (`SimMesh::ribHoles`, exported
-  from the Section 4 hole groups). This is the re-inflation path — and a
-  design without holes honestly does not get it.
-- **Squeeze**: below 90% of the rest section area the cell answers with
-  extra pressure (up to 3× its state). Per-cell-uniform pressure times
-  the live area vectors is the gradient of enclosed volume, so this term
-  pushes toward re-opening even where a fold has inverted faces, which
-  the chordwise-shaped part of the stamp cannot.
+- **Moving intake**: each Vent-tagged mouth is a bidirectional orifice to a
+  reservoir whose pressure comes from the mouth's own motion through the
+  air. Its vector-area aperture distinguishes an open mouth from a pinched
+  one. Moving boundaries also sweep ambient-density air through an open
+  mouth, which is the low-Mach control-volume term needed to avoid treating
+  ordinary ballooning as expansion of a sealed pressure vessel.
+- **Cross-ports**: neighbouring cells exchange equal-and-opposite air mass
+  through the actual rib-hole area (`SimMesh::ribHoles`). Internal transfer
+  is conservative and cannot overdraw a donor or cross pressure equilibrium
+  within a pneumatic step.
+- **Volume response**: a sealed squeeze raises pressure naturally; a sealed
+  expansion lowers it. There is no synthetic squeeze boost and no
+  visual-collapse leak that deletes pressure. An open or leaky cell loses
+  pressure only through an explicit flow path.
 
-On a healthy wing the state converges to exactly the ram target and the
-squeeze deadband adds nothing, so the stamped field — and with it the
-whole `--shape` calibration — is unchanged (verified identical flags,
-loads and settle time on gnuC2, and `SimControls::cellPressureModel =
-false` reproduces the old stamp bit for bit; the bench takes
-`--no-cells`). Measured A/B on gnuC2 with the bench's `--dive` and
-`--tuck` experiments: moderate collapses (−4° excursion, grab yanks to
-~3 m) now recover cleanly where recovery is expected; after a violent
-−6° excursion the old model parks permanently deflated while the cell
-model re-pressurises every section back to rest volume.
+Pressure and volume are refreshed between XPBD substeps, because gas
+stiffness applied one frame late is unstable. `cellPressureModel = false`
+still selects the old blanket ram-pressure stamp for comparison.
+
+The raw gas state is deliberately distinct from the pressure applied to the
+cloth. In a healthy bay the resolved load retains the calibrated ram field as
+a prior, avoiding a stiff gas/cloth feedback driven by ordinary fabric
+breathing. As true volume, mouth opening or ram recovery is lost, authority
+shifts continuously to the finite-mass state. The raw value remains available
+in `cellRawPressure` for diagnostics; the `Cell resolved p` heatmap shows the
+pressure that actually loads the skin.
 
 ### Air state: the wing moves through the atmosphere
 
@@ -590,41 +591,32 @@ pull forward by 1.5 s. It is not in the tree for that reason.
 
 ## How a cell loses its air
 
-`advanceCellPressures` relaxes each cell toward its ribs' ram pressure,
-and `ribPressure` is ½ρv² from the rib's own relative wind **whether that
-rib is flying or buried inside a fold**. A collapsed cell was therefore
-force-fed exactly as hard as a healthy one, both sat at target, and there
-was no gradient across the rib holes for the cross-ports to work on — so
-the Neighbour-reinflation slider was inert by construction. Ten times a
-zero gradient is still zero. Measured through the standing `--dive -6`
-case on gnuC2, the cell states went *up*, 66 → 74–80 Pa, while the wing
-folded.
+Ordinary air flow uses explicit openings. The moving intake is
+bidirectional: a mouth with positive ram recovery fills the cell, while an
+open mouth with lower reservoir pressure lets an over-pressured cell exhaust.
+A pinched mouth is closed in both directions. Cross-ports transfer mass to a
+neighbour but cannot change the canopy's total finite air mass.
 
-A folded bay is now **vented toward ambient**, at a rate rising with how
-far it has collapsed. Three details are load-bearing:
+The reduced-order model cannot resolve mouth-lip flutter, acoustic waves or
+seam/fabric porosity. A cell with a live open intake therefore also has a
+documented out-of-envelope pressure-relief path: it exchanges mass with the
+atmosphere only when a geometric impulse would otherwise trap pressure outside
+the low-pressure ram-air envelope, with its authority scaled continuously by
+the live opening. A pinched mouth, or a test cell with no atmosphere boundary,
+is genuinely sealed and follows the gas law without that guard.
 
-- It is a **leak, not a reduced target.** The intake keeps its own ram
-  target and its own rate, so a folded bay whose mouth still meets the
-  airflow rams itself back open exactly as before. Reducing the target —
-  the obvious reading — would take that away and make a collapse
-  permanent by construction, which is the failure the cell model exists
-  to escape.
-- The signal is **bay volume, not section area.** Section area is the
-  natural guess and it never fires: through `--dive -6` the wing lost 31%
-  of its enclosed volume and half its span with no rib loop ever below
-  67% of its own rest section. This canopy does not collapse by
-  flattening its sections, it collapses by concertinaing its ribs
-  together. Bays go to 5–9% of their rest *volume* there, against 97–98%
-  on a healthy settled wing on both reference meshes.
-- It is **deadbanded** on that separation, so a wing holding its shape
-  sees exactly nothing.
+A visually folded bay is not assigned an arbitrary pressure loss. If its
+mouth is sealed and it is squeezed, pressure rises. If the fold leaves an
+opening but destroys ram recovery, it exhausts toward ambient. If later data
+justify fabric or seam porosity, that must be represented as a calibrated
+atmosphere port rather than another collapse threshold.
 
-`--dive -6` on gnuC2 then ends at −1.4% of its settled volume and 94% of
-its rest span, against −31% and 67% before; mirror error falls from
-2165 mm to 183 mm, the `UnderInflated` flag goes away, and the cell field
-carries a real 53–77 Pa gradient where it used to be a flat 74–80. The
-`--tuck 250` guard on the Swoop at 60×4 is untouched — no bay there ever
-crosses the threshold.
+The old rib-area × leading-edge-spacing proxy remains only as a malformed-
+topology fallback. Normal operation measures each bay from its actual skin,
+so a mid-cell cave changes volume even when both bounding rib loops stay
+unchanged. The bench reports section ratio, closed volume, pressure/ram and
+mouth opening together; a constant pressure is therefore distinguishable
+from missing geometry coupling.
 
 ## Selectable fabric formulation
 

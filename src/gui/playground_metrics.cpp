@@ -462,6 +462,7 @@ WeakCellReport weakestCell(const SimBody &sim)
     if (!sim.body) {
         return worst;
     }
+    worst.sectionRatio = std::numeric_limits<double>::infinity();
     const auto &nodes = sim.body->nodes();
     for (std::size_t index = 0; index < sim.cells.size(); ++index) {
         const SimCell &cell = sim.cells[index];
@@ -490,7 +491,19 @@ WeakCellReport weakestCell(const SimBody &sim)
             worst.pressurePascal = index < sim.cellPressure.size()
                                        ? sim.cellPressure[index]
                                        : 0.0;
+            worst.volumeRatio = index < sim.cellVolumeRatio.size()
+                                    ? sim.cellVolumeRatio[index]
+                                    : 1.0;
+            worst.ramPressurePascal = index < sim.cellRamPressure.size()
+                                          ? sim.cellRamPressure[index]
+                                          : 0.0;
+            worst.intakeOpening = index < sim.cellIntakeOpening.size()
+                                      ? sim.cellIntakeOpening[index]
+                                      : 0.0;
         }
+    }
+    if (!std::isfinite(worst.sectionRatio)) {
+        worst.sectionRatio = 1.0;
     }
     return worst;
 }
@@ -1344,15 +1357,43 @@ void faceSlackField(const SimBody &sim, std::vector<float> &strainOut)
     }
 }
 
-void facePressureField(const SimBody &sim, std::vector<float> &pascalOut)
+void faceInteriorPressureField(const SimBody &sim,
+                               std::vector<float> &pascalOut)
+{
+    pascalOut.assign(sim.renderFaces.size(), 0.0F);
+    const std::size_t skinFaces = std::min(
+        {sim.skinTriangleCount, sim.faceInteriorPressure.size(),
+         sim.renderFaces.size()});
+    for (std::size_t face = 0; face < skinFaces; ++face) {
+        pascalOut[face] =
+            static_cast<float>(sim.faceInteriorPressure[face]);
+    }
+}
+
+void faceExteriorPressureCoefficientField(
+    const SimBody &sim,
+    std::vector<float> &coefficientOut)
+{
+    coefficientOut.assign(sim.renderFaces.size(), 0.0F);
+    const std::size_t skinFaces = std::min(
+        {sim.skinTriangleCount, sim.faceAppliedExternalCp.size(),
+         sim.renderFaces.size()});
+    for (std::size_t face = 0; face < skinFaces; ++face) {
+        coefficientOut[face] =
+            static_cast<float>(sim.faceAppliedExternalCp[face]);
+    }
+}
+
+void facePressureDifferenceField(const SimBody &sim,
+                                 std::vector<float> &pascalOut)
 {
     pascalOut.assign(sim.renderFaces.size(), 0.0F);
     if (!sim.body) {
         return;
     }
     const auto &triangles = sim.body->triangles();
-    const std::size_t skinFaces =
-        std::min(sim.skinTriangleCount, triangles.size());
+    const std::size_t skinFaces = std::min(
+        {sim.skinTriangleCount, triangles.size(), sim.renderFaces.size()});
     for (std::size_t face = 0; face < skinFaces; ++face) {
         pascalOut[face] =
             static_cast<float>(triangles[face].pressureDifference);
