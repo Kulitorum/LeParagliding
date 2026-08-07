@@ -117,9 +117,31 @@ why the HUD shows simulated seconds.
 
 ### The brake's turning moment — done
 
-A one-sided pull now produces a real, mirror-symmetric turn **toward the
-braked side**: 8 cm ramped over 6 s gives −11 °/s left, +7 to +27 °/s
-right, against +3 to +11 °/s hands-up on the Swoop.
+A one-sided pull now produces a coordinated turn **toward the braked side**.
+The Swoop Original 30 cm right-brake guard completes a full circle without a
+shape departure: at 30 simulated seconds its accumulated air-relative course
+is +362 degrees, material span is 8.61 m, volume is -0.6%, alpha is 7.5
+degrees and achieved vertical pressure support is 915 N. Nose and course stay
+within about 5-7 degrees once established, with +9-11 degrees of bank and
+about +14 degrees/s course rate.
+
+The failure had three frame errors, not a side wind that should be removed:
+
+- mesh chord and relative wind point downstream (+Y at rest), while physical
+  forward/travel point the opposite way; the old forward-speed and heading
+  diagnostics silently used downstream as forward;
+- the per-rib pressure pass used the brake-moved LE-to-TE line and a rest/world
+  rib-plane normal, so a trailing-edge pull looked like rigid section pitch
+  and a yawed copy of a wing was aerodynamically different from itself;
+- the live span was reoriented against fixed world X every frame. It therefore
+  flipped sign, lift and alpha when a valid turn crossed 90 degrees.
+
+`FlightFrameSample` is now the shared contract. Wing forward is the negative
+of the live, brake-immune, all-rib mean chord. Each rib's pressure incidence
+uses its own LE-to-40%-extrados attitude line, calibrated back onto that rib's
+rest chord, and its rest section plane is carried into the live wing frame.
+The fixed low-tip-to-high-tip material ordering supplies span sign through a
+full rotation; it is never compared with a world axis.
 
 The wing-level resultant and live anchor remain shared over the whole skin.
 The bounded-Cp hierarchy freezes that force and its pitch result before adding
@@ -138,12 +160,26 @@ Three failed approaches are recorded in
 in the solve, a spanwise gradient layered on after, and running the whole
 force pass per half-span. Read them before proposing a fourth.
 
-**Still wrong: the bank is inverted.** The wing skids — banked out of the
-turn it is yawing into — because `polarFor` adds the brake as effective
-camber, so the braked half always makes *more* lift, and the speed loop
-that should drop it arrives a second later and is worth about the same.
-Closing that means re-calibrating `kBrakeCamberRadians` against a
-flap-deflected stall angle, which needs data this project does not have.
+The former "inverted bank" diagnosis was itself a frame-sign error. The old
+metric called the +X tip rising positive bank even though a positive turn
+toward +X requires that tip to lower and lift to tilt +X. With physical
+forward set to -chord, the 30 cm guard has bank and course rate of the same
+sign.
+
+In free flight, brake lift/drag is not added a second time in `polarFor`. The
+cable has already deflected the live trailing-edge faces before the pressure
+pass, so their pressure resultant contains the brake at its real location. The
+removed free-flight effective-camber and explicit-drag additions double-counted
+that flap, yawed the nose to +29 degrees while course had reached only +5
+degrees, and produced 23 degrees of crossflow before the old 4-second collapse.
+The pinned/tunnel measurement path retains its prescribed polar brake model for
+compatibility.
+
+This does not certify arbitrary deep brake. A sustained 40 cm pull on this
+reduced-order Swoop still reaches a deep asymmetric departure around five
+seconds; 30 cm is the reproduced report and the demonstrated 360-degree guard.
+Do not hide the remaining deep-control/material limit by rotating the air,
+clamping a user control silently, or adding a point-force turn shortcut.
 
 ### A folded cell losing its air — done
 
@@ -164,18 +200,16 @@ things are load-bearing and each was learned by measurement:
 53–77 Pa gradient where it used to be a flat 74–80. The ×10 slider is
 finally a real experiment.
 
-### Brake hand-speed limit and polar wake lag — done, NOT yet validated
+### Brake hand-speed limit — done and exercised by the turn guard
 
 `SimBody::brakeApplied` chases the control at `kBrakeHandSpeed` (0.6 m/s)
-**in simulated time**, and `SimBody::brakeFilteredMetres` lags that by
-`alphaFilterSeconds` before reaching the polar. The first fixes the
-wall-clock/simulated-time mismatch above; the second makes the turning
-couple internally consistent, since the rotation-derived halves of it are
-already low-passed.
-
-**Neither has been shown to fix the case that motivated them.** The
-motivating report is in the next section and reproducing it needs the
-GUI, not the bench.
+**in simulated time**. This fixes the wall-clock/simulated-time mismatch above
+and is exercised by the 30 cm Swoop guard. Free flight does not consume the
+separate wake-filtered polar brake state: filtering a duplicate polar flap
+still leaves it duplicated. Its line/fabric geometry is the single brake
+input; the pinned/tunnel compatibility path retains the old polar state. The
+half-angle and half-dynamic-pressure states remain low-passed because they are
+aerodynamic rotation/sideslip response.
 
 ---
 

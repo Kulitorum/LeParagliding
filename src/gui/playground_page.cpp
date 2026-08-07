@@ -1115,8 +1115,12 @@ private:
                 }
                 const softwing::Vec3 throughAir =
                     velocity - controls.ambientAirVelocityWorld;
-                back.forwardSpeed =
-                    dot(throughAir, sim.restChordDirection);
+                const lep::playground::FlightFrameSample flightFrame =
+                    lep::playground::sampleFlightFrame(sim, controls);
+                if (flightFrame.valid) {
+                    back.forwardSpeed =
+                        dot(throughAir, flightFrame.forwardDirection);
+                }
                 back.sinkSpeed = throughAir.z;
                 if (canopyCount > 0) {
                     canopyCentre /= double(canopyCount);

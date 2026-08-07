@@ -243,6 +243,11 @@ struct RibChord
     // Rib plane normal at rest, i.e. the local span direction. The section's
     // angle of attack is measured in the plane perpendicular to it.
     softwing::Vec3 spanAxis;
+    // Rest-pose rotation from the brake-immune LE->40%-extrados attitude
+    // line back onto this rib's true LE->TE chord. Applying it to the live
+    // attitude line measures section incidence without treating a deflected
+    // trailing edge as rigid-body pitch.
+    double attitudeOffsetRadians = 0.0;
     double restChordLength = 0.0;
 };
 
@@ -526,16 +531,9 @@ struct SimBody
     // depend on how busy the machine is, and the headless bench would
     // stop reproducing the GUI.
     std::array<double, 2> brakeApplied{0.0, 0.0};
-    // And the pull the POLAR sees, low-passed. The geometric side of a
-    // brake is immediate — the line shortens, the trailing edge comes
-    // down, the solver carries it — but the aerodynamic side is not: a
-    // deflected trailing edge changes the section's circulation only as
-    // fast as the wake can adjust, which is the same lag the wing-level
-    // angle of attack already runs on. Without it the turning couple was
-    // internally inconsistent, its camber difference following the
-    // pilot's hand instantly while the rotation-derived differences it
-    // is balanced against lagged by a quarter second — so a fast release
-    // reversed the couple's sign for exactly that quarter second.
+    // Wake-filtered pull retained by the pinned prescribed-polar path. Free
+    // flight intentionally does not add a second polar brake on top of its
+    // already deflected pressure-loaded fabric.
     std::array<double, 2> brakeFilteredMetres{0.0, 0.0};
     // The pneumatic cells in span order. Finite air mass is persistent.
     // cellRawPressure is the direct mRT/V gauge pressure; cellPressure is the
@@ -785,8 +783,28 @@ struct WingAeroSample
     double dragCoefficient = 0.0;    // profile + lines + induced
     softwing::Vec3 windDirection;    // unit, pointing downstream
     softwing::Vec3 liftDirection;    // unit, normal to the wind
-    softwing::Vec3 spanAxis;         // unit, live, oriented like the rest one
+    softwing::Vec3 spanAxis;         // unit, live, low-to-high material span
     softwing::Vec3 chordDirection;   // unit, live, normal to spanAxis
+};
+
+// The free-flight frame seen by the canopy. Mesh chords and relative wind
+// point downstream (leading edge -> trailing edge); forward is deliberately
+// the opposite direction. Course is the canopy's travel through the air, not
+// its ground track. Horizontal headings are zero along the initial -Y nose
+// direction and positive toward solver +X.
+struct FlightFrameSample
+{
+    bool valid = false;
+    softwing::Vec3 forwardDirection;     // trailing edge -> leading edge
+    softwing::Vec3 travelVelocity;       // canopy velocity - ambient air
+    softwing::Vec3 spanAxis;             // live, low-to-high material span
+    softwing::Vec3 upDirection;
+    double forwardSpeed = 0.0;
+    double spanwiseSpeed = 0.0;
+    double sideslipRadians = 0.0;        // course toward +span is positive
+    double noseHeadingRadians = 0.0;     // initial nose direction is zero
+    double courseHeadingRadians = 0.0;   // initial flight direction is zero
+    double bankRadians = 0.0;            // lift toward live +span is positive
 };
 
 // Central air-state contract. referenceFlowVelocity is the q-derived test/
@@ -818,6 +836,8 @@ struct HalfAeroKinematics
     const SimBody &sim, const WingAeroSample &sample);
 [[nodiscard]] WingAeroSample sampleWingAero(const SimBody &sim,
                                             const SimControls &controls);
+[[nodiscard]] FlightFrameSample sampleFlightFrame(
+    const SimBody &sim, const SimControls &controls);
 
 // The aerodynamic force pass. In free flight the calibrated section-pressure
 // field supplies lift and its natural pitch moment; a finite-wing polar adds

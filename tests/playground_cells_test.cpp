@@ -575,6 +575,134 @@ void testGalileanAirState()
           "Galilean: one solver step preserves relative state");
 }
 
+void testFlightFrameDefinition()
+{
+    pg::SimControls controls;
+    controls.freeFlight = true;
+    controls.launchMode = pg::LaunchMode::DropFromRest;
+    controls.cellPressureModel = false;
+    pg::SimBody sim = pg::buildSimBody(testMesh(), {}, controls);
+    const double speed = 9.0;
+    for (softwing::Node &node : sim.body->nodes()) {
+        node.velocity = {0.0, -speed, 0.0};
+    }
+
+    const pg::FlightFrameSample aligned =
+        pg::sampleFlightFrame(sim, controls);
+    check(aligned.valid,
+          "flight frame: aligned free-flight sample is valid");
+    check(nearVec(aligned.forwardDirection, {0.0, -1.0, 0.0}, 1e-12)
+              && nearVec(aligned.travelVelocity,
+                         {0.0, -speed, 0.0}, 1e-12),
+          "flight frame: forward is opposite the LE-to-TE mesh chord");
+    check(std::abs(aligned.forwardSpeed - speed) < 1e-12
+              && std::abs(aligned.spanwiseSpeed) < 1e-12
+              && std::abs(aligned.noseHeadingRadians) < 1e-12
+              && std::abs(aligned.courseHeadingRadians) < 1e-12,
+          "flight frame: aligned travel has positive speed and zero headings");
+
+    // A course ten degrees toward the +X span with the nose unchanged is
+    // positive sideslip, not a reversed forward velocity.
+    const double beta = 10.0 * kPi / 180.0;
+    for (softwing::Node &node : sim.body->nodes()) {
+        node.velocity = {speed * std::sin(beta),
+                         -speed * std::cos(beta),
+                         0.0};
+    }
+    const pg::FlightFrameSample slipping =
+        pg::sampleFlightFrame(sim, controls);
+    check(slipping.valid
+              && std::abs(slipping.courseHeadingRadians - beta) < 1e-12
+              && std::abs(slipping.noseHeadingRadians) < 1e-12
+              && std::abs(slipping.sideslipRadians - beta) < 1e-12,
+          "flight frame: +X course offset has the documented sideslip sign");
+}
+
+void testBrakeImmuneSectionIncidence()
+{
+    pg::SimControls controls;
+    controls.freeFlight = true;
+    controls.launchMode = pg::LaunchMode::DropFromRest;
+    controls.cellPressureModel = false;
+    pg::SimBody base = pg::buildSimBody(testMesh(), {}, controls);
+    pg::SimBody deflected = pg::buildSimBody(testMesh(), {}, controls);
+    const Vec3 flightVelocity{0.0, -9.0, -1.0};
+    for (softwing::Node &node : base.body->nodes()) {
+        node.velocity = flightVelocity;
+    }
+    for (softwing::Node &node : deflected.body->nodes()) {
+        node.velocity = flightVelocity;
+    }
+    check(deflected.ribChords.size() == 3,
+          "section incidence: synthetic wing exposes three rib frames");
+    if (deflected.ribChords.size() != 3) {
+        return;
+    }
+
+    // Move only the aft point of one rib, as a brake does. The skin geometry
+    // is allowed to change, but the forward 40% attitude reference is not.
+    const std::size_t trailing = deflected.ribChords[2].trailingNode;
+    deflected.body->nodes()[trailing].position.z -= 0.20;
+    pg::applyPressure(base, controls);
+    pg::applyPressure(deflected, controls);
+    check(base.ribLiftCoefficient.size() == 3
+              && deflected.ribLiftCoefficient.size() == 3,
+          "section incidence: both pressure samples report rib lift");
+    check(base.ribLiftCoefficient.size() == 3
+              && deflected.ribLiftCoefficient.size() == 3
+              && std::abs(base.ribLiftCoefficient[2]
+                          - deflected.ribLiftCoefficient[2])
+                     < 1e-12,
+          "section incidence: trailing-edge pull is not rigid section pitch");
+}
+
+void testRigidYawPreservesSectionIncidence()
+{
+    pg::SimControls controls;
+    controls.freeFlight = true;
+    controls.launchMode = pg::LaunchMode::DropFromRest;
+    controls.cellPressureModel = false;
+    pg::SimBody base = pg::buildSimBody(testMesh(), {}, controls);
+    pg::SimBody yawed = pg::buildSimBody(testMesh(), {}, controls);
+    // Past 90 degrees catches any attempt to reorient the live material span
+    // against the fixed rest/world axis.
+    const double yaw = 135.0 * kPi / 180.0;
+    const auto rotateZ = [&](const Vec3 &value) {
+        return Vec3{std::cos(yaw) * value.x - std::sin(yaw) * value.y,
+                    std::sin(yaw) * value.x + std::cos(yaw) * value.y,
+                    value.z};
+    };
+    const Vec3 velocity{0.0, -9.0, -1.0};
+    for (std::size_t index = 0; index < base.body->nodes().size(); ++index) {
+        base.body->nodes()[index].velocity = velocity;
+        yawed.body->nodes()[index].position =
+            rotateZ(yawed.body->nodes()[index].position);
+        yawed.body->nodes()[index].velocity = rotateZ(velocity);
+    }
+    pg::applyPressure(base, controls);
+    pg::applyPressure(yawed, controls);
+    bool invariant = base.ribLiftCoefficient.size()
+                     == yawed.ribLiftCoefficient.size();
+    if (invariant) {
+        for (std::size_t rib = 0; rib < base.ribLiftCoefficient.size();
+             ++rib) {
+            invariant = invariant
+                        && std::abs(base.ribLiftCoefficient[rib]
+                                    - yawed.ribLiftCoefficient[rib])
+                               < 1e-11;
+        }
+    }
+    check(invariant,
+          "section incidence: rigid yaw carries every rib plane with the wing");
+    const pg::FlightFrameSample frame =
+        pg::sampleFlightFrame(yawed, controls);
+    check(frame.valid
+              && std::abs(frame.noseHeadingRadians - yaw) < 1e-11
+              && std::abs(frame.courseHeadingRadians - yaw) < 1e-11
+              && std::abs(frame.forwardSpeed - 9.0) < 1e-11,
+          "flight frame: material forward and span remain continuous past 90 degrees");
+}
+
 void testSectionPlaneWeathercock()
 {
     pg::SimControls controls;
@@ -718,6 +846,9 @@ int main()
     testCrushedSealedCellRetainsAir();
     testHealthyBayIsNotVented();
     testGalileanAirState();
+    testFlightFrameDefinition();
+    testBrakeImmuneSectionIncidence();
+    testRigidYawPreservesSectionIncidence();
     testSectionPlaneWeathercock();
     if (failures != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);

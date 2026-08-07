@@ -362,6 +362,26 @@ double spanExtent(const pg::SimBody &sim)
     return high - low;
 }
 
+double canopyExtentAlong(const pg::SimBody &sim,
+                         const softwing::Vec3 &axis)
+{
+    const softwing::Vec3 direction = normalized(axis);
+    if (length(direction) <= 0.0) {
+        return spanExtent(sim);
+    }
+    double low = 1e30;
+    double high = -1e30;
+    const std::size_t count = std::min(sim.canopyNodeCount,
+                                       sim.body->nodes().size());
+    for (std::size_t node = 0; node < count; ++node) {
+        const double station =
+            dot(sim.body->nodes()[node].position, direction);
+        low = std::min(low, station);
+        high = std::max(high, station);
+    }
+    return count > 0 ? high - low : 0.0;
+}
+
 // Which side of the centreline each cell sits on, captured ONCE before
 // the collapse: a folded side's ribs cross the centreline, and a live
 // classification would migrate them into the other column — corrupting
@@ -1407,8 +1427,12 @@ int main(int argc, char **argv)
                 ++counted;
             }
             canopy /= static_cast<double>(counted);
-            const double forward =
-                dot(throughAir, sim.restChordDirection);
+            const pg::FlightFrameSample flightFrame =
+                pg::sampleFlightFrame(sim, controls);
+            const double forward = flightFrame.valid
+                                       ? dot(throughAir,
+                                             flightFrame.forwardDirection)
+                                       : 0.0;
             std::printf("  %5.1fs   %7.2f   %+6.2f  %6.2f    %+6.2f"
                         "    %+6.2f    %6.2f    %+5.1f%%     %6.2f m"
                         "   [L %5.0f N, Pz %5.0f N]\n",
@@ -1418,7 +1442,9 @@ int main(int argc, char **argv)
                         sim.lastGlideRatio,
                         forward,
                         throughAir.z,
-                        spanExtent(sim),
+                        flightFrame.valid
+                            ? canopyExtentAlong(sim, flightFrame.spanAxis)
+                            : spanExtent(sim),
                         designVolume > 0.0
                             ? 100.0 * (enclosedVolume(sim) - designVolume)
                                   / designVolume
@@ -1536,7 +1562,7 @@ int main(int argc, char **argv)
                         kink.rib,
                         kink.spanFraction,
                         kink.x);
-            // Bank, heading, turn rate and sideslip.
+            // Bank, nose heading, course, turn rate and sideslip.
             //
             // Heading is taken from the wing's travel THROUGH THE AIR,
             // not from its ground track. The model flies the wing in an
@@ -1546,34 +1572,25 @@ int main(int argc, char **argv)
             // nothing about where the wing is pointing — a 10 degree yaw
             // can swing it 90.
             //
-            // Signs are the SOLVER's: the span axis runs toward +x, so a
-            // positive bank has the +x tip high (the side
-            // controls.brakeRight acts on) and a positive turn rate is a
-            // turn from +y toward +x. A wing that answers a left brake
-            // (negative x, the viewer's right) with a turn toward that
-            // side shows a negative bank and a negative turn rate
-            // together; a bank with no turn is a wing falling over rather
-            // than steering, and a turn with no bank is a flat skid.
+            // Signs are the SOLVER's: zero points along the physical nose
+            // direction (-Y), positive heading turns toward +X, and positive
+            // bank means lift is tilted toward +X. A coordinated turn has
+            // bank and course rate with the same sign. Nose minus course
+            // exposes the yaw/course separation that a single "heading"
+            // column used to hide.
             const double time = (frame + 1) / 60.0;
-            const pg::WingAeroSample turnSample =
-                pg::sampleWingAero(sim, controls);
             double bankDegrees = 0.0;
             double turnRate = 0.0;
-            double sideslip = 0.0;
-            if (turnSample.valid) {
-                bankDegrees =
-                    std::asin(std::clamp(turnSample.spanAxis.z, -1.0, 1.0))
-                    * 180.0 / 3.14159265358979;
-                // Where the wing is going relative to the air it is in.
-                const softwing::Vec3 travel =
-                    -1.0 * turnSample.windDirection;
-                sideslip = turnSample.airspeed
-                           * dot(travel, turnSample.spanAxis);
+            if (flightFrame.valid) {
+                bankDegrees = flightFrame.bankRadians
+                              * 180.0 / 3.14159265358979;
                 const double horizontal = std::sqrt(
-                    travel.x * travel.x + travel.y * travel.y);
+                    flightFrame.travelVelocity.x
+                        * flightFrame.travelVelocity.x
+                    + flightFrame.travelVelocity.y
+                          * flightFrame.travelVelocity.y);
                 if (horizontal > 1.0e-6) {
-                    const double heading =
-                        std::atan2(travel.x, travel.y);
+                    const double heading = flightFrame.courseHeadingRadians;
                     if (haveHeading && time > previousTime) {
                         double delta = heading - previousHeading;
                         while (delta > 3.14159265358979) {
@@ -1591,12 +1608,33 @@ int main(int argc, char **argv)
                     haveHeading = true;
                 }
             }
-            std::printf("           bank %+6.2f deg,  heading %+7.1f deg,"
-                        "  turn %+6.2f deg/s,  sideslip %+5.2f m/s\n",
+            std::printf("           bank %+6.2f deg,  nose %+7.1f deg,"
+                        "  course %+7.1f deg,  turn %+6.2f deg/s,"
+                        "  beta %+6.1f deg (%+5.2f m/s)\n",
                         bankDegrees,
+                        flightFrame.noseHeadingRadians
+                            * 180.0 / 3.14159265358979,
                         headingTotal * 180.0 / 3.14159265358979,
                         turnRate,
-                        sideslip);
+                        flightFrame.sideslipRadians
+                            * 180.0 / 3.14159265358979,
+                        flightFrame.spanwiseSpeed);
+            std::printf("           half alpha %+5.1f/%+5.1f deg,"
+                        "  q ratio %.2f/%.2f,  brake line %.1f/%.1f cm,"
+                        "  requested dL/dD %+.0f/%+.0f N,"
+                        "  achieved %+.0f/%+.0f N\n",
+                        sim.alphaHalfDeviationRadians[0]
+                            * 180.0 / 3.14159265358979,
+                        sim.alphaHalfDeviationRadians[1]
+                            * 180.0 / 3.14159265358979,
+                        sim.halfDynamicPressureRatio[0],
+                        sim.halfDynamicPressureRatio[1],
+                        100.0 * sim.brakeApplied[0],
+                        100.0 * sim.brakeApplied[1],
+                        sim.pressureSolve.requestedHalfDifference[0],
+                        sim.pressureSolve.requestedHalfDifference[1],
+                        sim.pressureSolve.achievedHalfDifference[0],
+                        sim.pressureSolve.achievedHalfDifference[1]);
         }
         return 0;
     }

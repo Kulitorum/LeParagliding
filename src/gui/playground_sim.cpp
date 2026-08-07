@@ -68,12 +68,12 @@ constexpr double kMaximumSpinWindRatio = 1.0;
 // picked at build time: the measured line is scaled by 1/this so the
 // wing-level angle keeps reading in whole-chord terms.
 constexpr double kAttitudeReferenceStation = 0.40;
-// Effective camber a full brake pull adds to its own half of the wing,
-// as an angle-of-attack increment. A trailing-edge flap at paraglider
-// brake travel is worth roughly this much; entering it as an angle
-// rather than a lift increment also makes the braked half reach the
-// stall blend first, which is what really happens.
-constexpr double kBrakeCamberRadians = 8.0 * kDegreesToRadians;
+// The pinned measurement path retains its prescribed half-polar brake model.
+// Free flight does not use these additions: its live deflected fabric already
+// carries the brake and adding this pair again was the reported double count.
+constexpr double kTunnelBrakeCamberRadians = 8.0 * kDegreesToRadians;
+constexpr double kTunnelBrakeFullPullMetres = 0.35;
+constexpr double kTunnelBrakeDragCoefficient = 0.12;
 // Zero-lift drag referred to the projected planform: canopy profile drag
 // with its cell openings and seams, plus the line cascade. Together with
 // the induced term below this puts the polar's best glide around 7–8,
@@ -120,14 +120,6 @@ constexpr double kAnchorRateLimit = 0.08;
 // instead of an accelerating free fall, and it is why a deep-stalled
 // canopy noses back down at all.
 constexpr double kFlatPlateNormal = 1.2;
-// Brake input as seen by the polar. The geometric side of a brake pull is
-// already real — the trailing edge comes down, the measured chord
-// rotates, the lift follows — but the drag of a deflected trailing edge
-// is not in the pressure field, and without it braking ADDED energy
-// (lift with no penalty) and pumped the surge mode instead of damping
-// it. Full pull is taken as the swing test's 35 cm.
-constexpr double kBrakeFullPullMetres = 0.35;
-constexpr double kBrakeDragCoefficient = 0.12;
 // Fastest a hand moves a brake, metres per second of SIMULATED time (see
 // SimBody::brakeApplied). Full travel in a little over half a second: a
 // pilot can snatch a brake faster than that, but a pilot flying does
@@ -1177,6 +1169,20 @@ SimBody buildSimBody(const SimMesh &mesh,
                     }
                 }
                 chord.referenceNode = bestNode;
+                const softwing::Vec3 attitude =
+                    mesh.nodes[chord.referenceNode] - leading;
+                const softwing::Vec3 chordFlat = normalized(
+                    chordVector
+                    - dot(chordVector, chord.spanAxis) * chord.spanAxis);
+                const softwing::Vec3 attitudeFlat = normalized(
+                    attitude
+                    - dot(attitude, chord.spanAxis) * chord.spanAxis);
+                if (length(chordFlat) > 0.0
+                    && length(attitudeFlat) > 0.0) {
+                    chord.attitudeOffsetRadians = std::atan2(
+                        dot(cross(attitudeFlat, chordFlat), chord.spanAxis),
+                        dot(attitudeFlat, chordFlat));
+                }
             } else {
                 chord.referenceNode = chord.leadingNode;
             }
@@ -2916,6 +2922,25 @@ void applyPressureForDuration(SimBody &sim,
     sim.ribLiftCoefficient.assign(sim.ribChords.size(), 0.0);
     std::vector<double> &ribLift = sim.ribLiftCoefficient;
     std::vector<double> ribPressure(sim.ribChords.size(), dynamicPressure);
+
+    // RibChord::spanAxis is authored in the rest frame. Carry it with the
+    // canopy before projecting the live chord and wind into a section plane;
+    // using the stored world-space vector after a yaw made a rigidly rotated
+    // wing aerodynamically different from itself, which manufactured
+    // crossflow as a turn developed.
+    const WingAeroSample wingFrame =
+        controls.freeFlight ? sampleWingAero(sim, controls)
+                            : WingAeroSample{};
+    const softwing::Vec3 restSpan = normalized(sim.restSpanAxis);
+    const softwing::Vec3 restChord = normalized(
+        sim.restChordDirection
+        - dot(sim.restChordDirection, restSpan) * restSpan);
+    const softwing::Vec3 restUp = normalized(cross(restSpan, restChord));
+    const softwing::Vec3 liveSpan =
+        wingFrame.valid ? wingFrame.spanAxis : restSpan;
+    const softwing::Vec3 liveChord =
+        wingFrame.valid ? wingFrame.chordDirection : restChord;
+    const softwing::Vec3 liveUp = normalized(cross(liveSpan, liveChord));
     for (std::size_t index = 0; index < sim.ribChords.size(); ++index) {
         const RibChord &rib = sim.ribChords[index];
         const softwing::Vec3 chord = nodes[rib.trailingNode].position
@@ -2958,9 +2983,28 @@ void applyPressureForDuration(SimBody &sim,
 
         // Both vectors flattened into the section's own plane, so the angle
         // measured is pitch and not some part of the wing's sweep or arc.
-        const softwing::Vec3 axis = rib.spanAxis;
-        const softwing::Vec3 chordInPlane =
-            normalized(chord - dot(chord, axis) * axis);
+        softwing::Vec3 axis = rib.spanAxis;
+        if (controls.freeFlight
+            && length(restSpan) > 0.0 && length(restChord) > 0.0
+            && length(restUp) > 0.0 && length(liveSpan) > 0.0
+            && length(liveChord) > 0.0 && length(liveUp) > 0.0) {
+            axis = normalized(
+                dot(rib.spanAxis, restSpan) * liveSpan
+                + dot(rib.spanAxis, restChord) * liveChord
+                + dot(rib.spanAxis, restUp) * liveUp);
+        }
+        const softwing::Vec3 attitude =
+            nodes[rib.referenceNode].position
+            - nodes[rib.leadingNode].position;
+        const softwing::Vec3 attitudeInPlane =
+            attitude - dot(attitude, axis) * axis;
+        const softwing::Vec3 fullChordInPlane =
+            chord - dot(chord, axis) * axis;
+        const softwing::Vec3 chordInPlane = normalized(
+            controls.freeFlight && length(attitudeInPlane) > 0.0
+                ? rotateAbout(attitudeInPlane, axis,
+                              rib.attitudeOffsetRadians)
+                : fullChordInPlane);
         const softwing::Vec3 windInPlane =
             relativeWind - dot(relativeWind, axis) * axis;
         const double windSpeed = length(windInPlane);
@@ -3263,8 +3307,12 @@ WingAeroSample sampleWingAero(const SimBody &sim,
 
     const auto &nodes = sim.body->nodes();
 
-    // Live span axis between the tip ribs' leading edges, oriented like the
-    // rest one so a settled wing and its rest pose agree on signs.
+    // Live span axis between the tip ribs' leading edges. spanTipRibs keeps
+    // the low-to-high material ordering established in the rest pose, so the
+    // vector already has a stable sign and must be allowed to rotate through
+    // every world heading. Reorienting it against the fixed rest/world axis
+    // flips span, lift and alpha at 90 degrees and makes a 360-degree turn
+    // impossible.
     softwing::Vec3 spanAxis =
         nodes[sim.ribChords[sim.spanTipRibs[1]].leadingNode].position
         - nodes[sim.ribChords[sim.spanTipRibs[0]].leadingNode].position;
@@ -3272,7 +3320,9 @@ WingAeroSample sampleWingAero(const SimBody &sim,
         spanAxis = sim.restSpanAxis;
     }
     spanAxis = normalized(spanAxis);
-    if (dot(spanAxis, sim.restSpanAxis) < 0.0) {
+    if (!controls.freeFlight
+        && dot(spanAxis, sim.restSpanAxis) < 0.0) {
+        // Preserve the pinned/tunnel path's historical orientation exactly.
         spanAxis = -1.0 * spanAxis;
     }
     sample.spanAxis = spanAxis;
@@ -3289,9 +3339,9 @@ WingAeroSample sampleWingAero(const SimBody &sim,
     // therefore a still higher angle — a loop that stalled the wing a few
     // seconds after a 20 cm pull with the pilot's hand held still. The
     // forward 40% is fabric the brake cannot move, so this line carries
-    // the wing's attitude and none of the input. The brake's real effect
-    // — camber and drag, at essentially unchanged angle of attack —
-    // arrives through the polar's own brake terms.
+    // the wing's attitude and none of the input. In free flight the brake's
+    // real effect remains in the pressure force on the deflected live skin;
+    // the pinned compatibility path separately retains its prescribed polar.
     softwing::Vec3 chordSum;
     for (const RibChord &rib : sim.ribChords) {
         // Scaled back to a full chord so the angle is unchanged but the
@@ -3350,6 +3400,50 @@ WingAeroSample sampleWingAero(const SimBody &sim,
     sample.liftDirection = normalized(lift);
     sample.valid = true;
     return sample;
+}
+
+FlightFrameSample sampleFlightFrame(const SimBody &sim,
+                                    const SimControls &controls)
+{
+    FlightFrameSample frame;
+    const WingAeroSample aero = sampleWingAero(sim, controls);
+    if (!aero.valid) {
+        return frame;
+    }
+
+    // The mesh chord and relative-air vectors both run downstream. Physical
+    // forward and travel through the air point the other way. Keeping this
+    // conversion here prevents callers from silently treating the historical
+    // +Y mesh convention as the nose direction.
+    frame.forwardDirection = -1.0 * aero.chordDirection;
+    frame.travelVelocity = -aero.airspeed * aero.windDirection;
+    frame.spanAxis = aero.spanAxis;
+    frame.upDirection = normalized(
+        cross(aero.spanAxis, aero.chordDirection));
+    if (length(frame.upDirection) <= 1.0e-6) {
+        return frame;
+    }
+
+    frame.forwardSpeed = dot(frame.travelVelocity,
+                             frame.forwardDirection);
+    frame.spanwiseSpeed = dot(frame.travelVelocity, frame.spanAxis);
+    frame.sideslipRadians = std::atan2(frame.spanwiseSpeed,
+                                       frame.forwardSpeed);
+
+    const auto heading = [](const softwing::Vec3 &direction) {
+        // The unrotated canopy flies toward -Y. Positive heading turns from
+        // there toward solver +X, matching the planform's span convention.
+        return std::atan2(direction.x, -direction.y);
+    };
+    frame.noseHeadingRadians = heading(frame.forwardDirection);
+    frame.courseHeadingRadians = heading(frame.travelVelocity);
+
+    // Rotating the +X span about the downstream +Y chord lowers the +X tip
+    // and tilts lift toward +X. That is a positive coordinated turn.
+    frame.bankRadians = std::atan2(-frame.spanAxis.z,
+                                   frame.upDirection.z);
+    frame.valid = true;
+    return frame;
 }
 
 HalfAeroKinematics sampleHalfAeroKinematics(
@@ -3672,29 +3766,29 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         sample.alphaRadians + sim.alphaHalfDeviationRadians[0],
         sample.alphaRadians + sim.alphaHalfDeviationRadians[1]};
 
-    // The polar, evaluated for ONE half of the wing at its own brake
-    // setting and its own measured angle. A brake is a flap: it cambers
-    // and drags its own half, and the difference between the halves is
-    // what turns a paraglider. Averaging the two pulls into a single
-    // wing-level coefficient — what this did — made a one-sided pull
-    // aerodynamically identical to a symmetric half-pull, so the polar
-    // produced no turning moment at all and the entire response was left
-    // to the pressure distribution.
-    //
-    // The camber enters as an effective angle rather than a bare lift
-    // increment, so the braked half also reaches the stall blend earlier:
-    // a hard pull on one side dropping that half first is the real
-    // behaviour, and it falls out of this rather than needing its own
-    // rule.
+    // The polar, evaluated for one half of the wing at its measured angle.
+    // In free flight brake input is deliberately absent here. The cable has
+    // already moved the live trailing-edge fabric before applyPressure runs,
+    // so the base pressure resultant contains the brake's camber, lift and
+    // drag at the correct span/chord location. Adding another effective
+    // camber and drag coefficient counted the same flap twice: the canopy
+    // yawed much faster than its course, met 20-30 degrees of crossflow and
+    // folded. The pinned measurement path retains its prescribed polar brake
+    // arithmetic for compatibility.
     struct SidePolar
     {
         double lift = 0.0;
         double drag = 0.0;
     };
     const auto polarFor = [&](double brakeMetres, double alphaBase) {
-        const double pull =
-            std::clamp(brakeMetres / kBrakeFullPullMetres, 0.0, 1.0);
-        const double alpha = alphaBase + pull * kBrakeCamberRadians;
+        const double pull = controls.freeFlight
+                                ? 0.0
+                                : std::clamp(
+                                      brakeMetres
+                                          / kTunnelBrakeFullPullMetres,
+                                      0.0, 1.0);
+        const double alpha =
+            alphaBase + pull * kTunnelBrakeCamberRadians;
         SidePolar side;
         const double attachedLift = std::max(
             kMinimumLiftCoefficient,
@@ -3713,27 +3807,12 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         side.lift = (1.0 - postStall) * attachedLift
                     + postStall * plateNormal * cosAlpha;
         side.drag = kParasiticDragCoefficient
-                    + kBrakeDragCoefficient * pull
+                    + kTunnelBrakeDragCoefficient * pull
                     + side.lift * side.lift
                           / (kPi * aspectRatio * kSpanEfficiency)
                     + postStall * plateNormal * sinAlpha;
         return side;
     };
-    // The brake as the WAKE sees it, not as the hand does. The geometry
-    // of a brake pull is immediate and the solver already carries it —
-    // the line shortens, the trailing edge comes down, the fabric
-    // answers. The circulation it produces is not: a section's lift
-    // follows a change of camber only as fast as its wake can adjust,
-    // which is the lag the wing-level angle of attack already runs on,
-    // so the brake runs on it too.
-    //
-    // That the two now share a timescale is the point. The camber
-    // difference between the halves is balanced against differences that
-    // come from the wing's rotation, and those are low-passed; with the
-    // camber unfiltered, a fast release dropped it instantly while the
-    // rotation terms lagged, and the turning couple pointed the wrong
-    // way for a quarter of a second at exactly the moment the wing was
-    // surging.
     {
         const double blend =
             std::min(1.0, simulationTimeStep / alphaFilterSeconds);

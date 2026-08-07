@@ -567,27 +567,45 @@ first ten seconds falls from 47° to 11°, sideslip stays inside ±1 m/s to
 
 ### What the brake does now, and what it still does not
 
-A one-sided pull produces a real, mirror-symmetric turn **toward the
-braked side**: 8 cm ramped over 6 s gives −11 °/s for the left brake and
-+7 to +27 °/s for the right, against +3 to +11 °/s hands-up.
+A one-sided pull produces a coordinated turn **toward the braked side**. On
+Swoop Original, a sustained 30 cm right pull reaches +362 degrees accumulated
+air-relative course at 30 simulated seconds while holding 8.61 m material
+span, -0.6% volume, 7.5 degrees alpha and 915 N achieved vertical pressure
+support. In the established turn nose leads course by about 5-7 degrees,
+bank is +9-11 degrees and course rate is about +14 degrees/s.
 
-The **bank is inverted** — the wing skids, banked out of the turn it is
-yawing into. This is honest to the brake model rather than a bug in the
-couple: `polarFor` adds the brake as an effective camber angle, so the
-braked half always makes *more* lift at the wing's operating angle (12° +
-8° of camber at full pull is still short of the 20° stall knee), and a
-real wing banks into the turn because the braked half **slows**. The
-speed loop is present — brake drag yaws the wing, the braked half becomes
-the retreating one, its dynamic pressure falls — but at these turn rates
-it is worth about the same as the camber's lift increment and arrives a
-second later, so the camber wins. Closing that means re-calibrating
-`kBrakeCamberRadians` against a flap-deflected stall angle, which needs
-data this project does not have.
+The old opposite conclusion came from mixing mesh and physical directions.
+The mesh chord and relative-air vector point downstream; physical forward and
+travel point upstream. The old bank metric was also reversed: with span +X and
+downstream chord +Y, lowering the +X tip tilts lift toward +X and is the
+positive coordinated bank. `FlightFrameSample` now owns these conversions and
+reports nose heading, course, beta and bank separately.
 
-Adding the flap's centre-of-pressure travel (feeding the camber into each
-half's anchor fraction, which is real aerodynamics) halves the wrong-way
-bank without flipping its sign, and brings the departure under a one-sided
-pull forward by 1.5 s. It is not in the tree for that reason.
+Two live-frame bugs made the failure physical rather than merely diagnostic.
+The per-rib pressure pass projected against a rest/world section normal and
+measured incidence from the brake-moved full chord. It now carries every rest
+section plane into the live wing frame and measures the brake-immune
+LE-to-40%-extrados attitude line, rotated by a per-rib rest offset back onto
+the true chord. A rigidly yawed wing therefore retains the same section
+incidences, and moving only a trailing edge cannot impersonate rigid pitch.
+The live wing span also keeps the low-tip-to-high-tip material sign instead of
+being flipped toward fixed world X; that old hemisphere test inverted lift as
+a valid turn crossed 90 degrees and made a 360 impossible.
+
+In free flight, the cable/fabric pressure field is the sole brake aerodynamic
+input. The removed free-flight `polarFor` camber and explicit brake drag
+counted the same live flap a second time: in the reproduced 30 cm failure the
+nose reached +29 degrees while course was only +5 degrees, creating 23 degrees
+of crossflow before the four-second fold. The half polar still supplies
+rigid-spin and sideslip damping, but free flight gives it no independent brake
+coefficient. The pinned/tunnel path retains its prescribed brake polar for
+compatibility.
+
+A sustained 40 cm pull still enters a deep asymmetric departure on this
+reduced-order Swoop at about five seconds. That is an explicit remaining
+deep-control/material-model boundary, not a reason to rotate the atmosphere,
+silently cap the input, or add a force shortcut. The demonstrated regression
+is the reported 30 cm case through a complete circle.
 
 ## How a cell loses its air
 
