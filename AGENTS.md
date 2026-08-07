@@ -337,9 +337,11 @@ invariants are:
    point/body/couple shortcuts visibly damaged the canopy.
 2. The wing polar fully cancels the pressure field's resultant. A new pressure
    request belongs in `wingForce`, or cancellation erases it. The one explicit
-   post-solve exception is bounded-free-flight viscous skin traction: only the
-   positive `q*S*Cd_polar - achievedPressureDrag` deficit, never missing lift
-   or the excess-frontal fabric heuristic.
+   post-solve exception is bounded-free-flight viscous skin traction. Below
+   separation it closes the positive `q*S*Cd_polar - achievedPressureDrag`
+   deficit. Above separation the live exterior-Cp field owns flat-plate form
+   drag and its moment; traction may close only the remaining viscous/profile
+   target, never missing form drag, lift, or the excess-frontal heuristic.
 3. Do not feed per-node breathing velocity back into pressure. Rotational
    feedback uses the canopy rigid-body fit.
 4. Verify angle-of-attack sign dynamically: sinking must raise alpha.
@@ -368,9 +370,10 @@ invariants are:
 13. Pinned bounded lift/drag telemetry reports the achieved pressure force.
     Free-flight telemetry adds separately diagnosed polar-only skin traction
     and pilot drag. Traction must be q-gated, area-weighted, dissipative, zero
-    in pinned/legacy modes, and must never reinject `lastFabricDragNewtons`.
-    The old symmetric tunnel row is an explicit regression oracle. Use
-    `--legacy-pressure`; never make the legacy path the production default.
+    in pinned/legacy modes, and must never reinject `lastFabricDragNewtons` or
+    a separated-flow form-drag shortfall. The old symmetric tunnel row is an
+    explicit regression oracle. Use `--legacy-pressure`; never make the legacy
+    path the production default.
 14. TrimmedGlide q comes from achieved vertical wing support versus total
     dynamic-node weight, followed by eight bounded-only co-moving structural
     relaxation frames and a state-clean recalibration. DropFromRest and legacy

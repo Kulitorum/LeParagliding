@@ -181,6 +181,36 @@ seconds; 30 cm is the reproduced report and the demonstrated 360-degree guard.
 Do not hide the remaining deep-control/material limit by rotating the air,
 clamping a user control silently, or adding a point-force turn shortcut.
 
+### Separated-flow pressure — implemented, but not a recovery command
+
+The attached exterior-Cp field is unchanged through 20 degrees section
+incidence. From 20 to 40 degrees it blends smoothly into a live-face
+separated-flow law. For face outward normal `n` and local rib-relative wind
+direction `w`, a windward face uses `Cp = -n.w` and a leeward face uses
+`Cp = -0.2*n.w`. Thus a two-sided flat surface integrates to the existing
+`C_N = 1.2*sin(alpha)` law, while the centre of pressure and pitch/roll/yaw
+moments come from the deformed mesh and the actual suspension path. There is
+no requested recovery moment or prescribed post-stall chord station.
+
+The polar still reports the complete drag target. In separated flow its
+flat-plate form portion belongs to that exterior-Cp field and a pressure
+shortfall is deliberately not replaced by wind-aligned skin traction. Only
+the remaining viscous/profile target can reach the existing q-gated,
+area-weighted dissipative traction path. Below 20 degrees this reduces exactly
+to the former `max(0, q*S*Cd_polar - D_pressure)` arithmetic, preserving the
+tunnel and ordinary free-flight paths.
+
+This physically closes the missing post-stall pressure topology, but it does
+**not** make the Swoop Original spontaneously recover from the reported full
+stall. With 50 cm symmetric brake held from 2 s and released at 8 s, the old
+model settled near 86 degrees alpha indefinitely. The live-face law comes
+back through 76, 71 and 68 degrees at 11, 12 and 13 s, then enters a large
+pitch oscillation and is back near 84 degrees at 20 s. Span remains about
+8.5 m and the cells remain inflated. That result rules out missing form
+pressure as the sole cause; the next honest questions are the design/line
+trim and the point-payload model's missing harness attitude/inertia. Do not
+tune a chordwise Cp multiplier merely to make this one exit recover.
+
 ### A folded cell losing its air — done
 
 A bay below 55% of its rest **volume** is vented toward ambient. Three
@@ -339,18 +369,21 @@ the former 4x4 increment plus post-clamp implementation and exists solely for
 the bit-comparable oracle.
 
 That pressure-only L/D is intentionally still what the pinned shape instrument
-reports. In bounded **free flight only**, any positive polar drag not realized
-by the pressure field is now applied along the relative wind as a
-current-face-area-weighted skin traction. It is diagnosed separately in N and
-air-relative W, is exactly zero at q=0, never supplies missing lift, and is
-absent from both the pinned pressure-shape gate and the legacy oracle. Its
-constructed power is non-positive. Its target is exactly
-`q * planformArea * polarCd`: the separate excess-frontal-area/fabric-drag
-heuristic remains on its existing pressure request and is **not** reinjected
-through this traction. Including that heuristic was measured creating a
-self-amplifying loop: normal early cloth breathing reported 2-5 m2 of excess
-area, which became hundreds of newtons of extra shear, more deformation and
-still more reported area.
+reports. In bounded **free flight only**, positive viscous/profile polar drag
+not realized by pressure beyond the separated-flow form target is applied
+along the relative wind as current-face-area-weighted skin traction. A form
+drag shortfall remains a pressure-model result and is not replaced. The
+traction is diagnosed separately in N and air-relative W, is exactly zero at
+q=0, never supplies missing lift, and is absent from both the pinned
+pressure-shape gate and the legacy oracle. Its constructed power is
+non-positive. `lastPolarDragTargetNewtons` remains the complete
+`q * planformArea * polarCd` target and
+`lastPolarFormDragTargetNewtons` identifies the pressure-owned portion. The
+separate excess-frontal-area/fabric-drag heuristic remains on its existing
+pressure request and is **not** reinjected through this traction. Including
+that heuristic was measured creating a self-amplifying loop: normal early
+cloth breathing reported 2-5 m2 of excess area, which became hundreds of
+newtons of extra shear, more deformation and still more reported area.
 
 The final gnuC2 launch/load-path probe uses three reverse/forward cable-only
 sweep pairs, achieved-load q calibration, and eight bounded-only co-moving

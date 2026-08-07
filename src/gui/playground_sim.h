@@ -599,6 +599,9 @@ struct SimBody
     // diagnostic. Its air-relative power must be non-positive.
     softwing::Vec3 lastPolarDragTractionForce;
     double lastPolarDragTargetNewtons = 0.0;
+    // Portion of the target assigned to geometry-native separated-flow
+    // pressure. A shortfall here is deliberately not replaced by traction.
+    double lastPolarFormDragTargetNewtons = 0.0;
     double lastPolarDragTractionNewtons = 0.0;
     double lastPolarDragTractionPowerWatts = 0.0;
     // The fabric-drag resultant this frame, and the extra frontal area it

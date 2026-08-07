@@ -116,10 +116,12 @@ constexpr double kAnchorRateLimit = 0.08;
 // Past the stall the section law's lift dies away, but a fabric wing at a
 // silly angle is not force-free — it is a parachute. Flat-plate normal
 // force: C_N = kFlatPlateNormal·sin(α), split into lift and drag by the
-// angle. This is what turns a stall into a braked, recoverable descent
-// instead of an accelerating free fall, and it is why a deep-stalled
-// canopy noses back down at all.
+// angle. The wing polar uses the same coefficient for its force telemetry;
+// applyPressure realizes it as windward stagnation and leeward wake pressure
+// on the live faces, so its centre and moment come from the canopy geometry.
 constexpr double kFlatPlateNormal = 1.2;
+constexpr double kSeparatedFlowStartRadians = 20.0 * kDegreesToRadians;
+constexpr double kSeparatedFlowEndRadians = 40.0 * kDegreesToRadians;
 // Fastest a hand moves a brake, metres per second of SIMULATED time (see
 // SimBody::brakeApplied). Full travel in a little over half a second: a
 // pilot can snatch a brake faster than that, but a pilot flying does
@@ -144,6 +146,18 @@ constexpr double tunnelDampingPerSecond = 8.0;
 // Defined in the aerodynamics section further down; buildSimBody needs it
 // for the trimmed-glide launch estimate.
 double wingLiftCoefficient(double angleRadians);
+
+double separatedFlowBlend(double angleRadians)
+{
+    const double amount = std::clamp(
+        (std::abs(angleRadians) - kSeparatedFlowStartRadians)
+            / (kSeparatedFlowEndRadians - kSeparatedFlowStartRadians),
+        0.0,
+        1.0);
+    // Zero slope at both ends avoids a pressure impulse as a live section
+    // crosses either edge of the transition.
+    return amount * amount * (3.0 - 2.0 * amount);
+}
 
 // Rodrigues, for tilting the airflow off the rest chord by the angle of
 // attack. The axis must be unit length.
@@ -2897,6 +2911,7 @@ void applyPressureForDuration(SimBody &sim,
     // prescribed q-derived flow at the slider angle.
 
     const auto &nodes = sim.body->nodes();
+    const auto &triangles = sim.body->triangles();
 
     // The system's bulk velocity, not each section's own. Using the local
     // node velocity here looks more refined and is catastrophic: pressure
@@ -2922,6 +2937,8 @@ void applyPressureForDuration(SimBody &sim,
     sim.ribLiftCoefficient.assign(sim.ribChords.size(), 0.0);
     std::vector<double> &ribLift = sim.ribLiftCoefficient;
     std::vector<double> ribPressure(sim.ribChords.size(), dynamicPressure);
+    std::vector<double> ribAlphaRadians(sim.ribChords.size(), 0.0);
+    std::vector<softwing::Vec3> ribWindDirection(sim.ribChords.size());
 
     // RibChord::spanAxis is authored in the rest frame. Carry it with the
     // canopy before projecting the live chord and wind into a section plane;
@@ -3017,8 +3034,8 @@ void applyPressureForDuration(SimBody &sim,
         // Positive when the wind comes from below the section's chord.
         const double acrossWind =
             dot(cross(chordInPlane, windDirection), axis);
-        ribLift[index] = sectionLiftCoefficient(
-            std::atan2(acrossWind, alongWind));
+        ribAlphaRadians[index] = std::atan2(acrossWind, alongWind);
+        ribLift[index] = sectionLiftCoefficient(ribAlphaRadians[index]);
         // The pressure scales with the FULL relative wind, not the part of
         // it lying in the section's plane. The in-plane component sets the
         // angle the section flies at and nothing else; the cell behind it
@@ -3031,6 +3048,9 @@ void applyPressureForDuration(SimBody &sim,
         // Capped so a section flung about during a transient cannot answer
         // with an unbounded load.
         const double relativeSpeed = length(relativeWind);
+        if (relativeSpeed > 1.0e-6) {
+            ribWindDirection[index] = relativeWind / relativeSpeed;
+        }
         ribPressure[index] =
             std::min(0.5 * kAirDensity * relativeSpeed * relativeSpeed,
                      kMaximumDynamicPressureRatio
@@ -3067,8 +3087,38 @@ void applyPressureForDuration(SimBody &sim,
     sim.faceAppliedExternalCp.assign(sim.skinTriangleCount, 0.0);
     for (std::size_t face = 0; face < sim.skinTriangleCount; ++face) {
         const FaceAero &aero = sim.faceAero[face];
-        const double coefficient = externalPressureCoefficient(
+        const double attachedCoefficient = externalPressureCoefficient(
             aero.chordFraction, aero.upperSurface, ribLift[aero.rib]);
+        double coefficient = attachedCoefficient;
+        const double separatedBlend =
+            separatedFlowBlend(ribAlphaRadians[aero.rib]);
+        if (separatedBlend > 0.0
+            && lengthSquared(ribWindDirection[aero.rib]) > 0.0) {
+            const softwing::Triangle &triangle = triangles[face];
+            const softwing::Vec3 areaVector = cross(
+                nodes[triangle.b].position - nodes[triangle.a].position,
+                nodes[triangle.c].position - nodes[triangle.a].position);
+            const double twiceArea = length(areaVector);
+            if (twiceArea > 1.0e-12) {
+                const double incidence = dot(
+                    areaVector / twiceArea,
+                    ribWindDirection[aero.rib]);
+                // A face whose outward normal points into the oncoming flow
+                // is windward and approaches Cp=1 face-on. The opposite face
+                // sits in the wake; its bounded suction supplies the other
+                // 0.2 of the measured flat-plate C_N=1.2. Linear incidence
+                // makes a two-sided flat surface integrate to
+                // C_N=1.2*sin(alpha), matching the post-stall polar without
+                // prescribing where that resultant acts on a curved wing.
+                const double separatedCoefficient =
+                    incidence < 0.0
+                        ? -incidence
+                        : -(kFlatPlateNormal - 1.0) * incidence;
+                coefficient =
+                    (1.0 - separatedBlend) * attachedCoefficient
+                    + separatedBlend * separatedCoefficient;
+            }
+        }
         const double faceInterior =
             cellsActive ? interior[aero.cell] : ribPressure[aero.rib];
         const double faceDynamic = ribPressure[aero.rib];
@@ -3627,6 +3677,7 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     sim.lastDrag = 0.0;
     sim.lastPolarDragTractionForce = {};
     sim.lastPolarDragTargetNewtons = 0.0;
+    sim.lastPolarFormDragTargetNewtons = 0.0;
     sim.lastPolarDragTractionNewtons = 0.0;
     sim.lastPolarDragTractionPowerWatts = 0.0;
     sim.lastGlideRatio = 0.0;
@@ -3779,6 +3830,8 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     {
         double lift = 0.0;
         double drag = 0.0;
+        double formDrag = 0.0;
+        double separated = 0.0;
     };
     const auto polarFor = [&](double brakeMetres, double alphaBase) {
         const double pull = controls.freeFlight
@@ -3798,19 +3851,17 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
         // in between.
         const double sinAlpha = std::sin(alpha);
         const double cosAlpha = std::cos(alpha);
-        const double postStall =
-            std::clamp((std::abs(alpha) - 20.0 * kDegreesToRadians)
-                           / (20.0 * kDegreesToRadians),
-                       0.0,
-                       1.0);
+        const double postStall = separatedFlowBlend(alpha);
+        side.separated = postStall;
         const double plateNormal = kFlatPlateNormal * sinAlpha;
         side.lift = (1.0 - postStall) * attachedLift
                     + postStall * plateNormal * cosAlpha;
+        side.formDrag = postStall * plateNormal * sinAlpha;
         side.drag = kParasiticDragCoefficient
                     + kTunnelBrakeDragCoefficient * pull
                     + side.lift * side.lift
                           / (kPi * aspectRatio * kSpanEfficiency)
-                    + postStall * plateNormal * sinAlpha;
+                    + side.formDrag;
         return side;
     };
     {
@@ -3832,6 +3883,10 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     // every symmetric case is bit-for-bit what it was.
     sample.liftCoefficient = 0.5 * (leftSide.lift + rightSide.lift);
     sample.dragCoefficient = 0.5 * (leftSide.drag + rightSide.drag);
+    const double formDragCoefficient =
+        0.5 * (leftSide.formDrag + rightSide.formDrag);
+    const double separatedFlowAmount =
+        0.5 * (leftSide.separated + rightSide.separated);
 
     const double q = sample.dynamicPressure;
     const double area = sim.planformArea;
@@ -4806,27 +4861,48 @@ void applyAerodynamicForces(SimBody &sim, const SimControls &controls)
     sim.lastForceResidual = pressureDiagnostics.forceResidual;
     sim.lastPitchResidual = pressureDiagnostics.pitchResidual;
 
-    // A pressure-only inviscid field can saturate at the physical Cp bounds
-    // before it realizes the polar's viscous drag. Add only that positive
-    // deficit as skin traction: no missing lift is manufactured here. The
-    // force is distributed by current wetted area and points with the
-    // relative wind, so its work against the canopy's air-relative bulk
-    // velocity is necessarily dissipative. With no dynamic pressure the
-    // requested and applied traction are exactly zero.
+    // Pressure now owns the separated-flow/form load as well as the attached
+    // load. Skin traction may close only the remaining viscous/profile part
+    // of the polar: a shortfall in the flat-plate form load is left as a real
+    // pressure-model result, never replaced by a wind-aligned force with no
+    // centre of pressure. The force is distributed by current wetted area and
+    // points with the relative wind, so its work against the canopy's
+    // air-relative bulk velocity is necessarily dissipative. With no dynamic
+    // pressure the requested and applied traction are exactly zero.
     softwing::Vec3 polarDragTraction;
     if (controls.pressureSolveMode
             == PressureSolveMode::BoundedExteriorCp
         && controls.freeFlight && q > 1.0e-9) {
-        // Close only the finite-wing polar's viscous drag deficit. The
-        // deformation/frontal-area heuristic remains diagnostic: applying its
-        // full residual as shear made harmless early cloth breathing become
+        // Below separation formDragTarget is zero and this is exactly the old
+        // q*S*Cd - achieved-pressure-drag closure. Above separation, pressure
+        // drag up to the flat-plate target is form drag and cannot offset the
+        // viscous target; nor may a form-drag shortfall be filled by traction.
+        // Any pressure drag beyond the form target can still offset the
+        // viscous polar, avoiding double-counting the attached/induced part.
+        // The deformation/frontal-area heuristic remains diagnostic: applying
+        // its full residual as shear made harmless early cloth breathing become
         // hundreds of newtons of extra drag and a self-amplifying collapse.
         sim.lastPolarDragTargetNewtons =
             q * area * sample.dragCoefficient;
-        const double missingDrag = std::max(
+        const double formDragTarget = q * area * formDragCoefficient;
+        sim.lastPolarFormDragTargetNewtons = formDragTarget;
+        const double viscousDragTarget = std::max(
+            0.0,
+            sim.lastPolarDragTargetNewtons - formDragTarget);
+        const double attachedMissingDrag = std::max(
             0.0,
             sim.lastPolarDragTargetNewtons
                 - pressureDiagnostics.achievedDragNewtons);
+        const double separatedMissingDrag = std::max(
+            0.0,
+            viscousDragTarget
+                - std::max(
+                    0.0,
+                    pressureDiagnostics.achievedDragNewtons
+                        - formDragTarget));
+        const double missingDrag =
+            (1.0 - separatedFlowAmount) * attachedMissingDrag
+            + separatedFlowAmount * separatedMissingDrag;
         double skinArea = 0.0;
         for (const softwing::Vec3 &faceArea : areaVector) {
             skinArea += length(faceArea);

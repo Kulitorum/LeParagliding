@@ -154,13 +154,35 @@ wing), and the force at the impulse that would null the relative motion
 within one frame, without which it pushed a collapsed wing *upward*.
 
 The finite-wing polar's missing viscous drag has a separate bounded-free-flight
-path. Only `max(0, q*S*Cd_polar - D_pressure)` is spread by current skin area
-along the relative wind; it supplies no lift, is zero at q=0, and its measured
+path. Below separation, `max(0, q*S*Cd_polar - D_pressure)` is spread by
+current skin area along the relative wind. Above separation, flat-plate form
+drag belongs to the live-face pressure law described below: its shortfall is
+not replaced by traction, and only the remaining viscous/profile target can be
+closed. The traction supplies no lift, is zero at q=0, and its measured
 air-relative power is non-positive. The excess-frontal/fabric heuristic above
-is deliberately excluded from that traction. Reinjecting its residual turned
-ordinary 2-5 m2 breathing estimates into hundreds of newtons of new shear and
-a positive deformation/drag feedback loop. Pinned shape analysis remains
-pressure-only, and the legacy oracle receives no traction.
+is deliberately excluded. Reinjecting its residual turned ordinary 2-5 m2
+breathing estimates into hundreds of newtons of new shear and a positive
+deformation/drag feedback loop. Pinned shape analysis remains pressure-only,
+and the legacy oracle receives no traction.
+
+**Separated flow is a face-pressure law, not a recovery controller.** Through
+20 degrees section incidence, the attached exterior-Cp distribution is
+unchanged. Between 20 and 40 degrees it smoothly hands over to pressure based
+on each live face's outward normal and its rib's rigid-body relative wind:
+windward `Cp=-n.w`, leeward `Cp=-0.2*n.w`. A flat two-sided surface therefore
+integrates to the existing `C_N=1.2*sin(alpha)` coefficient, but a curved or
+deformed canopy gets its force centre and moment from its actual geometry.
+There is no post-stall anchor, requested pitching moment or per-node breathing
+velocity in this path.
+
+On the reported Swoop Original 50 cm symmetric stall, released at 8 s, this
+changes the former permanent ~86-degree parachutal equilibrium into an initial
+recovery toward 68 degrees followed by a large pitch oscillation; by 20 s it
+is again near 84 degrees and has not reattached. The canopy remains inflated.
+The result is useful even though it is not the desired outcome: missing form
+pressure was real, but it was not the sole recovery mechanism. Arbitrarily
+moving this field's chordwise centre until that one run exits would turn the
+constitutive law into the recovery controller it is intended to avoid.
 
 **Each rib meets its own wind, and a brake is not a pitch input.** The
 per-rib relative wind now includes the canopy's rigid-body spin (`I·ω =

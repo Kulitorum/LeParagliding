@@ -980,6 +980,68 @@ void testBoundedPressureRetrim(const pg::SimMesh &mesh)
     check(flying.lastPolarDragTractionPowerWatts <= 1.0e-8,
           "drag: free-flight skin traction has non-positive air-relative power");
 
+    // At broadside incidence the attached section law has fully handed the
+    // load to the separated-flow face law. Windward faces approach
+    // stagnation Cp, leeward faces carry the bounded wake suction, and the
+    // resultant follows the live surface geometry rather than a polar anchor.
+    pg::SimBody stalled =
+        pg::buildSimBody(mesh, {}, flyingControls);
+    const Vec3 restSpan = normalized(stalled.restSpanAxis);
+    const Vec3 restChord = normalized(
+        stalled.restChordDirection
+        - dot(stalled.restChordDirection, restSpan) * restSpan);
+    const Vec3 broadsideWind = normalized(cross(restSpan, restChord));
+    const double broadsideSpeed = length(
+        pg::referenceFlowVelocity(stalled, flyingControls));
+    for (softwing::Node &node : stalled.body->nodes()) {
+        node.velocity = flyingControls.ambientAirVelocityWorld
+                        - broadsideSpeed * broadsideWind;
+    }
+    pg::applyPressure(stalled, flyingControls);
+    double worstSeparatedCpError = 0.0;
+    std::size_t windwardFaces = 0;
+    std::size_t leewardFaces = 0;
+    for (std::size_t face = 0; face < stalled.skinTriangleCount; ++face) {
+        const softwing::Triangle &triangle =
+            stalled.body->triangles()[face];
+        const auto &stalledNodes = stalled.body->nodes();
+        const Vec3 areaVector = cross(
+            stalledNodes[triangle.b].position
+                - stalledNodes[triangle.a].position,
+            stalledNodes[triangle.c].position
+                - stalledNodes[triangle.a].position);
+        if (length(areaVector) <= 1.0e-12) {
+            continue;
+        }
+        const double incidence =
+            dot(normalized(areaVector), broadsideWind);
+        const double expectedCp =
+            incidence < 0.0 ? -incidence : -0.2 * incidence;
+        worstSeparatedCpError = std::max(
+            worstSeparatedCpError,
+            std::abs(stalled.facePriorExternalCp[face] - expectedCp));
+        windwardFaces += incidence < -0.1 ? 1 : 0;
+        leewardFaces += incidence > 0.1 ? 1 : 0;
+    }
+    check(windwardFaces > 0 && leewardFaces > 0
+              && worstSeparatedCpError < 1.0e-9,
+          "pressure: broadside faces use stagnation and wake Cp from live normals");
+    const Vec3 broadsideForce = pg::aerodynamicForce(stalled);
+    check(dot(broadsideForce, broadsideWind)
+                  > 0.95 * length(broadsideForce)
+              && dot(broadsideForce, broadsideWind) > 0.0,
+          "pressure: separated-flow resultant follows the broadside wind");
+    pg::applyAerodynamicForces(stalled, flyingControls);
+    const double viscousTarget = std::max(
+        0.0,
+        stalled.lastPolarDragTargetNewtons
+            - stalled.lastPolarFormDragTargetNewtons);
+    check(stalled.lastPolarFormDragTargetNewtons
+                  > 0.8 * stalled.lastPolarDragTargetNewtons
+              && stalled.lastPolarDragTractionNewtons
+                     <= viscousTarget + 1.0e-8,
+          "drag: separated-flow form deficit is not reinjected as skin traction");
+
     pg::SimControls still = controls;
     still.pressureSolveMode = pg::PressureSolveMode::BoundedExteriorCp;
     still.pressurePascal = 0.0;
