@@ -466,6 +466,53 @@ void testRiserCutAndMass()
           "mass: actual nodes include the line junction");
 }
 
+void testRiserPullUsesBottomRowSegments(const pg::SimMesh &mesh)
+{
+    pg::SimControls controls = pinnedControls();
+    pg::SimBody sim = pg::buildSimBody(mesh, {}, controls);
+    std::array<int, pg::maximumRiserRows> rowSegments{};
+    for (const pg::RiserLine &riser : sim.riserLines) {
+        if (riser.row < rowSegments.size()) {
+            ++rowSegments[riser.row];
+        }
+    }
+    check(sim.riserLines.size() == 4
+              && rowSegments[0] == 2 && rowSegments[1] == 2,
+          "riser control: discovers one A/B bottom segment per side");
+
+    controls.riserPullMetres[0] = 0.10;
+    pg::stepSimulation(sim, controls);
+    const double firstFramePull = sim.riserAppliedMetres[0];
+    check(firstFramePull > 0.0 && firstFramePull < 0.10
+              && sim.riserAppliedMetres[1] == 0.0,
+          "riser control: requested row is hand-speed limited");
+    bool onlyRowAChanged = true;
+    for (const pg::RiserLine &riser : sim.riserLines) {
+        const double expected =
+            riser.restLength - (riser.row == 0 ? firstFramePull : 0.0);
+        onlyRowAChanged =
+            onlyRowAChanged
+            && std::abs(sim.body->constraints()[riser.constraint].restLength
+                        - expected)
+                   < 1.0e-12;
+    }
+    check(onlyRowAChanged,
+          "riser control: A pull shortens only the A riser cut once");
+
+    controls.riserPullMetres[0] = 0.0;
+    pg::stepSimulation(sim, controls);
+    bool authoredLengthsRestored = sim.riserAppliedMetres[0] == 0.0;
+    for (const pg::RiserLine &riser : sim.riserLines) {
+        authoredLengthsRestored =
+            authoredLengthsRestored
+            && std::abs(sim.body->constraints()[riser.constraint].restLength
+                        - riser.restLength)
+                   < 1.0e-12;
+    }
+    check(authoredLengthsRestored,
+          "riser control: release restores authored row lengths");
+}
+
 void testPayloadMassLineMassAndLaunch(const pg::SimMesh &mesh)
 {
     pg::SimControls drop;
@@ -1065,6 +1112,7 @@ int main()
     testTensionReadout();
     testLineDeduplication();
     testRiserCutAndMass();
+    testRiserPullUsesBottomRowSegments(mesh);
     testPayloadMassLineMassAndLaunch(mesh);
     testDynamicPointPayloadPendulum(mesh);
     testGrab(mesh);

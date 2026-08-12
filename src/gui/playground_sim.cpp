@@ -127,7 +127,13 @@ constexpr double kSeparatedFlowEndRadians = 40.0 * kDegreesToRadians;
 // pilot can snatch a brake faster than that, but a pilot flying does
 // not, and every input above this rate was an artefact of the controls
 // being sampled on the wall clock while the wing runs on its own.
-constexpr double kBrakeHandSpeed = 0.6;
+constexpr double kControlHandSpeed = 0.6;
+// Detailed rib stationing can leave a vanishing triangular sliver where a
+// section closes at the tip or trailing edge. Such a face has no meaningful
+// fabric area and its membrane matrix becomes ill-conditioned as the two
+// nearly coincident nodes move. Keep it as a render face, but do not pretend
+// that less than a tenth of a square millimetre is a solvable material patch.
+constexpr double kMinimumRibMembraneArea = 1.0e-7;
 // Ceiling on how far one half-span's measured angle of attack may depart
 // from the wing's, for the per-half polar. The departure is real and is
 // where the wing's roll damping comes from — a rolling wing genuinely has
@@ -289,6 +295,55 @@ softwing::OrthotropicMembraneMaterial prototypeMaterial(
     return material;
 }
 
+// An isometric rest chart for one membrane triangle, with the first material
+// direction transported from the authored panel. Skin and rib fabric both use
+// this path so neither is pre-strained merely because its rest triangle sits
+// in 3D. The second hint is only a degeneracy fallback; orthogonality comes
+// from the triangle's own tangent plane.
+std::optional<std::array<softwing::Vec2, 3>> neutralMembraneChart(
+    const std::array<softwing::Vec3, 3> &points,
+    const softwing::Vec3 &warpHint,
+    const softwing::Vec3 &weftHint)
+{
+    const softwing::Vec3 normal =
+        cross(points[1] - points[0], points[2] - points[0]);
+    const double normalSquared = lengthSquared(normal);
+    if (!(normalSquared > 1.0e-24)
+        || !(lengthSquared(warpHint) > 1.0e-24)) {
+        return std::nullopt;
+    }
+    const softwing::Vec3 normalUnit = normal / std::sqrt(normalSquared);
+    softwing::Vec3 warp =
+        warpHint - dot(warpHint, normalUnit) * normalUnit;
+    if (!(lengthSquared(warp) > 1.0e-24)) {
+        warp = cross(weftHint, normalUnit);
+    }
+    if (!(lengthSquared(warp) > 1.0e-24)) {
+        return std::nullopt;
+    }
+    warp = normalized(warp);
+    if (dot(warp, warpHint) < 0.0) {
+        warp *= -1.0;
+    }
+    const softwing::Vec3 weft = cross(normalUnit, warp);
+    std::array<softwing::Vec2, 3> chart;
+    for (std::size_t corner = 0; corner < points.size(); ++corner) {
+        const softwing::Vec3 offset = points[corner] - points[0];
+        chart[corner] = {dot(offset, warp), dot(offset, weft)};
+    }
+    const softwing::Vec2 edgeOne = chart[1] - chart[0];
+    const softwing::Vec2 edgeTwo = chart[2] - chart[0];
+    const double chartArea = softwing::cross(edgeOne, edgeTwo);
+    const double chartScale = std::max(
+        softwing::lengthSquared(edgeOne),
+        softwing::lengthSquared(edgeTwo));
+    if (!(chartArea > 64.0 * std::numeric_limits<double>::epsilon()
+                              * chartScale)) {
+        return std::nullopt;
+    }
+    return chart;
+}
+
 std::optional<double> restDihedralAngle(const softwing::Vec3 &a,
                                         const softwing::Vec3 &b,
                                         const softwing::Vec3 &c,
@@ -435,7 +490,7 @@ const char *skinModelName(SkinModel model)
     case SkinModel::LegacyDistanceTruss:
         return "legacy distance truss";
     case SkinModel::OrthotropicMembrane:
-        return "orthotropic membrane prototype";
+        return "orthotropic skin+ribs membrane prototype";
     }
     return "unknown";
 }
@@ -773,48 +828,14 @@ SimBody buildSimBody(const SimMesh &mesh,
                 mesh.nodes[static_cast<std::size_t>(tri[1])];
             const softwing::Vec3 &p2 =
                 mesh.nodes[static_cast<std::size_t>(tri[2])];
-            const softwing::Vec3 normal = cross(p1 - p0, p2 - p0);
-            const double normalSquared = lengthSquared(normal);
-            if (!(normalSquared > 1.0e-24)
-                || !(lengthSquared(warpHint) > 1.0e-24)) {
-                ++sim.skippedMembraneElements;
-                continue;
-            }
-            const softwing::Vec3 normalUnit =
-                normal / std::sqrt(normalSquared);
-            softwing::Vec3 warp =
-                warpHint - dot(warpHint, normalUnit) * normalUnit;
-            if (!(lengthSquared(warp) > 1.0e-24)) {
-                warp = cross(weftHint, normalUnit);
-            }
-            if (!(lengthSquared(warp) > 1.0e-24)) {
-                ++sim.skippedMembraneElements;
-                continue;
-            }
-            warp = normalized(warp);
-            if (dot(warp, warpHint) < 0.0) {
-                warp *= -1.0;
-            }
-            const softwing::Vec3 weft = cross(normalUnit, warp);
-            std::array<softwing::Vec2, 3> chart;
-            const std::array<softwing::Vec3, 3> points{p0, p1, p2};
-            for (std::size_t corner = 0; corner < points.size(); ++corner) {
-                const softwing::Vec3 offset = points[corner] - p0;
-                chart[corner] = {dot(offset, warp), dot(offset, weft)};
-            }
-            const softwing::Vec2 edgeOne = chart[1] - chart[0];
-            const softwing::Vec2 edgeTwo = chart[2] - chart[0];
-            const double chartArea = softwing::cross(edgeOne, edgeTwo);
-            const double chartScale = std::max(
-                softwing::lengthSquared(edgeOne),
-                softwing::lengthSquared(edgeTwo));
-            if (!(chartArea > 64.0 * std::numeric_limits<double>::epsilon()
-                                  * chartScale)) {
+            const std::optional<std::array<softwing::Vec2, 3>> chart =
+                neutralMembraneChart({p0, p1, p2}, warpHint, weftHint);
+            if (!chart) {
                 ++sim.skippedMembraneElements;
                 continue;
             }
             definitions.push_back(
-                {face, chart, sim.skinMaterial, softwing::MaterialRole::Bulk});
+                {face, *chart, sim.skinMaterial, softwing::MaterialRole::Bulk});
             definitionFaces.push_back(face);
         }
         if (!definitions.empty()) {
@@ -1009,9 +1030,10 @@ SimBody buildSimBody(const SimMesh &mesh,
     // ribChords (degenerate loops are skipped from both).
     std::vector<std::size_t> ribMeshIndex;
 
-    // Rib webs. Both models are the same cross-section ladder; the simple
-    // one is that ladder at its coarsest — one bay deep, one station per
-    // outline segment, no holes.
+    // Rib webs share one station layout. Legacy braces its bays as a
+    // cross-section distance ladder; material mode fills the same bays with
+    // fabric triangles. The simple model uses the coarsest layout — one bay
+    // deep, one station per outline segment, no holes.
     //
     // It used to be a centroid hub with a spoke to every loop node, which
     // was cheap to write and expensive in every other way. One node ended up
@@ -1218,6 +1240,10 @@ SimBody buildSimBody(const SimMesh &mesh,
             (flat[back].first - flat[front].first) / std::sqrt(longest);
         const double axisY =
             (flat[back].second - flat[front].second) / std::sqrt(longest);
+        const softwing::Vec3 ribWarpHint =
+            frame.u * axisX + frame.v * axisY;
+        const softwing::Vec3 ribWeftHint =
+            frame.u * (-axisY) + frame.v * axisX;
         // Distance along the chord, measured from the leading edge.
         const auto chordAt = [&](std::size_t index) {
             return (flat[index].first - flat[front].first) * axisX
@@ -1371,17 +1397,18 @@ SimBody buildSimBody(const SimMesh &mesh,
                     return length(positions[b].position
                                   - positions[a].position);
                 };
-                // Across the section, along it, and one diagonal so the
-                // bay carries shear instead of folding over. A second
-                // diagonal was tried on the theory that XPBD's residual
-                // would be biased along a single brace; it moved the
-                // settled volume by 0.5% and cost 680 constraints, so the
-                // bay stays singly braced.
-                tie(topA, lowA, span(topA, lowA), skinCompliance);
-                tie(topB, lowB, span(topB, lowB), skinCompliance);
-                tie(topA, topB, span(topA, topB), skinCompliance);
-                tie(lowA, lowB, span(lowA, lowB), skinCompliance);
-                tie(topA, lowB, span(topA, lowB), skinCompliance);
+                // The calibrated model remains the historical singly-braced
+                // distance ladder. In material mode the two faces below are
+                // real orthotropic membranes instead: compression softens,
+                // shear comes from the constitutive law and the common
+                // diagonal is a free cloth fold, not a rigid brace.
+                if (sim.skinModel == SkinModel::LegacyDistanceTruss) {
+                    tie(topA, lowA, span(topA, lowA), skinCompliance);
+                    tie(topB, lowB, span(topB, lowB), skinCompliance);
+                    tie(topA, topB, span(topA, topB), skinCompliance);
+                    tie(lowA, lowB, span(lowA, lowB), skinCompliance);
+                    tie(topA, lowB, span(topA, lowB), skinCompliance);
+                }
 
                 const auto addRibFace = [&](std::size_t a,
                                             std::size_t b,
@@ -1395,6 +1422,39 @@ SimBody buildSimBody(const SimMesh &mesh,
                     drawn.edges = {sideConstraint(a, b),
                                    sideConstraint(b, c),
                                    sideConstraint(c, a)};
+                    if (sim.skinModel == SkinModel::OrthotropicMembrane) {
+                        const std::array<softwing::Vec3, 3> points{
+                            positions[a].position,
+                            positions[b].position,
+                            positions[c].position};
+                        const auto chart = neutralMembraneChart(
+                            points, ribWarpHint, ribWeftHint);
+                        const double chartArea = chart
+                            ? 0.5 * softwing::cross(
+                                  (*chart)[1] - (*chart)[0],
+                                  (*chart)[2] - (*chart)[0])
+                            : 0.0;
+                        if (chartArea >= kMinimumRibMembraneArea) {
+                            const std::size_t triangle =
+                                body->triangles().size();
+                            body->addTriangle(a, b, c);
+                            const std::size_t element =
+                                body->membraneElements().size();
+                            const std::array<
+                                softwing::MembraneElementDefinition, 1>
+                                definition{{
+                                    {triangle,
+                                     *chart,
+                                     sim.skinMaterial,
+                                     softwing::MaterialRole::Bulk}}};
+                            static_cast<void>(
+                                body->addMembraneElements(definition));
+                            drawn.membraneElement = element;
+                            ++sim.ribMembraneElementCount;
+                        } else {
+                            ++sim.skippedMembraneElements;
+                        }
+                    }
                     sim.renderFaces.push_back(drawn);
                 };
                 addRibFace(topA, topB, lowB);
@@ -1990,6 +2050,34 @@ SimBody buildSimBody(const SimMesh &mesh,
     // same set of junctions whether they end up fixed to the world
     // (pinned) or tied to the pilot (free flight) below.
     sim.carabinerNodes = carabiners;
+
+    // The controllable riser cut: one authored bottom cable per present
+    // row and side, immediately above a carabiner. This is deliberately the
+    // same cut the row-load instrument measures. Pulling A therefore
+    // shortens the A riser once, rather than shortening every A-labelled
+    // branch and multiplying the hand movement through the cascade.
+    const auto isCarabiner = [&carabiners](std::size_t node) {
+        return std::find(carabiners.begin(), carabiners.end(), node)
+               != carabiners.end();
+    };
+    for (const LineSegment &segment : sim.lineSegments) {
+        if (!segment.suspension || segment.plan < 1
+            || segment.plan > static_cast<int>(maximumRiserRows)
+            || segment.constraint >= body->constraints().size()) {
+            continue;
+        }
+        const bool aIsCarabiner = isCarabiner(segment.a);
+        const bool bIsCarabiner = isCarabiner(segment.b);
+        if (aIsCarabiner == bIsCarabiner) {
+            continue;
+        }
+        const double restLength =
+            body->constraints()[segment.constraint].restLength;
+        sim.riserLines.push_back(
+            {segment.constraint,
+             restLength,
+             static_cast<std::size_t>(segment.plan - 1)});
+    }
 
     // Where the designed lines hang the wing: the mean carabiner position
     // projected onto the mean rest chord. The imposed aerodynamic
@@ -5101,7 +5189,7 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
     // input. It applies to letting go as much as to pulling — a release
     // is the half of a brake input that surges the wing, and a step
     // release is not something a hand can do.
-    const double reach = kBrakeHandSpeed * simulationTimeStep;
+    const double reach = kControlHandSpeed * simulationTimeStep;
     const std::array<double, 2> wanted{controls.brakeLeft,
                                        controls.brakeRight};
     for (int side = 0; side < 2; ++side) {
@@ -5109,6 +5197,14 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
             std::clamp(wanted[side] - sim.brakeApplied[side],
                        -reach,
                        reach);
+    }
+    for (std::size_t row = 0; row < maximumRiserRows; ++row) {
+        const double wantedPull = std::clamp(
+            controls.riserPullMetres[row],
+            0.0,
+            maximumRiserPullMetres);
+        sim.riserAppliedMetres[row] += std::clamp(
+            wantedPull - sim.riserAppliedMetres[row], -reach, reach);
     }
     auto &constraints = sim.body->constraints();
     for (const BrakeLine &brake : sim.brakeLines) {
@@ -5119,6 +5215,28 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
             brake.left ? sim.brakeApplied[0] : sim.brakeApplied[1];
         constraints[brake.constraint].restLength =
             std::max(0.05, brake.restLength + brakeGap - pull);
+    }
+    // A riser pull acts at the authored bottom segment on both halves. It is
+    // a cable rest-length change, so its load travels through the real row,
+    // carabiners and pilot instead of appearing as a pitch force or trim
+    // angle. Releasing restores the authored length at the same hand speed.
+    for (const RiserLine &riser : sim.riserLines) {
+        if (riser.constraint >= constraints.size()
+            || riser.row >= maximumRiserRows) {
+            continue;
+        }
+        // Preserve the historical zero-control path byte-for-byte. After a
+        // released pull the constraint differs and is restored once; an
+        // untouched authored cable is not rewritten every frame.
+        if (sim.riserAppliedMetres[riser.row] == 0.0
+            && constraints[riser.constraint].restLength
+                   == riser.restLength) {
+            continue;
+        }
+        const double minimumLength = std::min(0.05, riser.restLength);
+        constraints[riser.constraint].restLength = std::max(
+            minimumLength,
+            riser.restLength - sim.riserAppliedMetres[riser.row]);
     }
     const int coupledSubsteps = std::max(1, controls.substeps);
     const double coupledTimeStep =
@@ -5178,6 +5296,11 @@ void stepSimulation(SimBody &sim, const SimControls &controls)
         settings.dampingReferenceVelocity = systemVelocityOf(sim);
     }
     settings.workerThreads = controls.workerThreads;
+    // Playground strain/slack fields evaluate the constitutive diagnostics
+    // directly from the published snapshot. The core's additional per-substep
+    // solver residual/resultant pass has no UI consumer and used about 10 ms
+    // per material frame on gnuC2 with six workers.
+    settings.updateMembraneSolverDiagnostics = false;
     settings.performanceProfile = controls.performanceProfile;
     const bool contactActive = controls.fabricContact && sim.contact.prepared
                                && sim.skinTriangleCount > 0;

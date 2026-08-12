@@ -2,6 +2,8 @@
 
 #include <QWidget>
 
+#include <array>
+
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -75,6 +77,9 @@ private:
     // Starts the shape-HUD poll while the solver runs and stops it when it
     // does not; called beside every place the run state changes.
     void updateShapeTimer();
+    // Shows only the A..E rows actually tagged in the loaded simulation
+    // mesh and clears controls that disappear when another glider is loaded.
+    void updateRiserControls(const std::array<bool, 5> &available);
     // The α-sweep report, non-modal so the tunnel stays usable beside it.
     void openAnalysis();
 
@@ -87,6 +92,9 @@ private:
     QSlider *lift_ = nullptr;
     QSlider *leftBrake_ = nullptr;
     QSlider *rightBrake_ = nullptr;
+    QLabel *riserSectionLabel_ = nullptr;
+    std::array<QLabel *, 5> riserLabels_{};
+    std::array<QSlider *, 5> riserPull_{};
     // The slider name labels carry their live values ("Pressure 80 Pa ·
     // 41 km/h"), so the numbers sit where the hand is.
     QLabel *pressureLabel_ = nullptr;

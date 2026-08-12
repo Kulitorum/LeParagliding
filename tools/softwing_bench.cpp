@@ -783,10 +783,11 @@ int main(int argc, char **argv)
                                       - buildStart)
             .count();
     std::fprintf(stderr,
-                 "skin model %s: %zu membranes, %zu hinges, %zu/%zu "
+                 "skin model %s: %zu membranes (%zu rib), %zu hinges, %zu/%zu "
                  "degenerate elements/hinges skipped\n",
                  pg::skinModelName(sim.skinModel),
                  sim.body->membraneElements().size(),
+                 sim.ribMembraneElementCount,
                  sim.body->dihedralConstraints().size(),
                  sim.skippedMembraneElements,
                  sim.skippedDihedralHinges);
@@ -806,7 +807,7 @@ int main(int argc, char **argv)
         if (m.dampingTime > 0.0) {
             std::fprintf(stderr,
                          "WARNING: nonzero membrane damping is experimental "
-                         "in the mixed membrane/rib/line network\n");
+                         "in the skin/rib membrane and line network\n");
         }
     }
     if (sim.tunnelLineSolverBallastKg > 0.0) {
@@ -1104,8 +1105,16 @@ int main(int argc, char **argv)
     if (options.shape) {
         const pg::ShapeBaseline baseline = pg::captureShapeBaseline(sim);
         const auto settleStart = std::chrono::steady_clock::now();
-        const pg::SettleResult result = pg::settleAndMeasure(
-            sim, controls, baseline, options.shapeSeconds);
+        pg::SettleResult result;
+        try {
+            result = pg::settleAndMeasure(
+                sim, controls, baseline, options.shapeSeconds);
+        } catch (const std::exception &exception) {
+            std::fprintf(stderr,
+                         "Shape solve failed: %s\n",
+                         exception.what());
+            return 1;
+        }
         const double settleMilliseconds =
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - settleStart)

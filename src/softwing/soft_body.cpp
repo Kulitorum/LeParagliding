@@ -1143,13 +1143,14 @@ void SoftBody::integrateSubstepTrial(double dt,
             PerformanceScope bending(profileField(
                 profile,
                 &StepPerformanceProfile::bendingConstraintNanoseconds));
-            // Deliberately serial for the initial bounded hinge path. Stable
-            // insertion order is deterministic and avoids extending the
-            // membrane colouring with four-node adjacency prematurely.
-            for (DihedralBendingConstraint& constraint :
-                 dihedralConstraints_) {
-                solveDihedralConstraint(constraint,
-                                        inverseTimeStepSquared);
+            if (pool != nullptr && !dihedralConstraints_.empty()) {
+                solveDihedralsColoured(inverseTimeStepSquared, *pool);
+            } else {
+                for (DihedralBendingConstraint& constraint :
+                     dihedralConstraints_) {
+                    solveDihedralConstraint(constraint,
+                                            inverseTimeStepSquared);
+                }
             }
         }
         if (suspension != nullptr) {
@@ -1191,7 +1192,7 @@ void SoftBody::integrateSubstepTrial(double dt,
     // Each element reads shared node state but writes only its own diagnostic
     // slots, so this pass needs no colouring and stays bit-identical to the
     // serial one whatever the worker count.
-    {
+    if (settings.updateMembraneSolverDiagnostics) {
         PerformanceScope diagnostics(profileField(
             profile,
             &StepPerformanceProfile::membraneDiagnosticsNanoseconds));
@@ -1723,7 +1724,8 @@ WorkerPool* SoftBody::poolFor(const StepSettings& settings) {
     // 24-core one would run different physics from the same settings. The mode
     // explicitly selects physics; workerThreads only sizes that mode's pool.
     if (settings.workerThreads == 0 ||
-        (membraneElements_.empty() && constraints_.empty())) {
+        (membraneElements_.empty() && constraints_.empty()
+         && dihedralConstraints_.empty())) {
         return nullptr;
     }
     // One pool serves every sweep in the substep, so it is sized by the most
@@ -1736,6 +1738,9 @@ WorkerPool* SoftBody::poolFor(const StepSettings& settings) {
     }
     if (!constraints_.empty()) {
         cap = constraintColouring().workerCap(cap);
+    }
+    if (!dihedralConstraints_.empty()) {
+        cap = dihedralColouring().workerCap(cap);
     }
     return workerPool_.get(cap);
 }
@@ -2047,6 +2052,166 @@ void SoftBody::solveMembraneColoured(double dt, WorkerPool& pool) {
              slot < colouring.colourOffsets[colour + 1]; ++slot) {
             solveMembraneElement(
                 membraneElements_[colouring.elements[slot]], dt);
+        }
+    }
+}
+
+unsigned SoftBody::DihedralColouring::workerCap(unsigned requested) const {
+    const std::size_t affordable =
+        std::max<std::size_t>(1, largestColour / kMinimumElementsPerWorker);
+    return static_cast<unsigned>(
+        std::min<std::size_t>(requested, affordable));
+}
+
+const SoftBody::DihedralColouring& SoftBody::dihedralColouring() const {
+    DihedralColouring& colouring = dihedralColouring_;
+    if (colouring.builtForConstraintCount == dihedralConstraints_.size() &&
+        colouring.builtForNodeCount == nodes_.size() &&
+        !dihedralConstraints_.empty()) {
+        return colouring;
+    }
+
+    // A four-node hyperedge can conflict through any of its corners. The
+    // sum of their incidence degrees bounds the first free greedy colour;
+    // four times the largest degree is a simple safe allocation bound.
+    std::vector<std::size_t> degree(nodes_.size(), 0);
+    for (const DihedralBendingConstraint& constraint :
+         dihedralConstraints_) {
+        for (const std::size_t node :
+             {constraint.a, constraint.b, constraint.c, constraint.d}) {
+            ++degree[node];
+        }
+    }
+    const std::size_t maximumDegree =
+        degree.empty() ? 0 : *std::max_element(degree.begin(), degree.end());
+    const std::size_t colourBound = 4 * maximumDegree + 1;
+    const std::size_t words =
+        std::max<std::size_t>(1, (colourBound + 63) / 64);
+    std::vector<std::uint64_t> nodeColours(nodes_.size() * words, 0);
+    std::vector<std::size_t> colourOf(dihedralConstraints_.size(), 0);
+    std::size_t colourCount = 0;
+    for (std::size_t index = 0; index < dihedralConstraints_.size(); ++index) {
+        const DihedralBendingConstraint& constraint =
+            dihedralConstraints_[index];
+        const std::array<std::size_t, 4> nodeIndices{
+            constraint.a, constraint.b, constraint.c, constraint.d};
+        std::size_t colour = 0;
+        for (std::size_t word = 0; word < words; ++word) {
+            std::uint64_t used = 0;
+            for (const std::size_t node : nodeIndices) {
+                used |= nodeColours[node * words + word];
+            }
+            if (used != ~std::uint64_t{0}) {
+                colour = 64 * word
+                         + static_cast<std::size_t>(std::countr_one(used));
+                break;
+            }
+            colour = 64 * (word + 1);
+        }
+        if (colour >= colourBound) {
+            throw std::logic_error(
+                "Dihedral colouring exceeded its degree bound");
+        }
+        const std::uint64_t bit = std::uint64_t{1} << (colour % 64);
+        for (const std::size_t node : nodeIndices) {
+            nodeColours[node * words + colour / 64] |= bit;
+        }
+        colourOf[index] = colour;
+        colourCount = std::max(colourCount, colour + 1);
+    }
+
+    // Wide phases first; the short tail stays serial to avoid paying a
+    // barrier for fewer hinges than one worker can solve cheaply.
+    std::vector<std::size_t> sizes(colourCount, 0);
+    for (const std::size_t colour : colourOf) ++sizes[colour];
+    std::vector<std::size_t> byDescendingSize(colourCount);
+    for (std::size_t colour = 0; colour < colourCount; ++colour) {
+        byDescendingSize[colour] = colour;
+    }
+    std::sort(byDescendingSize.begin(), byDescendingSize.end(),
+              [&](std::size_t left, std::size_t right) {
+                  if (sizes[left] != sizes[right]) {
+                      return sizes[left] > sizes[right];
+                  }
+                  return left < right;
+              });
+    std::vector<std::size_t> rankOfColour(colourCount, 0);
+    for (std::size_t rank = 0; rank < colourCount; ++rank) {
+        rankOfColour[byDescendingSize[rank]] = rank;
+    }
+
+    std::vector<std::size_t> offsets(colourCount + 1, 0);
+    for (std::size_t rank = 0; rank < colourCount; ++rank) {
+        offsets[rank + 1] = offsets[rank] + sizes[byDescendingSize[rank]];
+    }
+    std::vector<std::size_t> ordered(dihedralConstraints_.size(), 0);
+    std::vector<std::size_t> cursor(offsets.begin(), offsets.end() - 1);
+    for (std::size_t index = 0; index < colourOf.size(); ++index) {
+        ordered[cursor[rankOfColour[colourOf[index]]]++] = index;
+    }
+
+    std::size_t parallelColours = colourCount;
+    while (parallelColours > 0 &&
+           offsets[parallelColours] - offsets[parallelColours - 1] <
+               kElementsPerBarrier) {
+        --parallelColours;
+    }
+
+    std::vector<std::size_t> lastColourAtNode(
+        nodes_.size(), std::numeric_limits<std::size_t>::max());
+    for (std::size_t colour = 0; colour < colourCount; ++colour) {
+        for (std::size_t slot = offsets[colour]; slot < offsets[colour + 1];
+             ++slot) {
+            const DihedralBendingConstraint& constraint =
+                dihedralConstraints_[ordered[slot]];
+            for (const std::size_t node :
+                 {constraint.a, constraint.b, constraint.c, constraint.d}) {
+                if (lastColourAtNode[node] == colour) {
+                    throw std::logic_error(
+                        "Dihedral colouring is not node-disjoint");
+                }
+                lastColourAtNode[node] = colour;
+            }
+        }
+    }
+
+    colouring.largestColour = offsets.size() > 1 ? offsets[1] - offsets[0] : 0;
+    colouring.constraints = std::move(ordered);
+    colouring.colourOffsets = std::move(offsets);
+    colouring.parallelColours = parallelColours;
+    colouring.builtForConstraintCount = dihedralConstraints_.size();
+    colouring.builtForNodeCount = nodes_.size();
+    return colouring;
+}
+
+void SoftBody::solveDihedralsColoured(double inverseTimeStepSquared,
+                                      WorkerPool& pool) {
+    const DihedralColouring& colouring = dihedralColouring();
+    const std::size_t parallelColours = colouring.parallelColours;
+    pool.forEachPhase(
+        parallelColours,
+        [&](std::size_t colour) {
+            return colouring.colourOffsets[colour + 1]
+                   - colouring.colourOffsets[colour];
+        },
+        [](std::size_t) { return kColouredChunkGrain; },
+        [&](std::size_t colour, std::size_t first, std::size_t last) {
+            const std::size_t begin = colouring.colourOffsets[colour];
+            for (std::size_t slot = first; slot < last; ++slot) {
+                solveDihedralConstraint(
+                    dihedralConstraints_[
+                        colouring.constraints[begin + slot]],
+                    inverseTimeStepSquared);
+            }
+        });
+
+    const std::size_t colourCount = colouring.colourOffsets.size() - 1;
+    for (std::size_t colour = parallelColours; colour < colourCount; ++colour) {
+        for (std::size_t slot = colouring.colourOffsets[colour];
+             slot < colouring.colourOffsets[colour + 1]; ++slot) {
+            solveDihedralConstraint(
+                dihedralConstraints_[colouring.constraints[slot]],
+                inverseTimeStepSquared);
         }
     }
 }

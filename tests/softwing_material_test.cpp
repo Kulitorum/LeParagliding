@@ -26,6 +26,10 @@ bool finite(const softwing::Vec3& value) {
            && std::isfinite(value.z);
 }
 
+bool exactlyEqual(const softwing::Vec3& left, const softwing::Vec3& right) {
+    return left.x == right.x && left.y == right.y && left.z == right.z;
+}
+
 softwing::OrthotropicMembraneMaterial material(double compression = 1.0) {
     softwing::OrthotropicMembraneMaterial result;
     result.warpStiffness = 800.0;
@@ -99,6 +103,56 @@ void testCompressedMembraneSolve() {
     check(std::isfinite(diagnostics.elasticEnergy)
               && diagnostics.elasticEnergy >= 0.0,
           "compression: softened membrane energy is finite and nonnegative");
+}
+
+softwing::SoftBody compressedMembraneBody() {
+    softwing::SoftBody body;
+    body.addFixedNode({0.0, 0.0, 0.0});
+    body.addNode({0.9, 0.0, 0.0}, 1.0);
+    body.addNode({0.0, 1.0, 0.0}, 1.0);
+    const std::size_t triangle = body.addTriangle(0, 1, 2);
+    const softwing::MembraneElementDefinition definition{
+        triangle,
+        {{{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}}},
+        material(0.05),
+        softwing::MaterialRole::Bulk};
+    static_cast<void>(body.addMembraneElements(
+        std::span<const softwing::MembraneElementDefinition>{&definition, 1}));
+    return body;
+}
+
+void testOptionalSolverDiagnostics() {
+    softwing::StepSettings enabledSettings;
+    enabledSettings.timeStep = 1.0 / 60.0;
+    enabledSettings.substeps = 2;
+    enabledSettings.constraintIterations = 4;
+    enabledSettings.gravity = {};
+    enabledSettings.velocityDampingPerSecond = 0.0;
+    softwing::StepSettings disabledSettings = enabledSettings;
+    disabledSettings.updateMembraneSolverDiagnostics = false;
+
+    softwing::SoftBody enabled = compressedMembraneBody();
+    softwing::SoftBody disabled = compressedMembraneBody();
+    enabled.step(enabledSettings);
+    disabled.step(disabledSettings);
+    for (std::size_t node = 0; node < enabled.nodes().size(); ++node) {
+        check(exactlyEqual(enabled.nodes()[node].position,
+                           disabled.nodes()[node].position)
+                  && exactlyEqual(enabled.nodes()[node].velocity,
+                                  disabled.nodes()[node].velocity),
+              "diagnostics: disabling the post-solve pass preserves physics");
+    }
+    const auto published = enabled.membraneDiagnostics(0);
+    const auto omitted = disabled.membraneDiagnostics(0);
+    check(length(published.solverResultantEstimate) > 0.0,
+          "diagnostics: enabled pass publishes the solver resultant");
+    check(omitted.normalizedResidual == 0.0
+              && length(omitted.solverResultantEstimate) == 0.0,
+          "diagnostics: disabled pass leaves optional solver fields clear");
+    check(omitted.elasticEnergy >= 0.0
+              && finite(omitted.deformationWarp)
+              && finite(omitted.deformationWeft),
+          "diagnostics: constitutive fields remain available on demand");
 }
 
 struct HingeBody {
@@ -291,6 +345,50 @@ void testDihedralGradientAndProjectionSigns() {
     }
 }
 
+softwing::SoftBody independentHingeBatch(std::size_t count) {
+    softwing::SoftBody body;
+    for (std::size_t patch = 0; patch < count; ++patch) {
+        const double x = 3.0 * static_cast<double>(patch);
+        const std::size_t first = body.nodes().size();
+        body.addFixedNode({x, 0.0, 0.0});
+        body.addFixedNode({x + 1.0, 0.0, 0.0});
+        body.addFixedNode({x, 1.0, 0.0});
+        body.addNode({x + 1.0, -1.0, 0.35}, 1.0);
+        body.addDihedralBendingConstraint(
+            first, first + 1, first + 2, first + 3, 0.0, 1.0e-6);
+    }
+    return body;
+}
+
+void testParallelDihedralDeterminism() {
+    constexpr std::size_t hingeCount = 64;
+    softwing::StepSettings oneWorker = hingeSettings();
+    oneWorker.constraintIterations = 2;
+    oneWorker.workerThreads = 1;
+    softwing::StepPerformanceProfile profile;
+    oneWorker.performanceProfile = &profile;
+    softwing::StepSettings fourWorkers = oneWorker;
+    fourWorkers.workerThreads = 4;
+    fourWorkers.performanceProfile = nullptr;
+
+    softwing::SoftBody one = independentHingeBatch(hingeCount);
+    softwing::SoftBody four = independentHingeBatch(hingeCount);
+    one.step(oneWorker);
+    four.step(fourWorkers);
+    for (std::size_t node = 0; node < one.nodes().size(); ++node) {
+        check(exactlyEqual(one.nodes()[node].position,
+                           four.nodes()[node].position)
+                  && exactlyEqual(one.nodes()[node].velocity,
+                                  four.nodes()[node].velocity),
+              "hinge colouring: result is bit-identical across workers");
+    }
+    check(profile.bendingConstraintVisits
+              == 2 * static_cast<std::uint64_t>(hingeCount),
+          "hinge colouring: profile counts every projection");
+    check(std::abs(one.nodes()[3].position.z) < 0.35,
+          "hinge colouring: the parallel sweep applies bending corrections");
+}
+
 softwing::SoftBody cableCascade() {
     softwing::SoftBody body;
     body.addFixedNode({0.0, 0.0, 0.0});
@@ -361,10 +459,12 @@ void testCableCascadeSweeps() {
 int main() {
     testCompressionScaling();
     testCompressedMembraneSolve();
+    testOptionalSolverDiagnostics();
     testDihedralFlatAndFolded();
     testDihedralRigidInPlaneMirrorAndDegenerate();
     testDihedralStateRoundTrip();
     testDihedralGradientAndProjectionSigns();
+    testParallelDihedralDeterminism();
     testCableCascadeSweeps();
     if (failures != 0) {
         std::fprintf(stderr, "%d softwing material check(s) failed\n", failures);

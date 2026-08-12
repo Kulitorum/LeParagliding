@@ -318,7 +318,11 @@ when the wing itself is scaled.
   deterministic coloured parallel sweeps, membrane/contact/pneumatics/canopy/
   suspension machinery. The Playground defaults to its calibrated legacy
   distance-truss skin and also offers an explicitly experimental orthotropic
-  membrane skin with compression softening and four-node dihedral hinges.
+  membrane skin and rib web with compression softening. Four-node dihedral
+  hinges resist skin folds through a deterministic node-disjoint parallel
+  colouring; rib triangle diagonals remain free fabric folds. Playground skips
+  the unused stored membrane residual/resultant pass, while strain and energy
+  diagnostics remain available on demand.
   Free flight additionally requests three deterministic cable-only
   reverse/forward sweep pairs to propagate payload load through the deep
   suspension graph; zero is the exact historical/tunnel path.

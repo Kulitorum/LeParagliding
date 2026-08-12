@@ -68,6 +68,10 @@ inline constexpr double tunnelLineJunctionRelaxationMassKg = 0.05;
 inline constexpr double defaultPilotMassKg = 90.0;
 inline constexpr double minimumPilotMassKg = 30.0;
 inline constexpr double maximumPilotMassKg = 250.0;
+// Authored non-brake suspension plans 1..5 are rows A..E. Controls are
+// exposed only for rows present in the current mesh.
+inline constexpr std::size_t maximumRiserRows = 5;
+inline constexpr double maximumRiserPullMetres = 0.30;
 // Prototype aerodynamic envelope for the exterior surface pressure. Cp=1 is
 // stagnation; the suction-side floor is deliberately explicit and bounded.
 inline constexpr double minimumExteriorPressureCoefficient = -3.0;
@@ -209,6 +213,18 @@ struct BrakeLine
     std::size_t constraint = 0;
     double restLength = 0.0;
     bool left = false;
+};
+
+// One authored row segment crossing the riser cut immediately above a
+// carabiner. Pulling a riser shortens only this bottom segment; shortening
+// every same-plan segment would multiply one hand movement through every
+// level of the line cascade.
+struct RiserLine
+{
+    std::size_t constraint = 0;
+    double restLength = 0.0;
+    // Zero-based A..E row index.
+    std::size_t row = 0;
 };
 
 // One drawn triangle: the skin quads, plus the rib webs and V/H sheets
@@ -380,8 +396,12 @@ struct SimBody
     std::unique_ptr<softwing::SoftBody> body;
     std::size_t skinTriangleCount = 0;
     SkinModel skinModel = SkinModel::LegacyDistanceTruss;
+    // Shared prototype cloth law for the skin panels and internal rib webs.
     softwing::OrthotropicMembraneMaterial skinMaterial;
     double skinBendCompliance = 0.0;
+    // Subset of body->membraneElements() belonging to internal rib webs.
+    // Zero for the calibrated legacy truss and for meshes without ribs.
+    std::size_t ribMembraneElementCount = 0;
     std::size_t skippedMembraneElements = 0;
     std::size_t skippedDihedralHinges = 0;
     // Parallel to the skin triangles first, then the rib and strap faces.
@@ -392,6 +412,7 @@ struct SimBody
     // building a SimMesh assembled directly in code.
     std::size_t duplicateLineCount = 0;
     std::vector<BrakeLine> brakeLines;
+    std::vector<RiserLine> riserLines;
     // The pilot, or noConstraint when the mesh carried no suspension lines
     // to hang one from. This is a dynamic translational point payload joined
     // to the carabiners by solved bilateral XPBD constraints: it falls and
@@ -531,6 +552,9 @@ struct SimBody
     // depend on how busy the machine is, and the headless bench would
     // stop reproducing the GUI.
     std::array<double, 2> brakeApplied{0.0, 0.0};
+    // Symmetric A..E riser pulls that have reached the wing, rate-limited in
+    // simulated time just like the brake hands.
+    std::array<double, maximumRiserRows> riserAppliedMetres{};
     // Wake-filtered pull retained by the pinned prescribed-polar path. Free
     // flight intentionally does not add a second polar brake on top of its
     // already deflected pressure-loaded fabric.
@@ -655,9 +679,10 @@ struct SimBody
 // without touching the build.
 struct SimControls
 {
-    // Structural skin choice. Legacy preserves the calibrated bilateral
-    // distance truss. OrthotropicMembrane is an explicit prototype: one
-    // material element per valid skin triangle plus true dihedral hinges.
+    // Structural fabric choice. Legacy preserves the calibrated bilateral
+    // skin/rib distance truss. OrthotropicMembrane is an explicit prototype:
+    // material skin panels with dihedral hinges plus material rib webs whose
+    // internal diagonals fold freely.
     SkinModel skinModel = SkinModel::LegacyDistanceTruss;
     double warpStiffness = prototypeWarpStiffness;
     double weftStiffness = prototypeWeftStiffness;
@@ -729,6 +754,9 @@ struct SimControls
     bool fabricContact = false;
     double brakeLeft = 0.0;
     double brakeRight = 0.0;
+    // Symmetric pull of both risers in each authored A..E row. A mesh can
+    // expose any prefix/subset; absent rows simply have no RiserLine target.
+    std::array<double, maximumRiserRows> riserPullMetres{};
     int substeps = simulationSubsteps;
     int constraintIterations = simulationIterations;
     int freeFlightCableSweepPairs = defaultFreeFlightCableSweepPairs;

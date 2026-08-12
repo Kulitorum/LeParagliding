@@ -1429,7 +1429,10 @@ void nodeStrainFields(const SimBody &sim,
     std::vector<float> membraneTensileWeight(nodes.size(), 0.0F);
     std::vector<float> membraneSlackWeight(nodes.size(), 0.0F);
     for (const RenderFace &drawn : sim.renderFaces) {
-        if (!isSkinSurface(drawn.surface) || !drawn.membraneElement) {
+        const bool visibleMaterial =
+            isSkinSurface(drawn.surface)
+            || (drawn.surface == SimSurface::Rib && detailedRibs);
+        if (!visibleMaterial || !drawn.membraneElement) {
             continue;
         }
         const std::size_t elementIndex = *drawn.membraneElement;
@@ -1474,7 +1477,7 @@ void nodeStrainFields(const SimBody &sim,
     std::vector<float> rests;
     std::vector<char> seen(constraints.size(), 0);
     for (const RenderFace &drawn : sim.renderFaces) {
-        if (isSkinSurface(drawn.surface) && drawn.membraneElement) {
+        if (drawn.membraneElement) {
             continue;
         }
         if (drawn.surface == SimSurface::Rib && !detailedRibs) {

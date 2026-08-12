@@ -201,6 +201,24 @@ polar answered with more lift, more induced drag, less airspeed and
 therefore a still higher angle. With a hand held still at 20 cm, α ran
 20.9 → 23.1 → 29.4 → 76°. It now goes 13.2 → 15.5 → 16.4°.
 
+**Riser pulls are suspension geometry, not aerodynamic commands.** The page
+discovers authored plans 1..5 at the existing carabiner cut and shows only
+those A..E rows the loaded glider actually carries. Each slider symmetrically
+shortens the single bottom segment of that row on both halves, at the same
+0.6 m/s simulated-time hand speed as the brake hands and up to 30 cm. The
+resulting incidence and speed change must emerge through the cable network,
+canopy deformation and live pressure field; the control adds no pitch moment,
+trim-angle change or recovery force. In particular, an A pull is an experiment
+on the actual leading-row load path, not a scripted stall-recovery action.
+Meshes exported before plan tags existed expose no riser sliders rather than
+guessing row identity. Reset releases every row.
+
+They are deliberately independent test inputs, not a parakite control system.
+A parakite pulley/handle coordinates several rows on one half to rotate that
+half-wing without deflecting its trailing edge; modelling it needs a per-side
+mixer schedule or authored pulley geometry. The current sliders let that
+schedule be investigated, but do not yet claim its kinematics.
+
 The polar is evaluated **per half-span**, each side at its own brake. The
 pull enters as an effective camber angle (8° at full travel) rather than
 a bare lift increment, so the braked half also reaches the stall blend
@@ -423,6 +441,9 @@ airspeed forever).
   navigation buttons as the Design tab's 3D view (Fit, Iso, Front,
   Back, Left, Right, Top, Bottom); a single status line runs across
   the bottom.
+- **Riser controls** appear dynamically as A/B/C/D/E pull sliders according
+  to the tagged bottom rows present in the loaded mesh; unavailable rows are
+  hidden and cleared when another glider is loaded.
 - **Settle** — steps the live wing at the Accurate solver setting (60
   substeps × 4 iterations) as fast as the machine allows, unpaced by
   the 16 ms frame clock, until the measurement converges — IN the
@@ -661,19 +682,29 @@ from missing geometry coupling.
 ## Selectable fabric formulation
 
 The calibrated/default skin remains the legacy bilateral distance truss. The
-prototype selector replaces only those skin stretch/shear springs with
-orthotropic three-component membrane elements; the ribs, straps, seams,
-suspension, pressure/cell model and opt-in contact path remain the same. No
-parallel truss is left under the membrane skin, so comparisons do not silently
-double its stiffness.
+prototype selector replaces those skin stretch/shear springs and the interior
+rib ladder with orthotropic three-component membrane elements. The rib outline
+stays sewn to the skin, while straps, seams, suspension, pressure/cell model
+and opt-in contact path remain the same. No parallel truss is left under either
+membrane, so comparisons do not silently double its stiffness.
 
 Each ordered source quad defines one material direction field: `q0 -> q3` is
 chord/warp and `q0 -> q1` is span/weft. Both triangles receive a winding-safe,
 isometric tangent chart transported from that common direction, leaving the
 designed pose at exactly zero Green strain even on a mildly non-planar quad.
-Degenerate charts are skipped and counted. Interior manifold edges receive a
-signed four-node dihedral XPBD hinge; boundaries are free, while degenerate,
-non-manifold or inconsistently wound incidences are skipped and diagnosed.
+Rib charts use chordwise warp and an in-plane thicknesswise weft. Each ladder
+bay becomes two material triangles; their common diagonal has no hinge, so it
+is a free fabric fold rather than a rigid brace. Numerical closing slivers
+below `1e-7 m2` (0.1 mm2) are skipped and counted. Interior **skin** manifold
+edges receive a signed four-node dihedral XPBD hinge; boundaries and rib
+diagonals are free, while degenerate, non-manifold or inconsistently wound
+incidences are skipped and diagnosed.
+
+The rib membranes currently receive structural/seam loads but not the
+left-cell minus right-cell pressure difference. Uniform inflation makes that
+term vanish; unequal cell pressure during a collapse does not. The fabric-rib
+mode can therefore test compliance and folding now, but it is not yet a full
+inter-cell pressure-transient model.
 
 The prototype defaults are warp/weft/coupling/shear
 `8000/5000/1000/1500 N/m`, compression ratio `0.05`, zero material damping and
@@ -685,17 +716,23 @@ retained ratio when both do (the shear scale is the geometric mean of the two
 normal scales).
 
 Slack and strain heatmaps use the membrane's warp/weft Green strains in this
-mode instead of reconstructing edge strain. Material values are prototype
+mode instead of reconstructing edge strain; enabling detailed ribs includes
+the rib material in that field. Material values are prototype
 controls, not measured cloth certification. Nonzero constraint-space membrane
 damping is additionally diagnosed as experimental: it is not yet accepted in
-the full mixed membrane/rib/line network, so the prototype default is off.
+the full skin/rib membrane and line network, so the prototype default is off.
 
-At native gnuC2 resolution the mode builds 15,840 membrane triangles and
-23,727 hinges, retaining 6,949 non-skin distance/cable constraints. A bounded
-80 Pa hard-load probe for ten frames at 30x2 remained finite (volume +4.7%,
-span +1.7%), but ran at about 267 ms/frame: roughly 135 ms in membrane solves
-and 98 ms in the deliberately serial hinges. That is a correctness probe, not
-a settled/calibrated shape claim or an interactive-performance claim.
+At native gnuC2 resolution the mode builds 17,374 membrane triangles (1,534
+rib) and 23,727 skin hinges, omits 52 rib closing slivers, and retains 4,631
+seam/strap/distance/cable constraints. A bounded final-Cp 80 Pa run settled
+without shape flags at span +1.44%, area +0.62%, volume +3.09%, 69.2 mm worst
+leading-edge dent and -2.07 degrees worst twist. With six requested workers it
+averaged about 142 ms/frame. A repeated hard-load profile fell from 184 ms to
+113--131 ms after deterministic node-disjoint hinge colouring and removal of
+the unused per-substep solver residual/resultant pass: roughly 50 ms membrane,
+40--46 ms skin hinges and zero diagnostic-pass time. Constitutive strain and
+energy remain evaluated on demand for reports and heatmaps. Those are
+correctness and cost observations, not calibrated-shape claims.
 
 ## Limits, stated
 

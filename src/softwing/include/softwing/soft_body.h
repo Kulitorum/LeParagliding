@@ -208,15 +208,21 @@ struct StepSettings {
     // 0 keeps the single-threaded solver and its exact element ordering, which
     // is what every acceptance gate is baselined against.
     //
-    // Any value >= 1 runs the parallel sweeps: the coloured distance/cable
-    // constraint sweep, and the explicitly selected parallel membrane mode.
-    // All of them follow a different sweep from serial index-order
+    // Any value >= 1 runs the parallel sweeps: coloured distance/cable and
+    // dihedral constraints, plus the explicitly selected parallel membrane
+    // mode. All follow a different sweep from serial index-order
     // Gauss-Seidel, but each is bit-identical at every worker count, including
     // 1. The count buys speed only; it never selects physics. Set it
     // explicitly: the core never reads the core count.
     unsigned workerThreads = 0;
     ParallelMembraneMode parallelMembraneMode =
         ParallelMembraneMode::ColouredGaussSeidel;
+    // The constitutive strain/energy diagnostics are evaluated on demand.
+    // This optional post-solve pass publishes only the solver residual and
+    // resultant estimate stored on every membrane element. Hosts that do not
+    // display those two fields can skip it without changing positions,
+    // velocities, multipliers or on-demand material diagnostics.
+    bool updateMembraneSolverDiagnostics = true;
     StepPerformanceProfile* performanceProfile = nullptr;
 };
 
@@ -597,6 +603,23 @@ private:
     [[nodiscard]] const MembraneColouring& membraneColouring() const;
     void solveMembraneColoured(double dt, WorkerPool& pool);
 
+    // A hinge touches four nodes rather than a membrane's three. Greedy
+    // colouring keeps every phase node-disjoint, so it is the same stable
+    // Gauss-Seidel sweep at every requested worker count.
+    struct DihedralColouring {
+        std::vector<std::size_t> constraints;
+        std::vector<std::size_t> colourOffsets;
+        std::size_t parallelColours = 0;
+        std::size_t largestColour = 0;
+        std::size_t builtForConstraintCount = 0;
+        std::size_t builtForNodeCount = 0;
+
+        [[nodiscard]] unsigned workerCap(unsigned requested) const;
+    };
+    [[nodiscard]] const DihedralColouring& dihedralColouring() const;
+    void solveDihedralsColoured(double inverseTimeStepSquared,
+                                WorkerPool& pool);
+
     // Scratch topology for the deterministic parallel Jacobi sweep. Element
     // corrections are produced independently. Each node then owns its output
     // and sums incident corrections in ascending element order, so scheduling
@@ -672,6 +695,7 @@ private:
     mutable LoadPathOrdering loadPathOrdering_;
     mutable ConstraintColouring constraintColouring_;
     mutable MembraneColouring membraneColouring_;
+    mutable DihedralColouring dihedralColouring_;
     MembraneJacobiScratch membraneJacobiScratch_;
     WorkerPoolSlot workerPool_;
 };

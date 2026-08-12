@@ -27,6 +27,7 @@
 #include <QSurfaceFormat>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QThread>
 #include <QToolButton>
@@ -74,6 +75,8 @@ using lep::playground::buildSimBody;
 using lep::playground::defaultRibLayers;
 using lep::playground::defaultRibStationSplit;
 using lep::playground::maximumPilotMassKg;
+using lep::playground::maximumRiserPullMetres;
+using lep::playground::maximumRiserRows;
 using lep::playground::minimumPilotMassKg;
 using lep::playground::noConstraint;
 using lep::playground::parseSimMesh;
@@ -85,6 +88,7 @@ namespace {
 constexpr float cameraFieldOfViewDegrees = 40.0F;
 constexpr float degreesToRadians = 3.14159265358979323846F / 180.0F;
 constexpr double maximumBrakeTravelMetres = 0.6;
+static_assert(maximumRiserRows == 5);
 // How far out the air motes are drawn. Big enough that the field reads as
 // surrounding space rather than a cloud around the wing, small enough that
 // the densest lattice setting stays a few tens of thousands of points.
@@ -293,6 +297,7 @@ public:
         softwing::Vec3 boundsHigh;
         std::size_t pilotNode = noConstraint;
         bool freeFlight = false;
+        std::array<bool, maximumRiserRows> riserRows{};
         QString materialSummary;
         QString buildError;
     };
@@ -433,7 +438,8 @@ public:
             << "skin           "
             << QString::fromLatin1(lep::playground::skinModelName(sim.skinModel))
             << ", " << sim.body->membraneElements().size()
-            << " membranes, " << sim.body->dihedralConstraints().size()
+            << " membranes (" << sim.ribMembraneElementCount
+            << " rib), " << sim.body->dihedralConstraints().size()
             << " hinges, skipped " << sim.skippedMembraneElements << "/"
             << sim.skippedDihedralHinges << " elements/hinges\n";
         if (sim.skinModel == SkinModel::OrthotropicMembrane) {
@@ -451,7 +457,8 @@ public:
                 << QString::number(sim.skinBendCompliance, 'g', 3) << "\n";
             if (m.dampingTime > 0.0) {
                 out << "WARNING        nonzero membrane damping is "
-                       "experimental in the mixed rib/line network\n";
+                       "experimental in the skin/rib membrane and line "
+                       "network\n";
             }
         }
         out
@@ -462,6 +469,24 @@ public:
             << " kg junction floor + "
             << QString::number(sim.controlNodeFloorMassKg, 'f', 4)
             << " kg control floor\n";
+        std::array<bool, maximumRiserRows> presentRiserRows{};
+        for (const lep::playground::RiserLine &riser : sim.riserLines) {
+            if (riser.row < presentRiserRows.size()) {
+                presentRiserRows[riser.row] = true;
+            }
+        }
+        out << "riser controls ";
+        bool wroteRiserRow = false;
+        for (std::size_t row = 0; row < presentRiserRows.size(); ++row) {
+            if (presentRiserRows[row]) {
+                out << (wroteRiserRow ? "/" : "")
+                    << QChar(u'A' + static_cast<char16_t>(row));
+                wroteRiserRow = true;
+            }
+        }
+        out << (wroteRiserRow
+                    ? " (symmetric, bottom segments, 30 cm max)\n"
+                    : "none (mesh has no tagged bottom rows)\n");
         if (sim.virtualAddedAirMassKg > 0.0) {
             out << "added air      "
                 << QString::number(sim.virtualAddedAirMassKg, 'f', 1)
@@ -556,6 +581,13 @@ public:
         // Every control change gets its own line whatever the cadence:
         // what the pilot did is the half of the record that explains the
         // other half.
+        const bool riserChanged = !std::equal(
+            controls.riserPullMetres.begin(),
+            controls.riserPullMetres.end(),
+            loggedControls_.riserPullMetres.begin(),
+            [](double pull, double loggedPull) {
+                return std::abs(pull - loggedPull) <= 0.005;
+            });
         const bool changed =
             std::abs(controls.brakeLeft - loggedControls_.brakeLeft) > 0.005
             || std::abs(controls.brakeRight - loggedControls_.brakeRight)
@@ -571,7 +603,8 @@ public:
             || std::abs(controls.crossPortGain
                         - loggedControls_.crossPortGain)
                    > 0.01
-            || controls.substeps != loggedControls_.substeps;
+            || controls.substeps != loggedControls_.substeps
+            || riserChanged;
         if (changed) {
             QString line;
             QTextStream out(&line);
@@ -580,7 +613,26 @@ public:
                 << QString::number(controls.brakeLeft * 100.0, 'f', 0)
                 << "/"
                 << QString::number(controls.brakeRight * 100.0, 'f', 0)
-                << " cm, q "
+                << " cm, risers";
+            std::array<bool, maximumRiserRows> presentRows{};
+            for (const lep::playground::RiserLine &riser : sim.riserLines) {
+                if (riser.row < presentRows.size()) {
+                    presentRows[riser.row] = true;
+                }
+            }
+            bool wroteRiser = false;
+            for (std::size_t row = 0; row < presentRows.size(); ++row) {
+                if (presentRows[row]) {
+                    wroteRiser = true;
+                    out << " "
+                        << QChar(u'A' + static_cast<char16_t>(row))
+                        << QString::number(
+                               controls.riserPullMetres[row] * 100.0,
+                               'f',
+                               0);
+                }
+            }
+            out << (wroteRiser ? " cm, q " : " none, q ")
                 << QString::number(controls.pressurePascal, 'f', 0)
                 << " Pa, angle "
                 << QString::number(controls.angleOfAttackDegrees, 'f', 1)
@@ -951,13 +1003,20 @@ private:
         backTopology_.boundsHigh = sim.boundsHigh;
         backTopology_.pilotNode = sim.pilotNode;
         backTopology_.freeFlight = sim.pilotNode != noConstraint;
+        backTopology_.riserRows.fill(false);
+        for (const lep::playground::RiserLine &riser : sim.riserLines) {
+            if (riser.row < backTopology_.riserRows.size()) {
+                backTopology_.riserRows[riser.row] = true;
+            }
+        }
         backTopology_.materialSummary.clear();
         if (sim.body) {
             backTopology_.materialSummary = QStringLiteral(
-                "%1 · %2 membranes · %3 hinges · skipped %4/%5")
+                "%1 · %2 membranes (%3 rib) · %4 hinges · skipped %5/%6")
                 .arg(QString::fromLatin1(
                     lep::playground::skinModelName(sim.skinModel)))
                 .arg(sim.body->membraneElements().size())
+                .arg(sim.ribMembraneElementCount)
                 .arg(sim.body->dihedralConstraints().size())
                 .arg(sim.skippedMembraneElements)
                 .arg(sim.skippedDihedralHinges);
@@ -1477,6 +1536,11 @@ public:
 
     QString materialReadout() const { return topo_.materialSummary; }
 
+    std::array<bool, maximumRiserRows> availableRiserRows() const
+    {
+        return topo_.riserRows;
+    }
+
     // Back to the rest pose (and, in free flight, a fresh launch on the
     // glide), from the retained mesh — no engine run needed.
     void resetSimulation()
@@ -1570,6 +1634,16 @@ public:
     {
         controls_.brakeLeft = rightMetres;
         controls_.brakeRight = leftMetres;
+        pushInputs();
+    }
+
+    void setRiserPull(std::size_t row, double metres)
+    {
+        if (row >= controls_.riserPullMetres.size()) {
+            return;
+        }
+        controls_.riserPullMetres[row] =
+            std::clamp(metres, 0.0, maximumRiserPullMetres);
         pushInputs();
     }
 
@@ -3011,6 +3085,26 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     lift_ = makeSlider(15, 6);
     leftBrake_ = makeSlider(100, 0);
     rightBrake_ = makeSlider(100, 0);
+    riserSectionLabel_ = new QLabel(QStringLiteral("Risers"), this);
+    riserSectionLabel_->setObjectName(QStringLiteral("fieldLabel"));
+    riserSectionLabel_->setVisible(false);
+    for (std::size_t row = 0; row < maximumRiserRows; ++row) {
+        const QChar name = QChar(u'A' + static_cast<char16_t>(row));
+        riserLabels_[row] = new QLabel(this);
+        riserPull_[row] = makeSlider(
+            static_cast<int>(std::lround(maximumRiserPullMetres * 100.0)),
+            0);
+        riserPull_[row]->setToolTip(
+            QStringLiteral(
+                "Symmetrically pull both %1 risers. This shortens only "
+                "the authored bottom %1-row segments at the carabiners, "
+                "so the force travels through the suspension and pilot. "
+                "Use A to test whether lowering the leading-row risers "
+                "helps the stalled wing regain speed.")
+                .arg(name));
+        riserLabels_[row]->setVisible(false);
+        riserPull_[row]->setVisible(false);
+    }
     // 1 is the cross-port area the design declares; the rest of the range
     // is a deliberate lie, so the one path that re-feeds a sealed cell can
     // be turned up until its effect is visible.
@@ -3123,13 +3217,15 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         "so payload load reaches the canopy without extra cloth iterations."));
     skinModel_ = new QComboBox(this);
     skinModel_->addItem(QStringLiteral("Legacy distance truss"));
-    skinModel_->addItem(QStringLiteral("Orthotropic membrane (prototype)"));
+    skinModel_->addItem(
+        QStringLiteral("Orthotropic fabric: skin + ribs (prototype)"));
     skinModel_->setToolTip(QStringLiteral(
         "Legacy preserves the calibrated bilateral distance-spring skin. "
-        "The prototype replaces only skin springs with warp/weft/shear "
-        "membranes, compression softening and true fold hinges; ribs, seams, "
-        "straps, lines, pressure, cells and contact are unchanged. It is an "
-        "engineering experiment, not a calibrated fabric certificate."));
+        "The prototype replaces skin springs and the rigid rib ladder with "
+        "warp/weft/shear membranes and compression softening. Skin panels "
+        "retain true fold hinges; rib diagonals fold freely like cloth. "
+        "Seams, straps, lines, pressure, cells and contact are unchanged. "
+        "It is an engineering experiment, not a fabric certificate."));
     skinMaterialLabel_ = new QLabel(this);
     skinMaterialLabel_->setWordWrap(true);
     const auto refreshSkinMaterial = [this] {
@@ -3137,7 +3233,7 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             skinModel_->currentIndex() == 0
                 ? QStringLiteral("Calibrated legacy structural guard")
                 : QStringLiteral(
-                      "Prototype W/T/C/S 8000/5000/1000/1500 N/m · "
+                      "Prototype skin+ribs W/T/C/S 8000/5000/1000/1500 N/m · "
                       "compression 0.05 · damping off · bend C 5e-4"));
     };
     refreshSkinMaterial();
@@ -3226,6 +3322,12 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
             QStringLiteral("Right brake %1 cm")
                 .arg(std::lround(rightBrake_->value() / 100.0
                                  * maximumBrakeTravelMetres * 100.0)));
+        for (std::size_t row = 0; row < maximumRiserRows; ++row) {
+            riserLabels_[row]->setText(
+                QStringLiteral("%1 risers %2 cm")
+                    .arg(QChar(u'A' + static_cast<char16_t>(row)))
+                    .arg(riserPull_[row]->value()));
+        }
         pilotMassLabel_->setText(
             QStringLiteral("Pilot + harness %1 kg")
                 .arg(pilotMass_->value()));
@@ -3244,6 +3346,10 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     for (QSlider *slider :
          {pressure_, lift_, leftBrake_, rightBrake_, pilotMass_, crossPortGain_,
           airDensity_}) {
+        connect(slider, &QSlider::valueChanged, this,
+                [refreshControlReadouts] { refreshControlReadouts(); });
+    }
+    for (QSlider *slider : riserPull_) {
         connect(slider, &QSlider::valueChanged, this,
                 [refreshControlReadouts] { refreshControlReadouts(); });
     }
@@ -3309,6 +3415,11 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     panelLayout->addWidget(leftBrake_);
     panelLayout->addWidget(rightBrakeLabel_);
     panelLayout->addWidget(rightBrake_);
+    panelLayout->addWidget(riserSectionLabel_);
+    for (std::size_t row = 0; row < maximumRiserRows; ++row) {
+        panelLayout->addWidget(riserLabels_[row]);
+        panelLayout->addWidget(riserPull_[row]);
+    }
     panelLayout->addWidget(crossPortLabel_);
     panelLayout->addWidget(crossPortGain_);
     panelLayout->addWidget(airLabel_);
@@ -3597,6 +3708,16 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
     };
     connect(leftBrake_, &QSlider::valueChanged, this, pushBrakes);
     connect(rightBrake_, &QSlider::valueChanged, this, pushBrakes);
+    for (std::size_t row = 0; row < maximumRiserRows; ++row) {
+        connect(riserPull_[row], &QSlider::valueChanged, this,
+                [this, row, notePausedControls](int centimetres) {
+                    if (view_ != nullptr) {
+                        view_->setRiserPull(
+                            row, static_cast<double>(centimetres) / 100.0);
+                    }
+                    notePausedControls();
+                });
+    }
     connect(crossPortGain_, &QSlider::valueChanged, this,
             [this, notePausedControls](int value) {
                 if (view_ != nullptr) {
@@ -3627,11 +3748,17 @@ PlaygroundPage::PlaygroundPage(QWidget *parent)
         // did not reset".
         leftBrake_->setValue(0);
         rightBrake_->setValue(0);
+        for (QSlider *slider : riserPull_) {
+            slider->setValue(0);
+        }
         if (view_ != nullptr) {
             // Directly too: the sliders only push when their integer
             // value actually changes, and a pull under half a percent of
             // travel rounds to a slider that was already at zero.
             view_->setBrakePull(0.0, 0.0);
+            for (std::size_t row = 0; row < maximumRiserRows; ++row) {
+                view_->setRiserPull(row, 0.0);
+            }
             view_->resetSimulation();
         }
         // The rebuilt body is running; the Pause button must say so.
@@ -3676,6 +3803,11 @@ void PlaygroundPage::ensureView()
                       + view_->materialReadout()
                 : QStringLiteral("Wind tunnel build failed: %1")
                       .arg(error));
+        std::array<bool, 5> available{};
+        if (error.isEmpty()) {
+            available = view_->availableRiserRows();
+        }
+        updateRiserControls(available);
         updateShapeTimer();
     });
     // Above the navigation buttons, taking every spare pixel: the wing
@@ -3686,6 +3818,10 @@ void PlaygroundPage::ensureView()
     view_->setBrakePull(
         leftBrake_->value() / 100.0 * maximumBrakeTravelMetres,
         rightBrake_->value() / 100.0 * maximumBrakeTravelMetres);
+    for (std::size_t row = 0; row < maximumRiserRows; ++row) {
+        view_->setRiserPull(
+            row, static_cast<double>(riserPull_[row]->value()) / 100.0);
+    }
     view_->setSurfaceVisible(SimSurface::Extrados,
                              showExtrados_->isChecked());
     view_->setSurfaceVisible(SimSurface::Vent, showVent_->isChecked());
@@ -3745,6 +3881,25 @@ void PlaygroundPage::updateShapeTimer()
         // The last readout stays up: a paused tunnel's numbers still
         // describe the frozen pose.
         shapeTimer_->stop();
+    }
+}
+
+void PlaygroundPage::updateRiserControls(
+    const std::array<bool, 5> &available)
+{
+    const bool anyAvailable = std::any_of(
+        available.begin(), available.end(), [](bool present) { return present; });
+    riserSectionLabel_->setVisible(anyAvailable);
+    for (std::size_t row = 0; row < maximumRiserRows; ++row) {
+        if (!available[row] && riserPull_[row]->value() != 0) {
+            const QSignalBlocker blocker(riserPull_[row]);
+            riserPull_[row]->setValue(0);
+            if (view_ != nullptr) {
+                view_->setRiserPull(row, 0.0);
+            }
+        }
+        riserLabels_[row]->setVisible(available[row]);
+        riserPull_[row]->setVisible(available[row]);
     }
 }
 

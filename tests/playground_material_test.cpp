@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace pg = lep::playground;
 
@@ -30,6 +31,33 @@ pg::SimMesh openQuad()
                   {0.0, 1.0, 0.0}};
     mesh.quads = {{0, 1, 2, 3}};
     mesh.quadSurfaces = {pg::SimSurface::Extrados};
+    return mesh;
+}
+
+pg::SimMesh fabricRib()
+{
+    pg::SimMesh mesh;
+    // Two airfoil-like sections joined by the skin. The unique longest chord
+    // on each is node 0 -> node 4, giving a deterministic rib triangulation.
+    constexpr double pi = 3.14159265358979323846;
+    for (const double x : {-0.5, 0.5}) {
+        std::vector<int> loop;
+        for (int point = 0; point < 8; ++point) {
+            const double angle = 2.0 * pi * point / 8.0;
+            loop.push_back(static_cast<int>(mesh.nodes.size()));
+            mesh.nodes.push_back(
+                {x, 0.5 - 0.5 * std::cos(angle), 0.08 * std::sin(angle)});
+        }
+        mesh.ribLoops.push_back(std::move(loop));
+    }
+    for (int point = 0; point < 8; ++point) {
+        mesh.quads.push_back(
+            {point, (point + 1) % 8, 8 + (point + 1) % 8, 8 + point});
+        mesh.quadSurfaces.push_back(
+            point < 4 ? pg::SimSurface::Extrados
+                      : pg::SimSurface::Intrados);
+    }
+    mesh.ribHoles.resize(2);
     return mesh;
 }
 
@@ -174,6 +202,69 @@ void testWarpWeftAndCompression()
           "metrics: membrane compression reaches the face wrinkle field");
 }
 
+void testRibFabricInventoryAndRest()
+{
+    const pg::SimMesh mesh = fabricRib();
+    pg::SimControls legacyControls =
+        controls(pg::SkinModel::LegacyDistanceTruss);
+    pg::SimControls fabricControls =
+        controls(pg::SkinModel::OrthotropicMembrane);
+    pg::SimMesh skinOnlyMesh = mesh;
+    skinOnlyMesh.ribLoops.clear();
+    skinOnlyMesh.ribHoles.clear();
+    pg::SimBody legacy = pg::buildSimBody(mesh, {}, legacyControls);
+    pg::SimBody fabric = pg::buildSimBody(mesh, {}, fabricControls);
+    pg::SimBody skinOnly =
+        pg::buildSimBody(skinOnlyMesh, {}, fabricControls);
+
+    check(legacy.ribMembraneElementCount == 0
+              && legacy.body->membraneElements().empty(),
+          "rib fabric: legacy path retains the distance ladder");
+    check(fabric.ribMembraneElementCount == 12
+              && fabric.body->membraneElements().size()
+                     == skinOnly.body->membraneElements().size()
+                            + fabric.ribMembraneElementCount,
+          "rib fabric: each rib face is an orthotropic membrane");
+    check(fabric.body->constraints().size()
+              < legacy.body->constraints().size(),
+          "rib fabric: membrane bays replace rigid struts and diagonals");
+    check(fabric.body->dihedralConstraints().size()
+              == skinOnly.body->dihedralConstraints().size(),
+          "rib fabric: the internal triangle diagonal remains a free fold");
+    check(std::count_if(
+              fabric.renderFaces.begin(),
+              fabric.renderFaces.end(),
+              [](const pg::RenderFace &face) {
+                  return face.surface == pg::SimSurface::Rib
+                         && face.membraneElement.has_value();
+              }) == static_cast<std::ptrdiff_t>(
+                       fabric.ribMembraneElementCount),
+          "rib fabric: rendered rib faces map to their material elements");
+
+    const auto before = fabric.body->nodes();
+    for (int frame = 0; frame < 3; ++frame) {
+        fabric.body->step(oneProjection());
+    }
+    double maximumRestMotion = 0.0;
+    for (std::size_t node = 0; node < before.size(); ++node) {
+        maximumRestMotion = std::max(
+            maximumRestMotion,
+            length(fabric.body->nodes()[node].position
+                   - before[node].position));
+    }
+    check(maximumRestMotion < 1.0e-12,
+          "rib fabric: neutral charts leave the rest section unstressed");
+
+    for (softwing::Node &node : fabric.body->nodes()) {
+        node.position.y *= 1.02;
+    }
+    std::vector<float> tensile;
+    std::vector<float> slack;
+    pg::nodeStrainFields(fabric, true, tensile, slack);
+    check(*std::max_element(tensile.begin(), tensile.end()) > 0.0F,
+          "rib fabric: membrane strain reaches the detailed-rib heatmap");
+}
+
 void testBendingAndDeterminism()
 {
     pg::SimControls stiffControls =
@@ -258,6 +349,7 @@ int main()
 {
     testInventoryAndRest();
     testWarpWeftAndCompression();
+    testRibFabricInventoryAndRest();
     testBendingAndDeterminism();
     testDegenerateAndNonManifoldDiagnostics();
     if (failures != 0) {

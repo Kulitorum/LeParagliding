@@ -351,6 +351,34 @@ per rib by section depth (no discriminator — 32 of 34 Alp-Skin ribs and 59
 of 61 gnuC2 ribs have ≥7% depth, so the ladder is geometrically fine on
 both).
 
+That ladder remains the calibrated legacy formulation. The opt-in orthotropic
+material path now replaces its five bilateral ties per bay with two rib
+membrane elements: chordwise warp, in-plane thicknesswise weft, compression
+softening, and no dihedral hinge on the shared diagonal. The outline seam still
+ties the rib to the skin. At native gnuC2 resolution this adds 1,534 active rib
+elements and omits 52 sub-0.1-mm2 closing slivers; the complete material body
+has 17,374 membranes, 23,727 skin hinges and 4,631 remaining constraints. It
+is intentionally slower and remains a prototype; none of these counts or
+arithmetic enter the default ladder path.
+
+### Material-path hinge and diagnostics follow-up
+
+The initial four-node dihedral sweep was deliberately serial. It is now
+greedily coloured as a four-node hypergraph: hinges in one phase share no
+node, wide phases run through the existing worker pool and short phases remain
+serial. The colour-major Gauss-Seidel order is bit-identical at one, four and
+six requested workers on the full gnuC2 material body. Generic `SoftBody`
+callers retain the serial index-order path with zero workers.
+
+The core also retains its post-solve membrane residual/resultant diagnostics
+by default, but `playground_sim` disables that pass. Playground reports and
+heatmaps calculate Green strain and constitutive energy directly from the
+published geometry and never consumed the stored solver-only fields. On
+gnuC2, 30x2, six requested workers, a repeated three-frame hard-load run moved
+from about **184 ms/frame** (52 ms membranes, 98 ms hinges, 10 ms diagnostics)
+to **113--131 ms/frame** (about 50 ms membranes, 40--46 ms hinges, zero
+diagnostic-pass time). The bounded 80 Pa settle averaged **142 ms/frame**.
+
 ### Where it lands
 
 Three solver budgets are now exposed in the Playground's **Solver** control

@@ -59,9 +59,15 @@ count; `workerThreads == 0` still selects the untouched serial sweep):
   preserves the original bilateral stiffness matrix exactly; the shear scale
   is the geometric mean of the two normal-direction scales.
 - `DihedralBendingConstraint` — a true signed four-node hinge on two adjacent
-  membrane triangles. It is solved serially in deterministic insertion order,
-  included in rollback/state persistence, and deliberately omitted at skin
-  boundaries, degenerate faces and non-manifold/inconsistently wound edges.
+  membrane triangles. Zero workers preserve serial insertion order; threaded
+  callers use a deterministic node-disjoint four-node colouring. Hinge state
+  is included in rollback/state persistence, and hinges are deliberately
+  omitted at skin boundaries, degenerate faces and non-manifold/inconsistently
+  wound edges.
+- `StepSettings::updateMembraneSolverDiagnostics` — permits hosts to omit the
+  post-solve stored residual/resultant estimate. It defaults on for core
+  compatibility and changes no physics; Playground turns it off because its
+  strain/energy diagnostics are evaluated directly from published geometry.
 
 The generic membrane constraint-space damping field predates the Playground
 material mode. Nonzero values are stable for the small isolated coupons it was
