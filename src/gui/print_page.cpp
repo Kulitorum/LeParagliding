@@ -245,6 +245,17 @@ PrintPage::PrintPage(QWidget *parent) : QWidget(parent)
         "resolution to stay within memory."));
     packForm->addRow(QStringLiteral("Rotation"), rotationMode_);
 
+    orientationAxis_ = new QComboBox(packBox);
+    orientationAxis_->addItem(QStringLiteral("Do not align drawn vectors"));
+    orientationAxis_->addItem(QStringLiteral("Align drawn vectors to X"));
+    orientationAxis_->addItem(QStringLiteral("Align drawn vectors to Y"));
+    orientationAxis_->setToolTip(QStringLiteral(
+        "In the parts preview, drag from inside a part to draw its yellow "
+        "orientation vector. When X or Y is selected, each marked part is "
+        "aligned to that sheet axis and may only be flipped by 180°. "
+        "Unmarked parts continue to use the Rotation setting above."));
+    packForm->addRow(QStringLiteral("Orientation"), orientationAxis_);
+
     separateCategories_ =
         new QCheckBox(QStringLiteral("Keep categories on separate sheets"),
                       packBox);
@@ -336,6 +347,26 @@ PrintPage::PrintPage(QWidget *parent) : QWidget(parent)
                     }
                 }
             });
+    connect(view_, &FlatPartsView::pieceOrientationChanged, this,
+            [this](const QString &id, const QPointF &start,
+                   const QPointF &end) {
+                for (flatparts::FlatPiece &piece : parts_.pieces) {
+                    if (piece.id == id) {
+                        piece.orientationStart = start;
+                        piece.orientationEnd = end;
+                        view_->setPieceOrientation(id, start, end);
+                        break;
+                    }
+                }
+                // A guide changes the legal rotations, so an older layout can
+                // no longer be exported as though it obeyed the new guide.
+                hasPack_ = false;
+                packedResult_ = flatparts::NestResult();
+                updateExportEnabled();
+                summary_->setText(QStringLiteral(
+                    "Orientation set for %1. Choose X or Y under Packing, "
+                    "then pack again.").arg(id));
+            });
     connect(paperSize_, &QComboBox::currentIndexChanged, this,
             [this, paperForm](int index) {
                 const bool custom = index >= 5;
@@ -414,6 +445,12 @@ flatparts::NestOptions PrintPage::currentOptions() const
     options.gapMm = partGap_->value();
     options.scale = scaleFactor();
     options.rotationStepDeg = rotationMode_->currentIndex() == 1 ? 15 : 90;
+    options.orientationAxis =
+        orientationAxis_->currentIndex() == 1
+            ? flatparts::OrientationAxis::X
+            : orientationAxis_->currentIndex() == 2
+                  ? flatparts::OrientationAxis::Y
+                  : flatparts::OrientationAxis::None;
     // A bed cuts one load at a time, so a part crossing a bed boundary would be
     // cut in half. On paper the opposite holds: straddling a sheet edge is
     // exactly what the overlap and registration marks are for.
@@ -440,6 +477,7 @@ void PrintPage::startPack()
     }
 
     packing_ = true;
+    view_->setOrientationEditingEnabled(false);
     hasPack_ = false;
     packButton_->setText(QStringLiteral("Stop"));
     updateExportEnabled();
@@ -466,6 +504,7 @@ void PrintPage::showPackResult(const flatparts::NestResult &result, bool finishe
     view_->setPackedLayout(result, packedOptions_);
     if (finished) {
         packing_ = false;
+        view_->setOrientationEditingEnabled(true);
         packButton_->setText(QStringLiteral("Pack"));
     }
     updateExportEnabled();

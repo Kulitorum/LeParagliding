@@ -83,6 +83,29 @@ void FlatPartsView::setScale(double factor)
     }
 }
 
+void FlatPartsView::setOrientationEditingEnabled(bool enabled)
+{
+    orientationEditingEnabled_ = enabled;
+    if (!enabled) {
+        orientationPiece_ = -1;
+    }
+    update();
+}
+
+void FlatPartsView::setPieceOrientation(const QString &id,
+                                        const QPointF &start,
+                                        const QPointF &end)
+{
+    for (flatparts::FlatPiece &piece : parts_.pieces) {
+        if (piece.id == id) {
+            piece.orientationStart = start;
+            piece.orientationEnd = end;
+            update();
+            return;
+        }
+    }
+}
+
 void FlatPartsView::setPackedLayout(const flatparts::NestResult &result,
                                     const flatparts::NestOptions &options)
 {
@@ -213,6 +236,16 @@ void FlatPartsView::drawPiece(QPainter &painter,
     painter.save();
     painter.translate(offset);
 
+    if (piece.hasOrientation()) {
+        const QPolygonF boundary = flatparts::outerBoundary(piece);
+        if (!boundary.isEmpty()) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(92, 190, 235, 105));
+            painter.drawPolygon(boundary, Qt::OddEvenFill);
+            painter.setBrush(Qt::NoBrush);
+        }
+    }
+
     // Line widths are set in device pixels via a cosmetic pen, so marks stay
     // legible at any zoom instead of vanishing when zoomed out.
     for (const flatparts::Polyline &polyline : piece.polylines) {
@@ -241,6 +274,18 @@ void FlatPartsView::drawPiece(QPainter &painter,
         painter.drawEllipse(circle.centre, circle.radius, circle.radius);
     }
 
+    if (piece.hasOrientation()) {
+        QPen orientationPen(QColor(255, 205, 70));
+        orientationPen.setCosmetic(true);
+        orientationPen.setWidthF(2.5);
+        painter.setPen(orientationPen);
+        painter.drawLine(piece.orientationStart, piece.orientationEnd);
+        orientationPen.setWidthF(7.0);
+        painter.setPen(orientationPen);
+        painter.drawPoint(piece.orientationStart);
+        painter.drawPoint(piece.orientationEnd);
+    }
+
     painter.restore();
 }
 
@@ -257,6 +302,19 @@ void FlatPartsView::drawPackedPiece(QPainter &painter,
     // packed rather than a second opinion about rotation and origin.
     const flatparts::PlacementFrame frame =
         flatparts::frameFor(piece, placement, packOptions_.scale);
+
+    if (piece.hasOrientation()) {
+        QPolygonF boundary;
+        for (const QPointF &point : flatparts::outerBoundary(piece)) {
+            boundary.append(frame.map(point));
+        }
+        if (!boundary.isEmpty()) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(92, 190, 235, 105));
+            painter.drawPolygon(boundary, Qt::OddEvenFill);
+            painter.setBrush(Qt::NoBrush);
+        }
+    }
 
     for (const flatparts::Polyline &polyline : piece.polylines) {
         QPainterPath path;
@@ -276,6 +334,81 @@ void FlatPartsView::drawPackedPiece(QPainter &painter,
         painter.setPen(pen);
         painter.drawPath(path);
     }
+
+    if (piece.hasOrientation()) {
+        QPen orientationPen(QColor(255, 205, 70));
+        orientationPen.setCosmetic(true);
+        orientationPen.setWidthF(2.5);
+        painter.setPen(orientationPen);
+        painter.drawLine(frame.map(piece.orientationStart),
+                         frame.map(piece.orientationEnd));
+    }
+}
+
+int FlatPartsView::reviewPieceAt(const QPointF &modelPoint) const
+{
+    if (packed_) {
+        return -1;
+    }
+    for (const Placement &placement : layout_) {
+        const flatparts::FlatPiece &piece =
+            parts_.pieces.at(placement.pieceIndex);
+        const QPointF local = modelPoint - placement.offset;
+        const QPolygonF boundary = flatparts::outerBoundary(piece);
+        if (boundary.containsPoint(local, Qt::OddEvenFill)) {
+            return placement.pieceIndex;
+        }
+    }
+    return -1;
+}
+
+QPointF FlatPartsView::localPointForPiece(int pieceIndex,
+                                         const QPointF &modelPoint) const
+{
+    if (!packed_) {
+        for (const Placement &placement : layout_) {
+            if (placement.pieceIndex == pieceIndex) {
+                return modelPoint - placement.offset;
+            }
+        }
+        return QPointF();
+    }
+    for (auto it = pack_.placements.crbegin(); it != pack_.placements.crend();
+         ++it) {
+        if (it->pieceIndex != pieceIndex) {
+            continue;
+        }
+        const flatparts::PlacementFrame frame = flatparts::frameFor(
+            parts_.pieces.at(pieceIndex), *it, packOptions_.scale);
+        const QPointF shifted = modelPoint - frame.offset;
+        const double radians = -frame.rotationDeg * M_PI / 180.0;
+        const double c = std::cos(radians);
+        const double s = std::sin(radians);
+        return QPointF(shifted.x() * c - shifted.y() * s,
+                       shifted.x() * s + shifted.y() * c)
+            / frame.scale;
+    }
+    return QPointF();
+}
+
+int FlatPartsView::packedPieceAt(const QPointF &modelPoint,
+                                 QPointF *localPoint) const
+{
+    for (auto it = pack_.placements.crbegin(); it != pack_.placements.crend();
+         ++it) {
+        if (it->pieceIndex < 0 || it->pieceIndex >= parts_.pieces.size()) {
+            continue;
+        }
+        const QPointF local = localPointForPiece(it->pieceIndex, modelPoint);
+        if (flatparts::outerBoundary(parts_.pieces.at(it->pieceIndex))
+                .containsPoint(local, Qt::OddEvenFill)) {
+            if (localPoint != nullptr) {
+                *localPoint = local;
+            }
+            return it->pieceIndex;
+        }
+    }
+    return -1;
 }
 
 void FlatPartsView::paintEvent(QPaintEvent *)
@@ -371,8 +504,34 @@ void FlatPartsView::paintEvent(QPaintEvent *)
 void FlatPartsView::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton) {
+        pressPosition_ = event->pos();
         dragging_ = true;
         dragOrigin_ = event->pos();
+        orientationPiece_ = -1;
+
+        bool invertible = false;
+        const QTransform inverse = viewTransform().inverted(&invertible);
+        if (invertible && orientationEditingEnabled_) {
+            const QPointF model = inverse.map(event->position());
+            QPointF local;
+            orientationPiece_ = packed_ ? packedPieceAt(model, &local)
+                                        : reviewPieceAt(model);
+            if (orientationPiece_ >= 0) {
+                if (!packed_) {
+                    local = localPointForPiece(orientationPiece_, model);
+                }
+                {
+                    orientationStart_ = local;
+                    orientationEnd_ = local;
+                    previousOrientationStart_ =
+                        parts_.pieces.at(orientationPiece_).orientationStart;
+                    previousOrientationEnd_ =
+                        parts_.pieces.at(orientationPiece_).orientationEnd;
+                    setCursor(Qt::CrossCursor);
+                    return;
+                }
+            }
+        }
         setCursor(Qt::ClosedHandCursor);
     }
 }
@@ -380,6 +539,20 @@ void FlatPartsView::mousePressEvent(QMouseEvent *event)
 void FlatPartsView::mouseMoveEvent(QMouseEvent *event)
 {
     if (dragging_) {
+        if (orientationPiece_ >= 0) {
+            bool invertible = false;
+            const QTransform inverse = viewTransform().inverted(&invertible);
+            if (invertible) {
+                const QPointF model = inverse.map(event->position());
+                orientationEnd_ =
+                    localPointForPiece(orientationPiece_, model);
+                flatparts::FlatPiece &piece = parts_.pieces[orientationPiece_];
+                piece.orientationStart = orientationStart_;
+                piece.orientationEnd = orientationEnd_;
+                update();
+            }
+            return;
+        }
         pan_ += QPointF(event->pos() - dragOrigin_);
         dragOrigin_ = event->pos();
         update();
@@ -393,17 +566,15 @@ void FlatPartsView::mouseMoveEvent(QMouseEvent *event)
     if (!inverted) {
         return;
     }
-    const QPointF model = inverse.map(QPointF(event->pos()));
-    QString hit;
-    for (const Placement &placement : layout_) {
-        const flatparts::FlatPiece &piece =
-            parts_.pieces.at(placement.pieceIndex);
-        if (QRectF(placement.offset, piece.size).contains(model)) {
-            hit = piece.id;
-            break;
-        }
-    }
+    const QPointF model = inverse.map(event->position());
+    const int hitIndex = packed_ ? packedPieceAt(model, nullptr)
+                                 : reviewPieceAt(model);
+    const QString hit = hitIndex >= 0 ? parts_.pieces.at(hitIndex).id
+                                      : QString();
     setHighlighted(hit);
+    setCursor(hitIndex >= 0 && orientationEditingEnabled_
+                  ? Qt::CrossCursor
+                  : Qt::OpenHandCursor);
 }
 
 void FlatPartsView::mouseReleaseEvent(QMouseEvent *event)
@@ -411,8 +582,26 @@ void FlatPartsView::mouseReleaseEvent(QMouseEvent *event)
     if (event->button() != Qt::LeftButton) {
         return;
     }
-    const bool moved = (event->pos() - dragOrigin_).manhattanLength() > 3;
+    const bool moved =
+        (event->pos() - pressPosition_).manhattanLength() > 3;
     dragging_ = false;
+    if (orientationPiece_ >= 0) {
+        const QString id = parts_.pieces.at(orientationPiece_).id;
+        if (moved && parts_.pieces.at(orientationPiece_).hasOrientation()) {
+            emit pieceOrientationChanged(id, orientationStart_, orientationEnd_);
+        } else {
+            // A click selects; it must not erase a guide already on the part.
+            parts_.pieces[orientationPiece_].orientationStart =
+                previousOrientationStart_;
+            parts_.pieces[orientationPiece_].orientationEnd =
+                previousOrientationEnd_;
+            emit pieceClicked(id);
+        }
+        orientationPiece_ = -1;
+        setCursor(Qt::CrossCursor);
+        update();
+        return;
+    }
     setCursor(Qt::OpenHandCursor);
     if (!moved && !highlighted_.isEmpty()) {
         emit pieceClicked(highlighted_);

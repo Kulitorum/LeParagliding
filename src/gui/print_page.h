@@ -83,6 +83,7 @@ private:
     QDoubleSpinBox *customWidth_ = nullptr;
     QDoubleSpinBox *customHeight_ = nullptr;
     QComboBox *rotationMode_ = nullptr;
+    QComboBox *orientationAxis_ = nullptr;
     QCheckBox *landscape_ = nullptr;
     QCheckBox *separateCategories_ = nullptr;
     QDoubleSpinBox *partGap_ = nullptr;

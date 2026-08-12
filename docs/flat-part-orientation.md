@@ -1,8 +1,8 @@
-# Fabric orientation of flat parts — an unsolved input
+# Fabric orientation of flat parts
 
-Status: **known gap, deliberately not solved.** The nester currently assumes
-the exported orientation is correct. It is not. This note records why, what
-breaks, and what the C++ port of the core has to provide to fix it properly.
+Status: **manual per-part orientation is implemented in Print/Cut.** The core
+still does not export an authoritative fabric direction, so pieces that the
+user has not marked continue to use the plan orientation described below.
 
 ## The problem
 
@@ -81,25 +81,28 @@ A per-piece grain direction as a first-class output, not an afterthought:
    simulation assumes a shape the fabric orientation helps determine. Worth
    revisiting once the port makes the panel generation accessible.
 
-## Proposed GUI: draw the fibre direction
+## Print/Cut workflow: draw the fibre direction
 
-Independent of the core work, and useful even after it lands as an override:
+The Print/Cut preview provides a manual override independent of the core work:
 
-- Show the source shapes on screen (the Print tab's preview already draws
-  exactly these outlines).
-- The user clicks inside a piece and drags a line. That vector is the fibre
-  direction for that piece.
-- Store per piece id in the design's Studio trailer, alongside the B-spline
-  definitions already kept there.
-- Feed it to the packer: the allowed rotations become those mapping the stored
-  vector onto a machine axis. Because the weave is orthogonal, that is
-  0/90/180/270 relative to the stored vector rather than relative to the drawn
-  orientation — which is the whole fix.
-- Offer "apply to all pieces in this category", since a whole category usually
-  shares one convention.
+- In the review preview, drag from inside a piece to draw its direction. Empty
+  space still pans the view.
+- Marked pieces receive a translucent light-blue fill and their direction is
+  drawn in yellow on top of the pattern geometry.
+- Choose **Align drawn vectors to X** or **Align drawn vectors to Y** under
+  Packing. For each marked piece the nester tries exactly the aligned angle and
+  its 180-degree reversal; it cannot turn that piece onto another axis.
+- Unmarked pieces retain the general Rotation setting, so partial annotation
+  degrades cleanly.
+- Direction editing is disabled while the packing worker is running. After
+  **Stop**, a vector can be replaced directly on the packed part. The packed
+  transform is inverted before saving, keeping the direction in part-local
+  coordinates. Editing invalidates the old export and requires another pack.
 
-Worth doing even with only a handful of pieces annotated: an unannotated piece
-falls back to today's behaviour, so the feature degrades cleanly.
+The current override lives with the loaded in-memory part set and therefore
+lasts until the flat parts are rebuilt or another design is loaded. Persisting
+it in the design's Studio trailer, and adding an "apply to category" action,
+remain follow-up work.
 
 ## Gotchas for whoever picks this up
 

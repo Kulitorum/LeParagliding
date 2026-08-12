@@ -145,6 +145,48 @@ QVector<int> allIndices(const flatparts::FlatPartSet &set)
     return indices;
 }
 
+void testOrientationAlignment()
+{
+    flatparts::FlatPartSet set;
+    flatparts::FlatPiece piece =
+        makePiece(QStringLiteral("guided"), QStringLiteral("rib"), 1,
+                  120.0, 40.0);
+    piece.orientationStart = QPointF(10.0, 10.0);
+    piece.orientationEnd = QPointF(30.0, 30.0); // 45 degrees in part space
+    set.pieces.append(piece);
+
+    flatparts::NestOptions options;
+    options.pageWidthMm = 300.0;
+    options.pageHeightMm = 300.0;
+    options.maxSheetsAcross = 1;
+    options.timeBudgetMs = 20;
+
+    const auto alignedModulo180 = [](double actual, double expected) {
+        double difference = std::fmod(actual - expected, 180.0);
+        if (difference < 0.0) {
+            difference += 180.0;
+        }
+        return std::abs(difference) < 1.0e-6
+            || std::abs(difference - 180.0) < 1.0e-6;
+    };
+
+    options.orientationAxis = flatparts::OrientationAxis::X;
+    flatparts::NestResult result = flatparts::nest(set, {0}, options);
+    check(result.placements.size() == 1, "guided part packs for X alignment");
+    if (!result.placements.isEmpty()) {
+        check(alignedModulo180(result.placements.first().rotationDeg, -45.0),
+              "drawn vector is aligned to X with only a 180 degree flip");
+    }
+
+    options.orientationAxis = flatparts::OrientationAxis::Y;
+    result = flatparts::nest(set, {0}, options);
+    check(result.placements.size() == 1, "guided part packs for Y alignment");
+    if (!result.placements.isEmpty()) {
+        check(alignedModulo180(result.placements.first().rotationDeg, 45.0),
+              "drawn vector is aligned to Y with only a 180 degree flip");
+    }
+}
+
 // --- a very small DXF reader, enough to interrogate what we wrote ----------
 
 struct DxfPair
@@ -619,6 +661,7 @@ int main(int argc, char **argv)
     }
 
     testSheetEnumeration();
+    testOrientationAlignment();
     testPdf(directory);
     testDxf(directory);
     testBedSplit(directory);

@@ -27,6 +27,13 @@
 // interlock nose-to-tail.
 namespace flatparts {
 
+enum class OrientationAxis
+{
+    None,
+    X,
+    Y,
+};
+
 struct NestOptions
 {
     // Printable area of one sheet, after margins.
@@ -54,6 +61,9 @@ struct NestOptions
     // resolution may be coarsened to stay inside the memory budget; the value
     // actually used comes back in NestResult::resolutionMm.
     int rotationStepDeg = 90;
+    // If set, pieces carrying a user-drawn orientation guide are restricted
+    // to the angle that aligns that guide with this axis, plus its 180° flip.
+    OrientationAxis orientationAxis = OrientationAxis::None;
     // Ceiling on total rasterised mask memory, in megabytes. Free rotation over
     // a whole wing would otherwise want most of a gigabyte.
     int maskBudgetMb = 512;

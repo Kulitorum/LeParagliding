@@ -28,6 +28,10 @@ public:
     // Millimetres per drawn millimetre — the export scale, so the preview
     // shows what will actually print.
     void setScale(double factor);
+    void setOrientationEditingEnabled(bool enabled);
+    void setPieceOrientation(const QString &id,
+                             const QPointF &start,
+                             const QPointF &end);
 
     // Switches to the packed layout: parts where the nester put them, with the
     // sheet grid over the top. Called repeatedly while a pack runs, so the view
@@ -41,6 +45,9 @@ public:
 
 signals:
     void pieceClicked(const QString &id);
+    void pieceOrientationChanged(const QString &id,
+                                 const QPointF &start,
+                                 const QPointF &end);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -72,6 +79,10 @@ private:
     void drawPackedPiece(QPainter &painter,
                          const flatparts::Placement &placement,
                          bool highlighted) const;
+    int reviewPieceAt(const QPointF &modelPoint) const;
+    int packedPieceAt(const QPointF &modelPoint, QPointF *localPoint) const;
+    QPointF localPointForPiece(int pieceIndex,
+                               const QPointF &modelPoint) const;
 
     flatparts::FlatPartSet parts_;
     QSet<QString> selected_;
@@ -91,5 +102,12 @@ private:
     double zoom_ = 1.0;
     QPointF pan_;
     QPoint dragOrigin_;
+    QPoint pressPosition_;
     bool dragging_ = false;
+    bool orientationEditingEnabled_ = true;
+    int orientationPiece_ = -1;
+    QPointF orientationStart_;
+    QPointF orientationEnd_;
+    QPointF previousOrientationStart_;
+    QPointF previousOrientationEnd_;
 };

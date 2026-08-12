@@ -718,7 +718,22 @@ NestResult nest(const FlatPartSet &set,
         const QPolygonF boundary = outerBoundary(piece);
         Candidate candidate;
         candidate.pieceIndex = index;
-        for (const double rotation : rotations) {
+        QVector<double> pieceRotations = rotations;
+        if (options.orientationAxis != OrientationAxis::None
+            && piece.hasOrientation()) {
+            const QPointF direction =
+                piece.orientationEnd - piece.orientationStart;
+            const double directionDeg =
+                std::atan2(direction.y(), direction.x()) * 180.0 / M_PI;
+            const double targetDeg =
+                options.orientationAxis == OrientationAxis::Y ? 90.0 : 0.0;
+            double aligned = std::fmod(targetDeg - directionDeg, 360.0);
+            if (aligned < 0.0) {
+                aligned += 360.0;
+            }
+            pieceRotations = {aligned, std::fmod(aligned + 180.0, 360.0)};
+        }
+        for (const double rotation : pieceRotations) {
             Mask mask =
                 rasterise(transformed(boundary, rotation, options.scale), cell,
                           grow);

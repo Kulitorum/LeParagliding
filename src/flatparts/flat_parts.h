@@ -57,6 +57,18 @@ struct FlatPiece
     // grain.
     double grainAngleDeg = 90.0;
 
+    // User-drawn orientation guide in the piece's local coordinates. When it
+    // has non-zero length, nesting aligns its direction to the axis selected
+    // in the Print/Cut page and may only reverse it by 180 degrees.
+    QPointF orientationStart;
+    QPointF orientationEnd;
+
+    bool hasOrientation() const
+    {
+        const QPointF vector = orientationEnd - orientationStart;
+        return vector.x() * vector.x() + vector.y() * vector.y() > 1.0e-6;
+    }
+
     QRectF bounds() const { return QRectF(QPointF(0.0, 0.0), size); }
     double area() const { return size.width() * size.height(); }
     // The outline the nester packs against, and the printer strokes solid.
