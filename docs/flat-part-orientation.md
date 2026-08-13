@@ -99,10 +99,11 @@ The Print/Cut preview provides a manual override independent of the core work:
   transform is inverted before saving, keeping the direction in part-local
   coordinates. Editing invalidates the old export and requires another pack.
 
-The current override lives with the loaded in-memory part set and therefore
-lasts until the flat parts are rebuilt or another design is loaded. Persisting
-it in the design's Studio trailer, and adding an "apply to category" action,
-remain follow-up work.
+The overrides are keyed by part id in the design's Studio trailer under
+`flatPartOrientations`. Drawing or replacing a vector marks the document as
+modified; the normal Save action persists it, and subsequent builds restore it
+onto parts whose ids still match. Adding an "apply to category" action remains
+follow-up work.
 
 ## Gotchas for whoever picks this up
 

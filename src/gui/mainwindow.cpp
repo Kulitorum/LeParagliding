@@ -793,7 +793,18 @@ void MainWindow::buildInterface()
     xflr5Layout->setSpacing(0);
     workspaceTabs_->addTab(xflr5Page_, QStringLiteral("Aerodynamics (XFLR5)"));
 
-    printPage_ = new PrintPage(workspaceTabs_);
+    printPage_ = new PrintPage(
+        [this] { return document_.flatPartOrientations(); },
+        [this](const QJsonObject &data) {
+            document_.setFlatPartOrientations(data);
+            if (document_.splinesDirty()) {
+                documentDirty_ = true;
+                saveButton_->setEnabled(
+                    process_->state() == QProcess::NotRunning);
+                updateWindowTitle();
+            }
+        },
+        workspaceTabs_);
     workspaceTabs_->addTab(printPage_, QStringLiteral("Print/Cut"));
 
     playgroundPage_ = new PlaygroundPage(workspaceTabs_);

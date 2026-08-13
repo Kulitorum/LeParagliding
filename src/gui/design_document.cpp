@@ -288,6 +288,9 @@ bool DesignDocument::load(const QString &path, QString *errorMessage)
     historyPersisted_ = encodedHistory.present;
     historyDirty_ = false;
     splines_ = encodedHistory.root.value(QStringLiteral("splines")).toObject();
+    flatPartOrientations_ = encodedHistory.root
+                                .value(QStringLiteral("flatPartOrientations"))
+                                .toObject();
     splinesDirty_ = false;
 
     if (encodedHistory.present) {
@@ -465,6 +468,21 @@ void DesignDocument::setSplinesData(const QJsonObject &data)
     if (splines_ == data)
         return;
     splines_ = data;
+    splinesDirty_ = true;
+}
+
+QJsonObject DesignDocument::flatPartOrientations() const
+{
+    return flatPartOrientations_;
+}
+
+void DesignDocument::setFlatPartOrientations(const QJsonObject &data)
+{
+    if (flatPartOrientations_ == data)
+        return;
+    flatPartOrientations_ = data;
+    // This flag means any Studio-trailer data is dirty; its historical name
+    // predates flat-part orientation persistence.
     splinesDirty_ = true;
 }
 
@@ -714,6 +732,10 @@ QString DesignDocument::serializedText() const
     root.insert(QStringLiteral("revisions"), revisions);
     if (!splines_.isEmpty()) {
         root.insert(QStringLiteral("splines"), splines_);
+    }
+    if (!flatPartOrientations_.isEmpty()) {
+        root.insert(QStringLiteral("flatPartOrientations"),
+                    flatPartOrientations_);
     }
 
     const QByteArray encoded =

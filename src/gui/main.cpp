@@ -200,6 +200,10 @@ int runStudioSelfTest(const QStringList &arguments)
     }
     editedSection.append(QStringLiteral("* Studio persisted-history test\n"));
     historyDocument.setSectionText(0, editedSection);
+    QJsonObject orientation;
+    orientation.insert(QStringLiteral("rib-7"),
+                       QJsonArray{10.0, 20.0, 80.0, 25.0});
+    historyDocument.setFlatPartOrientations(orientation);
     if (!historyDocument.save(&error)
         || historyDocument.revisionCount() != 2) {
         QTextStream(stderr)
@@ -220,6 +224,7 @@ int runStudioSelfTest(const QStringList &arguments)
     int sectionHistoryPosition = -1;
     if (!reopenedHistory.load(historyPath, &error)
         || reopenedHistory.revisionCount() != 2
+        || reopenedHistory.flatPartOrientations() != orientation
         || reopenedHistory.sectionHistory(1, &sectionHistoryPosition).size() != 2
         || sectionHistoryPosition != 1
         || !reopenedHistory.restoreRevision(0, &error)

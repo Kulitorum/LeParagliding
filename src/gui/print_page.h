@@ -1,10 +1,13 @@
 #pragma once
 
 #include <QHash>
+#include <QJsonObject>
 #include <QSet>
 #include <QSizeF>
 #include <QString>
 #include <QWidget>
+
+#include <functional>
 
 #include "flat_parts.h"
 #include "nesting.h"
@@ -32,7 +35,9 @@ class PrintPage : public QWidget
     Q_OBJECT
 
 public:
-    explicit PrintPage(QWidget *parent = nullptr);
+    explicit PrintPage(std::function<QJsonObject()> loadOrientations,
+                       std::function<void(const QJsonObject &)> storeOrientations,
+                       QWidget *parent = nullptr);
 
     // Reads the engine's lep-2d-parts.json. Called after every successful
     // build; a design with no parts file leaves the tab in its empty state.
@@ -111,4 +116,6 @@ private:
     double flatArea_ = 0.0;
     bool syncingTree_ = false;
     bool syncingScale_ = false;
+    std::function<QJsonObject()> loadOrientations_;
+    std::function<void(const QJsonObject &)> storeOrientations_;
 };

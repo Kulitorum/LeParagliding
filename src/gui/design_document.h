@@ -48,6 +48,8 @@ public:
     // never sees it. An empty object means "none".
     QJsonObject splinesData() const;
     void setSplinesData(const QJsonObject &data);
+    QJsonObject flatPartOrientations() const;
+    void setFlatPartOrientations(const QJsonObject &data);
     bool splinesDirty() const;
 
 private:
@@ -65,6 +67,7 @@ private:
     QList<DesignSection> sections_;
     QList<StoredRevision> revisions_;
     QJsonObject splines_;
+    QJsonObject flatPartOrientations_;
     bool splinesDirty_ = false;
     QString savedPayload_;
     int activeRevisionIndex_ = -1;

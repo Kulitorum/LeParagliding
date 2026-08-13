@@ -10,6 +10,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
@@ -72,7 +73,13 @@ QString describe(const flatparts::FlatPiece &piece)
 
 } // namespace
 
-PrintPage::PrintPage(QWidget *parent) : QWidget(parent)
+PrintPage::PrintPage(
+    std::function<QJsonObject()> loadOrientations,
+    std::function<void(const QJsonObject &)> storeOrientations,
+    QWidget *parent)
+    : QWidget(parent)
+    , loadOrientations_(std::move(loadOrientations))
+    , storeOrientations_(std::move(storeOrientations))
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -358,6 +365,21 @@ PrintPage::PrintPage(QWidget *parent) : QWidget(parent)
                         break;
                     }
                 }
+                QJsonObject orientations;
+                for (const flatparts::FlatPiece &piece : parts_.pieces) {
+                    if (!piece.hasOrientation()) {
+                        continue;
+                    }
+                    orientations.insert(
+                        piece.id,
+                        QJsonArray{piece.orientationStart.x(),
+                                   piece.orientationStart.y(),
+                                   piece.orientationEnd.x(),
+                                   piece.orientationEnd.y()});
+                }
+                if (storeOrientations_) {
+                    storeOrientations_(orientations);
+                }
                 // A guide changes the legal rotations, so an older layout can
                 // no longer be exported as though it obeyed the new guide.
                 hasPack_ = false;
@@ -570,6 +592,17 @@ void PrintPage::setPartsPath(const QString &path)
     }
 
     flatArea_ = parts_.flatArea;
+    const QJsonObject savedOrientations =
+        loadOrientations_ ? loadOrientations_() : QJsonObject();
+    for (flatparts::FlatPiece &piece : parts_.pieces) {
+        const QJsonArray points = savedOrientations.value(piece.id).toArray();
+        if (points.size() == 4) {
+            piece.orientationStart =
+                QPointF(points.at(0).toDouble(), points.at(1).toDouble());
+            piece.orientationEnd =
+                QPointF(points.at(2).toDouble(), points.at(3).toDouble());
+        }
+    }
     wingLabel_->setText(
         flatArea_ > 0.0
             ? QStringLiteral("<b>%1</b><br>%2 parts · %3 m² flat")
