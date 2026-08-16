@@ -702,11 +702,28 @@ add_test(NAME gui_headless_help COMMAND LEparagliding --headless --help)
 # One representative wing preset must calculate cleanly end to end; catches
 # regressions in the packaged resources/presets tree.
 add_test(NAME preset_gnua7_calculates
-    COMMAND leparagliding-engine
-        "${CMAKE_CURRENT_SOURCE_DIR}/resources/presets/gnuA7/24/leparagliding.txt"
-        "${CMAKE_BINARY_DIR}/preset-test-output"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DENGINE=$<TARGET_FILE:leparagliding-engine>"
+        "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/resources/presets/gnuA7/24/leparagliding.txt"
+        "-DOUTPUT_DIR=${CMAKE_BINARY_DIR}/preset-test-output"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckOddCellCenterPanel.cmake"
 )
 set_tests_properties(preset_gnua7_calculates PROPERTIES
+    TIMEOUT 120
+)
+# Contract fixture produced by SoftWingStudio's LEparagliding exporter. Run it
+# through both the legacy calculator and the newer OCCT/Playground result path,
+# then validate that the exported result contains real wing and line geometry.
+set(softwingstudio_export_input
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/softwingstudio-export/leparagliding.txt")
+add_test(NAME softwingstudio_export_calculates
+    COMMAND "${CMAKE_COMMAND}"
+        "-DENGINE=$<TARGET_FILE:leparagliding-engine>"
+        "-DINPUT=${softwingstudio_export_input}"
+        "-DOUTPUT_DIR=${CMAKE_BINARY_DIR}/softwingstudio-export-test-output"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckSoftWingStudioExport.cmake"
+)
+set_tests_properties(softwingstudio_export_calculates PROPERTIES
     TIMEOUT 120
 )
 # Every shipped preset must pass the Studio editor's stricter validation

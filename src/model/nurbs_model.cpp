@@ -277,6 +277,10 @@ struct PanelSurface
 {
     Region region = Region::Extrados;
     int panelIndex = 0;
+    // A panel spanning the centre cell can already contain both wing halves.
+    // Its reflected face would be coincident, so it is exported once under
+    // the Center assembly group instead of once per side.
+    bool selfMirrored = false;
     // Chordwise airfoil point range covered by this surface; rib faces use
     // it to know which parts of a rib outline are panel boundaries.
     int firstPoint = 0;
@@ -312,6 +316,176 @@ struct CapturedRib
     std::vector<gp_Pnt> spatialPoints;
     std::vector<RibHole> holes;
 };
+
+struct RibContourProjection
+{
+    std::size_t segment = 0;
+    double fraction = 0.0;
+    double distance = std::numeric_limits<double>::max();
+    gp_Pnt point;
+};
+
+RibContourProjection projectToRibContour(
+    const std::vector<gp_Pnt> &contour,
+    const gp_Pnt &query)
+{
+    RibContourProjection result;
+    for (std::size_t segment = 0; segment + 1 < contour.size(); ++segment) {
+        const gp_Vec edge(contour[segment], contour[segment + 1]);
+        const double squaredLength = edge.SquareMagnitude();
+        if (squaredLength <= Precision::SquareConfusion()) {
+            continue;
+        }
+        const gp_Vec offset(contour[segment], query);
+        const double fraction = std::clamp(
+            offset.Dot(edge) / squaredLength, 0.0, 1.0);
+        const gp_Pnt point = contour[segment].Translated(
+            edge.Multiplied(fraction));
+        const double distance = point.Distance(query);
+        if (distance < result.distance) {
+            result.segment = segment;
+            result.fraction = fraction;
+            result.distance = distance;
+            result.point = point;
+        }
+    }
+    return result;
+}
+
+void appendDistinctPoint(std::vector<gp_Pnt> &points, const gp_Pnt &point)
+{
+    if (points.empty()
+        || points.back().Distance(point) > Precision::Confusion()) {
+        points.push_back(point);
+    }
+}
+
+std::vector<gp_Pnt> ribContourPath(
+    const std::vector<gp_Pnt> &contour,
+    const RibContourProjection &first,
+    const RibContourProjection &last)
+{
+    std::vector<gp_Pnt> path;
+    appendDistinctPoint(path, first.point);
+    const double firstPosition = first.segment + first.fraction;
+    const double lastPosition = last.segment + last.fraction;
+    if (firstPosition <= lastPosition) {
+        for (std::size_t vertex = first.segment + 1;
+             vertex <= last.segment;
+             ++vertex) {
+            appendDistinctPoint(path, contour[vertex]);
+        }
+    } else {
+        for (std::size_t vertex = first.segment;
+             vertex > last.segment;
+             --vertex) {
+            appendDistinctPoint(path, contour[vertex]);
+        }
+    }
+    appendDistinctPoint(path, last.point);
+    return path;
+}
+
+double polylineLength(const std::vector<gp_Pnt> &points)
+{
+    double length = 0.0;
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        length += points[index].Distance(points[index - 1]);
+    }
+    return length;
+}
+
+std::vector<gp_Pnt> resamplePolyline(
+    const std::vector<gp_Pnt> &points,
+    std::size_t sampleCount)
+{
+    if (points.size() < 2 || sampleCount < 2) {
+        return {};
+    }
+    std::vector<double> lengths(points.size(), 0.0);
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        lengths[index] = lengths[index - 1]
+                         + points[index].Distance(points[index - 1]);
+    }
+    if (lengths.back() <= Precision::Confusion()) {
+        return {};
+    }
+    std::vector<gp_Pnt> result;
+    result.reserve(sampleCount);
+    std::size_t segment = 0;
+    for (std::size_t sample = 0; sample < sampleCount; ++sample) {
+        const double target = lengths.back()
+                              * static_cast<double>(sample)
+                              / static_cast<double>(sampleCount - 1);
+        while (segment + 1 < lengths.size() - 1
+               && lengths[segment + 1] < target) {
+            ++segment;
+        }
+        const double segmentLength = lengths[segment + 1] - lengths[segment];
+        const double fraction = segmentLength > Precision::Confusion()
+            ? (target - lengths[segment]) / segmentLength
+            : 0.0;
+        result.push_back(points[segment].Translated(
+            gp_Vec(points[segment], points[segment + 1])
+                .Multiplied(std::clamp(fraction, 0.0, 1.0))));
+    }
+    return result;
+}
+
+// The legacy H/V/VH code represents an intermediate landing by a straight
+// segment. At a height of exactly zero or one that landing is a seam on the
+// lower or upper skin and must instead follow the airfoil contour. Its two
+// endpoints are already exact points on a captured rib, so recover the
+// intervening profile samples before constructing the ruled support sheet.
+void conformSkinLandingToRib(
+    const std::map<int, CapturedRib> &ribs,
+    std::vector<gp_Pnt> &landing)
+{
+    if (landing.size() < 2) {
+        return;
+    }
+    constexpr double endpointTolerance =
+        4.0 * pointToleranceMillimetres;
+    double bestScore = std::numeric_limits<double>::max();
+    std::vector<gp_Pnt> bestPath;
+    for (const auto &[ribIndex, rib] : ribs) {
+        static_cast<void>(ribIndex);
+        if (rib.spatialPoints.size() < 3) {
+            continue;
+        }
+        const RibContourProjection first = projectToRibContour(
+            rib.spatialPoints, landing.front());
+        const RibContourProjection last = projectToRibContour(
+            rib.spatialPoints, landing.back());
+        if (first.distance > endpointTolerance
+            || last.distance > endpointTolerance) {
+            continue;
+        }
+        std::vector<gp_Pnt> path = ribContourPath(
+            rib.spatialPoints, first, last);
+        const double directLength = first.point.Distance(last.point);
+        const double pathLength = polylineLength(path);
+        // A vertical cut can also have both endpoints on the contour. Its
+        // long route around the airfoil is not a skin landing.
+        if (path.size() < 2
+            || directLength <= Precision::Confusion()
+            || pathLength > 4.0 * directLength) {
+            continue;
+        }
+        const double score = first.distance + last.distance;
+        if (score < bestScore) {
+            bestScore = score;
+            bestPath = std::move(path);
+        }
+    }
+    if (!bestPath.empty()) {
+        std::vector<gp_Pnt> conformed = resamplePolyline(
+            bestPath, landing.size());
+        if (conformed.size() == landing.size()) {
+            landing = std::move(conformed);
+        }
+    }
+}
 
 // The orthonormal frame mapping the rib's planar coordinates into model
 // space, fitted from the captured point correspondence and only trusted
@@ -931,6 +1105,8 @@ public:
             strip.curveA.push_back(a);
             strip.curveB.push_back(b);
         }
+        conformSkinLandingToRib(capturedRibs_, strip.curveA);
+        conformSkinLandingToRib(capturedRibs_, strip.curveB);
         capturedStrips_.push_back(std::move(strip));
     }
 
@@ -1257,6 +1433,33 @@ private:
             offset += normalDirection.Multiplied(normalOffset);
         }
         return start.Translated(offset);
+    }
+
+    bool sourcePanelMirrorsOntoItself(const SourcePanel &source,
+                                      int firstPoint,
+                                      int lastPoint) const
+    {
+        // Check the two rib boundaries, not the declared cell parity or panel
+        // number. Even-cell wings have a real half-panel next to a centre rib,
+        // while an odd-cell wing's innermost panel can span from one side of
+        // x=0 to the other and already be the complete cell. The legacy
+        // ballooning frame is based on one boundary rib and need not itself
+        // have perfectly mirrored interior samples; emitting its reflection
+        // would still put a second skin over the same boundary-defined cell.
+        for (int pointIndex = firstPoint;
+             pointIndex <= lastPoint;
+             ++pointIndex) {
+            const gp_Pnt point = sourceShapePoint(
+                source, pointIndex, 0.0);
+            const gp_Pnt opposite = sourceShapePoint(
+                source, pointIndex, 1.0);
+            if (gp_Pnt(-point.X(), point.Y(), point.Z())
+                    .Distance(opposite)
+                > symmetryPlaneToleranceMillimetres) {
+                return false;
+            }
+        }
+        return true;
     }
 
     occ::handle<Geom_BSplineCurve> makeSourceSpanCurve(
@@ -1685,25 +1888,32 @@ private:
                 return;
             }
 
-            const TopoDS_Shape mirroredFace = mirrored(face);
-            if (mirroredFace.IsNull()
-                || mirroredFace.ShapeType() != TopAbs_FACE) {
-                errors_.push_back(
-                    "Could not mirror the "
-                    + std::string(regionName)
-                    + " face for panel "
-                    + std::to_string(panelIndex));
-                return;
+            const bool selfMirrored = sourcePanelMirrorsOntoItself(
+                source, firstPoint, lastPoint);
+            TopoDS_Face leftFace;
+            if (!selfMirrored) {
+                const TopoDS_Shape mirroredFace = mirrored(face);
+                if (mirroredFace.IsNull()
+                    || mirroredFace.ShapeType() != TopAbs_FACE) {
+                    errors_.push_back(
+                        "Could not mirror the "
+                        + std::string(regionName)
+                        + " face for panel "
+                        + std::to_string(panelIndex));
+                    return;
+                }
+                leftFace = TopoDS::Face(mirroredFace);
             }
 
             PanelSurface panel;
             panel.region = region;
             panel.panelIndex = panelIndex;
+            panel.selfMirrored = selfMirrored;
             panel.firstPoint = firstPoint;
             panel.lastPoint = lastPoint;
             panel.surface = surface;
             panel.rightFace = face;
-            panel.leftFace = TopoDS::Face(mirroredFace);
+            panel.leftFace = leftFace;
             addIsoparametricSplines(
                 panel,
                 maximumDisplayedSpanSamples,
@@ -2038,11 +2248,13 @@ private:
             if (makeEdge.IsDone()) {
                 const TopoDS_Edge edge = makeEdge.Edge();
                 panel.rightWireframe.push_back(edge);
-                const TopoDS_Shape mirroredEdge = mirrored(edge);
-                if (!mirroredEdge.IsNull()
-                    && mirroredEdge.ShapeType() == TopAbs_EDGE) {
-                    panel.leftWireframe.push_back(
-                        TopoDS::Edge(mirroredEdge));
+                if (!panel.selfMirrored) {
+                    const TopoDS_Shape mirroredEdge = mirrored(edge);
+                    if (!mirroredEdge.IsNull()
+                        && mirroredEdge.ShapeType() == TopAbs_EDGE) {
+                        panel.leftWireframe.push_back(
+                            TopoDS::Edge(mirroredEdge));
+                    }
                 }
             }
         };
@@ -2103,7 +2315,9 @@ private:
             false);
         for (const PanelSurface &panel : panels_) {
             sewing.Add(panel.rightFace);
-            sewing.Add(panel.leftFace);
+            if (!panel.selfMirrored) {
+                sewing.Add(panel.leftFace);
+            }
         }
         sewing.Perform();
         const TopoDS_Shape skins = sewing.SewedShape();
@@ -2140,19 +2354,29 @@ private:
                 "Panel " + std::to_string(panel.panelIndex);
             const PartColor faceColor = regionColor(panel.region);
 
-            regionGroup.group(rightSideName).parts.push_back(
-                {partName,
-                 panel.rightFace,
-                 faceColor,
-                 wireframeColor,
-                 true});
-            regionGroup.group(leftSideName).parts.push_back(
-                {partName,
-                 panel.leftFace,
-                 faceColor,
-                 wireframeColor,
-                 true});
-            result.surfaceCount += 2;
+            if (panel.selfMirrored) {
+                regionGroup.group(centerSideName).parts.push_back(
+                    {partName,
+                     panel.rightFace,
+                     faceColor,
+                     wireframeColor,
+                     true});
+                ++result.surfaceCount;
+            } else {
+                regionGroup.group(rightSideName).parts.push_back(
+                    {partName,
+                     panel.rightFace,
+                     faceColor,
+                     wireframeColor,
+                     true});
+                regionGroup.group(leftSideName).parts.push_back(
+                    {partName,
+                     panel.leftFace,
+                     faceColor,
+                     wireframeColor,
+                     true});
+                result.surfaceCount += 2;
+            }
 
             if (!includeConstructionCurves) {
                 continue;
@@ -2174,8 +2398,12 @@ private:
                          wireframeColor,
                          false});
                 };
-            addWireframePart(rightSideName, panel.rightWireframe);
-            addWireframePart(leftSideName, panel.leftWireframe);
+            if (panel.selfMirrored) {
+                addWireframePart(centerSideName, panel.rightWireframe);
+            } else {
+                addWireframePart(rightSideName, panel.rightWireframe);
+                addWireframePart(leftSideName, panel.leftWireframe);
+            }
             result.splineCount += static_cast<int>(
                 panel.rightWireframe.size() + panel.leftWireframe.size());
         }
