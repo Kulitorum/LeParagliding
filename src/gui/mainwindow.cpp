@@ -3591,8 +3591,20 @@ void MainWindow::loadSettings()
                 color);
         }
     }
-    const double xray =
-        settings.value(QStringLiteral("viewport/xray"), 0.0).toDouble();
+    // The old setting made every face transparent, including the internals it
+    // was supposed to reveal.  Keep a non-zero legacy preference, but use a
+    // useful canopy-only default when migrating an opaque legacy viewport.
+    const QString canopyXrayKey = QStringLiteral("viewport/canopyXray");
+    double xray = 0.55;
+    if (settings.contains(canopyXrayKey)) {
+        xray = settings.value(canopyXrayKey).toDouble();
+    } else if (settings.contains(QStringLiteral("viewport/xray"))) {
+        const double legacyXray =
+            settings.value(QStringLiteral("viewport/xray")).toDouble();
+        if (legacyXray > 0.0) {
+            xray = legacyXray;
+        }
+    }
     viewport_->setSurfaceTransparency(xray);
     if (xraySlider_ != nullptr) {
         const QSignalBlocker blocker(xraySlider_);
@@ -3628,8 +3640,9 @@ void MainWindow::saveSettings() const
                 .name());
     }
     settings.setValue(
-        QStringLiteral("viewport/xray"),
+        QStringLiteral("viewport/canopyXray"),
         viewport_->surfaceTransparency());
+    settings.remove(QStringLiteral("viewport/xray"));
     settings.setValue(
         QStringLiteral("export/constructionCurves"),
         exportConstructionCurves_);

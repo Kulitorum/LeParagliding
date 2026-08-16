@@ -202,6 +202,16 @@ ParagliderView::ColorRole roleForPath(const QStringList &path)
     return ColorRole::OtherParts;
 }
 
+// The X-ray control represents canopy-fabric transparency, not blanket
+// transparency for every face in the STEP assembly.  Ribs and diagonals must
+// stay opaque so that making the skin transparent actually reveals them.
+bool isCanopySkinRole(ParagliderView::ColorRole role)
+{
+    using ColorRole = ParagliderView::ColorRole;
+    return role == ColorRole::Extrados || role == ColorRole::Intrados
+           || role == ColorRole::Vents;
+}
+
 // Maps a viewport position onto the arcball sphere (Shoemake mapping with a
 // hyperbolic sheet outside the ball, so dragging beyond the ball spins the
 // view around the camera axis).
@@ -942,7 +952,8 @@ bool ParagliderView::loadStep(const QString &path, QString *errorMessage)
             }
             part.object = new AIS_Shape(part.shape);
             impl_->applyPartStyle(part);
-            if (part.hasFaces && impl_->transparency > 0.0) {
+            if (part.hasFaces && impl_->transparency > 0.0
+                && isCanopySkinRole(part.info.role)) {
                 part.object->SetTransparency(impl_->transparency);
             }
             impl_->objectToPart.insert(part.object.get(), part.info.id);
@@ -1174,7 +1185,7 @@ void ParagliderView::setSurfaceTransparency(double transparency01)
         if (!part.hasFaces || part.object.IsNull()) {
             continue;
         }
-        if (transparency > 0.0) {
+        if (isCanopySkinRole(part.info.role) && transparency > 0.0) {
             part.object->SetTransparency(transparency);
         } else {
             part.object->UnsetTransparency();
