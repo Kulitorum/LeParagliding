@@ -174,7 +174,8 @@ the core is a C translation unit on non-MSVC platforms.
   XCAF.
 - `writeSimMesh` serializes a deliberately coarse full-wing JSON mesh in
   millimetres, Z-up: welded skin quads with surface tags, rib/hole loops,
-  diagonal straps, and labelled suspension lines.
+  diagonal straps, mini-ribs attached to the same prescribed skin seam used
+  by STEP, and labelled suspension lines.
 - `src/gui/paraglider_view.{h,cpp}` imports STEP or XCAF, triangulates with
   OCCT, hosts the native OCCT OpenGL viewer, maps XCAF labels to stable colour
   roles, and owns camera/navigation, selection, visibility, clipping, X-ray,

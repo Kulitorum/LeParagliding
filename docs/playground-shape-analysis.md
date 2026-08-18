@@ -722,6 +722,15 @@ controls, not measured cloth certification. Nonzero constraint-space membrane
 damping is additionally diagnosed as experimental: it is not yet accepted in
 the full skin/rib membrane and line network, so the prototype default is off.
 
+Trailing-edge mini-ribs use the same bounded prescribed rest geometry as the
+STEP/CFD model. Their mid-cell seam stays on the unloaded intermediate profile,
+and the surrounding skin recovers ordinary ballooning smoothly over 24% chord
+ahead of the mini-rib. The existing Playground strap representation then ties
+upper and lower nodes on that actual seam; it does not add a new inflation
+force, pressure term, or solver iteration. This is still a prescribed rest
+shape rather than a coupled inflation solution, but it removes the former
+free-standing/deformed mini-rib geometry from newly exported simulation meshes.
+
 At native gnuC2 resolution the mode builds 17,374 membrane triangles (1,534
 rib) and 23,727 skin hinges, omits 52 rib closing slivers, and retains 4,631
 seam/strap/distance/cable constraints. A bounded final-Cp 80 Pa run settled

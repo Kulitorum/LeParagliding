@@ -173,6 +173,10 @@ struct SimStrap
 {
     std::vector<softwing::Vec3> a;
     std::vector<softwing::Vec3> b;
+    // New meshes identify mini-ribs so their already-welded skin nodes can be
+    // required exactly. Older meshes and diagonal straps retain the bounded
+    // nearest-node compatibility path.
+    bool minirib = false;
 };
 
 struct SimMesh

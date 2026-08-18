@@ -80,6 +80,46 @@ if(intrados_index EQUAL -1)
         "Generated simulation does not contain the exported lower surface")
 endif()
 
+# New simulation meshes identify mini-ribs and emit both boundaries from the
+# welded mid-cell skin rows. Every sample must therefore be an actual skin node
+# (including the collapsed trailing-edge tip), never a free-standing profile
+# that the Playground can only attach through its broad compatibility search.
+string(JSON strap_count LENGTH "${simulation}" straps)
+math(EXPR last_strap "${strap_count} - 1")
+string(JSON skin_nodes GET "${simulation}" nodes)
+set(simulation_minirib_count 0)
+foreach(strap_index RANGE 0 ${last_strap})
+    string(JSON is_minirib ERROR_VARIABLE minirib_error
+        GET "${simulation}" straps ${strap_index} minirib)
+    if(minirib_error OR NOT is_minirib)
+        continue()
+    endif()
+    math(EXPR simulation_minirib_count "${simulation_minirib_count} + 1")
+    string(JSON a_count LENGTH "${simulation}" straps ${strap_index} a)
+    string(JSON b_count LENGTH "${simulation}" straps ${strap_index} b)
+    if(a_count LESS 2 OR NOT a_count EQUAL b_count)
+        message(FATAL_ERROR
+            "Simulation mini-rib ${strap_index} has mismatched boundaries")
+    endif()
+    math(EXPR last_sample "${a_count} - 1")
+    foreach(side a b)
+        foreach(sample_index RANGE 0 ${last_sample})
+            string(JSON point GET "${simulation}"
+                straps ${strap_index} ${side} ${sample_index})
+            string(FIND "${skin_nodes}" "${point}" found_skin_node)
+            if(found_skin_node EQUAL -1)
+                message(FATAL_ERROR
+                    "Simulation mini-rib ${strap_index} ${side} sample "
+                    "${sample_index} is not a welded skin node")
+            endif()
+        endforeach()
+    endforeach()
+endforeach()
+if(simulation_minirib_count LESS 2)
+    message(FATAL_ERROR
+        "Generated simulation omitted attached mini-ribs")
+endif()
+
 # The fixture's native VH bridge has a deliberately broad upper landing. Its
 # captured rib contour arches above both endpoints; a legacy straight a-to-b
 # seam cannot do that.

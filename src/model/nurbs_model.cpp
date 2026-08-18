@@ -237,6 +237,7 @@ struct CapturedLine
 struct CapturedStrip
 {
     bool minirib = false;
+    int panelIndex = 0;
     std::string label;
     std::vector<gp_Pnt> curveA;
     std::vector<gp_Pnt> curveB;
@@ -965,8 +966,11 @@ public:
                       Region::Intrados);
         }
 
-        // Coarse skin samples for the Playground simulation mesh. Unlike
-        // the STEP model, the vent wall is always captured: the toy
+        // Coarse skin samples for the Playground simulation mesh. They use
+        // the same prescribed mini-rib seam and long recovery as the STEP
+        // skin, so the existing mini-rib strap constraints land on their
+        // actual skin nodes instead of deforming toward a ballooned mid-cell.
+        // Unlike the STEP model, the vent wall is always captured: the toy
         // stamps a uniform pressure difference per face, so open intakes
         // would both leave flapping rims and give the closed-surface
         // pressure field a spurious net thrust through the hole.
@@ -1249,6 +1253,7 @@ public:
 
             CapturedStrip strip;
             strip.minirib = true;
+            strip.panelIndex = i;
             strip.label = "Mini-rib " + std::to_string(i);
             // Upper boundary: trailing edge forward along the extrados.
             int j = 1;
@@ -2436,9 +2441,9 @@ private:
         std::cerr << dump.str();
     }
 
-    // Samples one skin region on the exact ballooning law at a decimated
-    // set of chordwise stations for the Playground simulation mesh. The
-    // station selection is deterministic from the region bounds, so
+    // Samples one skin region on the prescribed ballooning/mini-rib law at a
+    // decimated set of chordwise stations for the Playground simulation mesh.
+    // The station selection is deterministic from the region bounds, so
     // neighbouring panels with equal point tables produce bit-identical
     // rib columns and weld in the exporter.
     void captureSimRegion(const SourcePanel &source,
@@ -2476,7 +2481,7 @@ private:
                                          kept,
                                          spanParameter,
                                          surface,
-                                         false);
+                                         true);
                     if (!isFinite(row[column])) {
                         return;
                     }
@@ -4514,6 +4519,111 @@ public:
             return result;
         };
 
+        // A simulation mini-rib must be made from the mid-cell skin nodes,
+        // not from a second free-standing copy of the unloaded profile. Reuse
+        // the existing coarse skin rows instead of introducing another node
+        // set or refining the whole simulation topology for this sheet.
+        const auto simulationMiniribBoundaries =
+            [this](const CapturedStrip &strip,
+                   std::vector<gp_Pnt> &upper,
+                   std::vector<gp_Pnt> &lower) {
+            const SimRegionCapture *upperRegion = nullptr;
+            const SimRegionCapture *lowerRegion = nullptr;
+            for (const SimRegionCapture &region : simRegions_) {
+                if (region.panelIndex != strip.panelIndex) {
+                    continue;
+                }
+                if (region.surface == Region::Extrados) {
+                    upperRegion = &region;
+                } else if (region.surface == Region::Intrados) {
+                    lowerRegion = &region;
+                }
+            }
+            if (upperRegion == nullptr || lowerRegion == nullptr
+                || strip.curveA.size() < 2 || strip.curveB.size() < 2) {
+                return false;
+            }
+
+            const auto candidates = [](const SimRegionCapture &region,
+                                       const std::vector<gp_Pnt> &boundary) {
+                std::vector<std::pair<double, gp_Pnt>> result;
+                const gp_Pnt &trailing = boundary.front();
+                const gp_Vec chord(trailing, boundary.back());
+                const double length = chord.Magnitude();
+                if (length <= Precision::Confusion()) {
+                    return result;
+                }
+                const gp_Dir direction(chord);
+                double nearestAheadDistance =
+                    std::numeric_limits<double>::max();
+                gp_Pnt nearestAhead;
+                for (const auto &row : region.rows) {
+                    const gp_Pnt &point =
+                        row[simSpanColumnCount / 2];
+                    const double distance =
+                        gp_Vec(trailing, point).Dot(direction);
+                    if (distance >= -pointToleranceMillimetres
+                        && distance <= length + pointToleranceMillimetres) {
+                        result.emplace_back(
+                            std::clamp(distance / length, 0.0, 1.0),
+                            point);
+                    } else if (distance > length
+                               && distance < nearestAheadDistance) {
+                        nearestAheadDistance = distance;
+                        nearestAhead = point;
+                    }
+                }
+                // Extremely coarse imported profiles can have only TE and
+                // 25%-chord source rows around a 15% mini-rib. Keep the first
+                // real seam node ahead as a bounded fallback rather than
+                // omitting the structural sheet entirely. Normal wing files
+                // take the exact in-range path above.
+                if (result.size() < 2
+                    && nearestAheadDistance
+                           < std::numeric_limits<double>::max()) {
+                    result.emplace_back(1.0, nearestAhead);
+                }
+                std::sort(result.begin(), result.end(),
+                          [](const auto &a, const auto &b) {
+                              return a.first < b.first;
+                          });
+                return result;
+            };
+            const auto upperCandidates = candidates(*upperRegion,
+                                                    strip.curveA);
+            const auto lowerCandidates = candidates(*lowerRegion,
+                                                    strip.curveB);
+            if (upperCandidates.size() < 2 || lowerCandidates.size() < 2) {
+                return false;
+            }
+            const auto nearest = [](const auto &available, double target) {
+                return std::min_element(
+                           available.begin(), available.end(),
+                           [target](const auto &a, const auto &b) {
+                               return std::abs(a.first - target)
+                                      < std::abs(b.first - target);
+                           })
+                    ->second;
+            };
+            constexpr int miniribSamples = 6;
+            for (int sample = 0; sample < miniribSamples; ++sample) {
+                const double target =
+                    static_cast<double>(sample) / (miniribSamples - 1);
+                const gp_Pnt a = nearest(upperCandidates, target);
+                const gp_Pnt b = nearest(lowerCandidates, target);
+                if (!upper.empty()
+                    && a.Distance(upper.back())
+                           <= Precision::Confusion()
+                    && b.Distance(lower.back())
+                           <= Precision::Confusion()) {
+                    continue;
+                }
+                upper.push_back(a);
+                lower.push_back(b);
+            }
+            return upper.size() >= 2 && upper.size() == lower.size();
+        };
+
         std::ostringstream json;
         json.setf(std::ios::fixed);
         json.precision(3);
@@ -4583,45 +4693,75 @@ public:
             if (strip.curveA.size() < 2 || strip.curveB.size() < 2) {
                 continue;
             }
+            std::vector<gp_Pnt> miniribUpper;
+            std::vector<gp_Pnt> miniribLower;
+            if (strip.minirib
+                && !simulationMiniribBoundaries(strip,
+                                                miniribUpper,
+                                                miniribLower)) {
+                continue;
+            }
+            const std::vector<gp_Pnt> &outputA =
+                strip.minirib ? miniribUpper : strip.curveA;
+            const std::vector<gp_Pnt> &outputB =
+                strip.minirib ? miniribLower : strip.curveB;
             constexpr int strapSamples = 6;
             const auto sampleAt = [](const std::vector<gp_Pnt> &curve,
-                                     int index) {
+                                     int index,
+                                     int sampleCount) {
                 const std::size_t position =
                     static_cast<std::size_t>(
                         std::llround(static_cast<double>(index)
                                      * (curve.size() - 1)
-                                     / (strapSamples - 1)));
+                                     / (sampleCount - 1)));
                 return curve[position];
             };
             // A strip lying symmetric on the centre plane is its own
             // mirror image.
             double minX = std::numeric_limits<double>::max();
             double maxX = std::numeric_limits<double>::lowest();
-            for (const gp_Pnt &point : strip.curveA) {
+            for (const gp_Pnt &point : outputA) {
                 minX = std::min(minX, point.X());
                 maxX = std::max(maxX, point.X());
             }
             const bool selfMirrored = std::abs(minX + maxX) < 0.5;
+            const int sampleCount = strip.minirib
+                                        ? static_cast<int>(outputA.size())
+                                        : strapSamples;
             for (const bool mirror : {false, true}) {
                 if (mirror && selfMirrored) {
                     continue;
                 }
                 const double sign = mirror ? -1.0 : 1.0;
                 json << (firstStrap ? "\n" : ",\n") << "{\"a\":[";
-                for (int index = 0; index < strapSamples; ++index) {
-                    const gp_Pnt point = sampleAt(strip.curveA, index);
+                for (int index = 0; index < sampleCount; ++index) {
+                    const gp_Pnt point = sampleAt(outputA,
+                                                  index,
+                                                  sampleCount);
+                    const double x = std::abs(point.X()) < 0.5
+                                         ? 0.0
+                                         : sign * point.X();
                     json << (index == 0 ? "" : ",") << '['
-                         << sign * point.X() << ',' << point.Y() << ','
+                         << x << ',' << point.Y() << ','
                          << point.Z() << ']';
                 }
                 json << "],\"b\":[";
-                for (int index = 0; index < strapSamples; ++index) {
-                    const gp_Pnt point = sampleAt(strip.curveB, index);
+                for (int index = 0; index < sampleCount; ++index) {
+                    const gp_Pnt point = sampleAt(outputB,
+                                                  index,
+                                                  sampleCount);
+                    const double x = std::abs(point.X()) < 0.5
+                                         ? 0.0
+                                         : sign * point.X();
                     json << (index == 0 ? "" : ",") << '['
-                         << sign * point.X() << ',' << point.Y() << ','
+                         << x << ',' << point.Y() << ','
                          << point.Z() << ']';
                 }
-                json << "]}";
+                json << "]";
+                if (strip.minirib) {
+                    json << ",\"minirib\":1";
+                }
+                json << '}';
                 firstStrap = false;
             }
         }

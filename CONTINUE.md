@@ -784,3 +784,38 @@ rib deformation improves. The independent row sliders are diagnostic—not yet
 a per-side coordinated parakite pulley mixer. The material ribs also do not yet
 receive neighbouring-cell pressure differences, which may matter during an
 asymmetric collapse.
+
+---
+
+## Prescribed mini-rib rest geometry — 2026-08-18
+
+Newly exported Playground meshes now use the same bounded mini-rib geometry as
+STEP: the mid-cell seam is the unloaded intermediate profile and ordinary skin
+ballooning recovers smoothly over 24% chord ahead of it. This is a rest-geometry
+change only. It adds no pressure term, force shortcut or XPBD iteration.
+
+Mini-rib straps are identified in `lep-sim.json` and their upper/lower samples
+come from the welded skin-node table itself. The body builder requires those
+nodes within 2 mm rather than using the historical 80 mm diagonal-strap search;
+a displaced mini-rib is therefore rejected instead of silently attached to the
+wrong skin. A collapsed upper/lower trailing-edge sample remains as the common
+tip of the rendered triangular sheet, while the non-collapsed rungs receive the
+existing cross-profile distance constraints. Old meshes and diagonal straps
+retain their compatibility path.
+
+Plan B Parakite exports 23 attached mini-ribs with 33 non-collapsed structural
+rungs and zero boundary samples outside the skin node table. It loads and runs
+through `softwing-bench --shape --csv --legacy-pressure`. The gnuC2 mesh keeps
+its historical 7,920 quads / 15,840 solver faces; the first denser attempt was
+rejected because 23,856 faces missed the standard settle budget.
+
+On the current solver, both the old gnuC2 mesh and the new mesh already report
+`Unsettled` in the six-second legacy and pressure-acceptance runs, so that flag
+is not attributable to the mini-rib change. At equal topology the legacy row
+moved only modestly: span 1.0146 -> 1.0151, volume 0.9940 -> 0.9913, lift
+1277.1 -> 1277.8 N and riser reaction 1144.0 -> 1165.7 N. The bounded-vs-legacy
+shape deltas remain inside their physical gates (LE dent 66.3 vs 64.1 mm;
+washout -2.46 vs -2.85 degrees), though the command still returns failure for
+the pre-existing unsettled flag. `--glide 300` stays well inside the five-second
+guard: alpha 3.42..8.06 degrees, L/D 11.06..12.12, span 10.61..10.67 m and
+volume +0.0..+0.2%.

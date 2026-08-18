@@ -570,6 +570,8 @@ std::optional<SimMesh> parseSimMesh(const QByteArray &data, QString &error)
              strapObject.value(QLatin1String("b")).toArray()) {
             strap.b.push_back(vec(point.toArray()));
         }
+        strap.minirib =
+            strapObject.value(QLatin1String("minirib")).toInt() != 0;
         if (strap.a.size() == strap.b.size() && !strap.a.empty()) {
             mesh.straps.push_back(std::move(strap));
         }
@@ -1844,8 +1846,9 @@ SimBody buildSimBody(const SimMesh &mesh,
     // Internal V/H/VH-rib and mini-rib sheets: tie each sample pair of
     // a strap together through the nearest mesh nodes, so line load
     // spreads across neighbouring ribs like the real diagonals do.
-    const auto nearestMeshNode = [&](const softwing::Vec3 &point) {
-        double bestDistance = 0.08;
+    const auto nearestMeshNode = [&](const softwing::Vec3 &point,
+                                     double maximumDistance) {
+        double bestDistance = maximumDistance;
         int bestNode = -1;
         for (std::size_t index = 0; index < mesh.nodes.size(); ++index) {
             const double distance = length(mesh.nodes[index] - point);
@@ -1861,16 +1864,26 @@ SimBody buildSimBody(const SimMesh &mesh,
         // the sheet between them can be drawn as a ribbon.
         std::vector<std::pair<std::size_t, std::size_t>> rungs;
         for (std::size_t sample = 0; sample < strap.a.size(); ++sample) {
-            const int nodeA = nearestMeshNode(strap.a[sample]);
-            const int nodeB = nearestMeshNode(strap.b[sample]);
-            if (nodeA < 0 || nodeB < 0 || nodeA == nodeB) {
+            // New mini-ribs are exported from the skin seam itself. Require
+            // that exact topology instead of silently attaching them to an
+            // unrelated skin node through the old broad strap search.
+            const double attachmentRadius = strap.minirib ? 0.002 : 0.08;
+            const int nodeA = nearestMeshNode(strap.a[sample],
+                                              attachmentRadius);
+            const int nodeB = nearestMeshNode(strap.b[sample],
+                                              attachmentRadius);
+            if (nodeA < 0 || nodeB < 0) {
                 continue;
             }
-            tie(static_cast<std::size_t>(nodeA),
-                static_cast<std::size_t>(nodeB),
-                length(mesh.nodes[static_cast<std::size_t>(nodeB)]
-                       - mesh.nodes[static_cast<std::size_t>(nodeA)]),
-                skinCompliance);
+            if (nodeA != nodeB) {
+                tie(static_cast<std::size_t>(nodeA),
+                    static_cast<std::size_t>(nodeB),
+                    length(mesh.nodes[static_cast<std::size_t>(nodeB)]
+                           - mesh.nodes[static_cast<std::size_t>(nodeA)]),
+                    skinCompliance);
+            } else if (!strap.minirib) {
+                continue;
+            }
             rungs.emplace_back(static_cast<std::size_t>(nodeA),
                                static_cast<std::size_t>(nodeB));
         }

@@ -398,6 +398,62 @@ void testLineDeduplication()
           "dedup: rejected line does not duplicate physical mass");
 }
 
+void testMiniRibUsesWeldedSkinNodes()
+{
+    pg::SimMesh mesh;
+    mesh.nodes = {{0.0, 0.0, 0.1},
+                  {1.0, 0.0, 0.1},
+                  {1.0, 1.0, 0.1},
+                  {0.0, 1.0, 0.1},
+                  {0.0, 0.0, -0.1},
+                  {1.0, 0.0, -0.1},
+                  {1.0, 1.0, -0.1},
+                  {0.0, 1.0, -0.1}};
+    mesh.quads = {{0, 1, 2, 3}, {4, 7, 6, 5}};
+    mesh.quadSurfaces = {pg::SimSurface::Extrados,
+                         pg::SimSurface::Intrados};
+    mesh.straps.push_back(
+        {{{mesh.nodes[0], mesh.nodes[3]}},
+         {{mesh.nodes[4], mesh.nodes[7]}},
+         true});
+
+    const pg::SimBody exact =
+        pg::buildSimBody(mesh, {}, pinnedControls());
+    check(exact.renderFaces.size() == exact.skinTriangleCount + 2,
+          "mini-rib: exact skin-node seam builds the internal ribbon");
+
+    pg::SimMesh displaced = mesh;
+    for (Vec3 &point : displaced.straps[0].a) {
+        point.x += 0.01;
+    }
+    for (Vec3 &point : displaced.straps[0].b) {
+        point.x += 0.01;
+    }
+    const pg::SimBody rejected =
+        pg::buildSimBody(displaced, {}, pinnedControls());
+    check(rejected.renderFaces.size() == rejected.skinTriangleCount,
+          "mini-rib: displaced profile cannot attach through broad proximity");
+
+    displaced.straps[0].minirib = false;
+    const pg::SimBody legacy =
+        pg::buildSimBody(displaced, {}, pinnedControls());
+    check(legacy.renderFaces.size() == legacy.skinTriangleCount + 2,
+          "strap: older diagonal compatibility search remains available");
+
+    const QByteArray json = R"json({
+        "nodes": [[0,0,100], [1000,0,100], [1000,1000,100], [0,1000,100],
+                  [0,0,-100], [1000,0,-100], [1000,1000,-100], [0,1000,-100]],
+        "quads": [[0,1,2,3], [4,7,6,5]],
+        "straps": [{"a":[[0,0,100],[0,1000,100]],
+                     "b":[[0,0,-100],[0,1000,-100]], "minirib":1}]
+      })json";
+    QString error;
+    const std::optional<pg::SimMesh> parsed = pg::parseSimMesh(json, error);
+    check(parsed.has_value() && parsed->straps.size() == 1
+              && parsed->straps[0].minirib,
+          "mini-rib: JSON identity reaches the Playground mesh");
+}
+
 void setConstraintTension(pg::SimBody &sim,
                           const pg::SimControls &controls,
                           std::size_t constraint,
@@ -1111,6 +1167,7 @@ int main()
     testLeadingEdgeDent(mesh);
     testTensionReadout();
     testLineDeduplication();
+    testMiniRibUsesWeldedSkinNodes();
     testRiserCutAndMass();
     testRiserPullUsesBottomRowSegments(mesh);
     testPayloadMassLineMassAndLaunch(mesh);
