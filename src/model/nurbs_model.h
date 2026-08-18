@@ -14,8 +14,12 @@ struct NurbsWriteResult
     int partCount = 0;
     int ribCount = 0;
     int lineCount = 0;
+    // Profile ranges that reuse the exact adjacent skin-surface NURBS, plus
+    // the sampled agreement check on the exported rib edges.
+    int sharedRibBoundaryCount = 0;
     int sewnEdgeCount = 0;
     int freeEdgeCount = 0;
+    double maximumRibSkinBoundaryDeviationMillimetres = 0.0;
     double maximumSourceDeviationMillimetres = 0.0;
     double maximumLegacyAgreementMillimetres = 0.0;
     std::string error;

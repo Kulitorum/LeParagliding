@@ -18,6 +18,23 @@ if(NOT engine_result EQUAL 0)
         "(${engine_result}).\n${engine_output}\n${engine_error}")
 endif()
 
+string(REGEX MATCH
+    "Rib/skin profiles: ([0-9]+) shared NURBS boundaries, maximum deviation ([^ ]+) mm"
+    rib_profile_summary "${engine_output}")
+if(NOT rib_profile_summary)
+    message(FATAL_ERROR
+        "Engine did not report exact shared rib/skin profile boundaries")
+endif()
+set(shared_rib_boundary_count "${CMAKE_MATCH_1}")
+set(maximum_rib_skin_deviation "${CMAKE_MATCH_2}")
+if(shared_rib_boundary_count LESS 6
+   OR maximum_rib_skin_deviation GREATER 0.000001)
+    message(FATAL_ERROR
+        "Rib profiles do not reuse the skin NURBS exactly: "
+        "${shared_rib_boundary_count} shared boundaries, "
+        "${maximum_rib_skin_deviation} mm deviation")
+endif()
+
 foreach(required_file lep-3d.step lep-sim.json lep-out.txt lines.txt run-log.txt)
     set(required_path "${OUTPUT_DIR}/${required_file}")
     if(NOT EXISTS "${required_path}")

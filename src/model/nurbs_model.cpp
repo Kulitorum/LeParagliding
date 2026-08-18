@@ -514,6 +514,16 @@ struct RibBoundarySegment
 {
     int firstPoint = 0;
     int lastPoint = 0;
+    // Exact chordwise boundary of the panel surface at this rib. Reusing it
+    // for the rib face makes the internal profile and canopy skin coincide
+    // as curves, not merely at the legacy airfoil sample points.
+    occ::handle<Geom_Curve> skinCurve;
+};
+
+struct RibBoundaryDiagnostics
+{
+    int sharedCurveCount = 0;
+    double maximumSkinDeviationMillimetres = 0.0;
 };
 
 struct QuantizedPoint
@@ -2409,13 +2419,11 @@ private:
         }
     }
 
-    // The exact chordwise rib contour over [firstPoint, lastPoint], as one
-    // degree-1 B-spline through the captured station points. The legacy
-    // shape definition is chordwise piecewise linear (the cut patterns and
-    // the 3D reference output are polylines through these points), and a
-    // smoothing interpolation can overshoot into the opposite side of a
-    // thin profile, so the polyline is both the faithful and the robust
-    // boundary.
+    // Reconstructs a chordwise rib range that has no exported panel surface
+    // (for example the absent lower skin of a single-skin wing). There is no
+    // canopy curve to match in such a gap, so preserve the bounded legacy
+    // polyline instead of inventing a smooth curve that can overshoot a thin
+    // tip profile. Panel-covered ranges never use this fallback.
     TopoDS_Edge contourEdge(const CapturedRib &rib,
                             int firstPoint,
                             int lastPoint) const
@@ -2734,6 +2742,7 @@ private:
                             std::vector<RibBoundarySegment> segments,
                             const CapturedRib &rib,
                             int &edgeCount,
+                            RibBoundaryDiagnostics &boundaryDiagnostics,
                             TopoDS_Shape &curveFallback,
                             std::vector<std::string> &warnings,
                             std::vector<std::string> &errors) const
@@ -2753,13 +2762,16 @@ private:
                       return left.firstPoint < right.firstPoint;
                   });
 
-        // The outline is interpolated through the exact rib station points
-        // rather than reusing the panel boundary edges: the lofts are only
-        // validated at the stations and their boundary curves oscillate
-        // measurably out of the rib plane between them. The outline is
-        // still split at the panel region boundaries (vent corners), which
-        // are genuine feature points of the rib.
-        std::vector<std::pair<int, int>> ranges;
+        // The exact skin curves are split at panel region boundaries (vent
+        // corners), which are genuine profile features. Only uncovered
+        // ranges need reconstruction from the captured station points.
+        struct OutlineRange
+        {
+            int firstPoint = 0;
+            int lastPoint = 0;
+            occ::handle<Geom_Curve> skinCurve;
+        };
+        std::vector<OutlineRange> ranges;
         int cursor = 1;
         for (const RibBoundarySegment &segment : segments) {
             if (segment.firstPoint < cursor
@@ -2768,13 +2780,16 @@ private:
                 return fail("Inconsistent panel boundary ranges");
             }
             if (segment.firstPoint > cursor) {
-                ranges.emplace_back(cursor, segment.firstPoint);
+                ranges.push_back({cursor, segment.firstPoint, {}});
             }
-            ranges.emplace_back(segment.firstPoint, segment.lastPoint);
+            ranges.push_back(
+                {segment.firstPoint,
+                 segment.lastPoint,
+                 segment.skinCurve});
             cursor = segment.lastPoint;
         }
         if (cursor < totalPointCount) {
-            ranges.emplace_back(cursor, totalPointCount);
+            ranges.push_back({cursor, totalPointCount, {}});
         }
         if (ranges.empty()) {
             return fail("No outline curves");
@@ -2787,18 +2802,76 @@ private:
             gp_Pnt end;
         };
         std::vector<BoundaryEdge> boundary;
-        for (const auto &[firstPoint, lastPoint] : ranges) {
-            const TopoDS_Edge edge =
-                contourEdge(rib, firstPoint, lastPoint);
+        for (const OutlineRange &range : ranges) {
+            TopoDS_Edge edge;
+            if (range.skinCurve.IsNull()) {
+                edge = contourEdge(
+                    rib, range.firstPoint, range.lastPoint);
+            } else {
+                BRepBuilderAPI_MakeEdge makeEdge(range.skinCurve);
+                if (makeEdge.IsDone()) {
+                    edge = makeEdge.Edge();
+                }
+            }
             if (edge.IsNull()) {
                 return fail("Could not build the outline");
             }
+            double firstParameter = 0.0;
+            double lastParameter = 0.0;
+            const occ::handle<Geom_Curve> curve =
+                BRep_Tool::Curve(edge, firstParameter, lastParameter);
+            if (curve.IsNull()) {
+                return fail("Could not evaluate the outline");
+            }
+            if (!range.skinCurve.IsNull()) {
+                if (occ::handle<Geom_BSplineCurve>::DownCast(
+                        range.skinCurve).IsNull()) {
+                    return fail("A panel boundary is not a NURBS curve");
+                }
+                const double skinFirst =
+                    range.skinCurve->FirstParameter();
+                const double skinLast =
+                    range.skinCurve->LastParameter();
+                constexpr int comparisonIntervals = 32;
+                for (int sample = 0;
+                     sample <= comparisonIntervals;
+                     ++sample) {
+                    const double fraction =
+                        static_cast<double>(sample)
+                        / static_cast<double>(comparisonIntervals);
+                    const gp_Pnt ribPoint = curve->Value(
+                        firstParameter
+                        + (lastParameter - firstParameter) * fraction);
+                    const gp_Pnt skinPoint = range.skinCurve->Value(
+                        skinFirst + (skinLast - skinFirst) * fraction);
+                    boundaryDiagnostics.maximumSkinDeviationMillimetres =
+                        std::max(
+                            boundaryDiagnostics
+                                .maximumSkinDeviationMillimetres,
+                            ribPoint.Distance(skinPoint));
+                }
+                ++boundaryDiagnostics.sharedCurveCount;
+                if (boundaryDiagnostics
+                        .maximumSkinDeviationMillimetres
+                    > pointToleranceMillimetres) {
+                    return fail(
+                        "A rib outline diverges from its panel boundary");
+                }
+            }
+            const gp_Pnt start = curve->Value(firstParameter);
+            const gp_Pnt end = curve->Value(lastParameter);
+            const gp_Pnt &expectedStart = rib.spatialPoints[
+                static_cast<std::size_t>(range.firstPoint - 1)];
+            const gp_Pnt &expectedEnd = rib.spatialPoints[
+                static_cast<std::size_t>(range.lastPoint - 1)];
+            if (start.Distance(expectedStart)
+                    > pointToleranceMillimetres
+                || end.Distance(expectedEnd)
+                       > pointToleranceMillimetres) {
+                return fail("A skin boundary does not meet the rib samples");
+            }
             boundary.push_back(
-                {edge,
-                 rib.spatialPoints[
-                     static_cast<std::size_t>(firstPoint - 1)],
-                 rib.spatialPoints[
-                     static_cast<std::size_t>(lastPoint - 1)]});
+                {edge, start, end});
         }
         // Straight trailing-edge seam whenever the airfoil is open there.
         if (boundary.back().end.Distance(boundary.front().start)
@@ -3112,11 +3185,26 @@ private:
 
         std::map<int, std::vector<RibBoundarySegment>> ribSegments;
         for (const PanelSurface &panel : panels_) {
+            double uFirst = 0.0;
+            double uLast = 0.0;
+            double vFirst = 0.0;
+            double vLast = 0.0;
+            panel.surface->Bounds(uFirst, uLast, vFirst, vLast);
+            const occ::handle<Geom_Curve> firstRibCurve =
+                panel.surface->UIso(uFirst);
+            const occ::handle<Geom_Curve> lastRibCurve =
+                panel.surface->UIso(uLast);
+            if (firstRibCurve.IsNull() || lastRibCurve.IsNull()) {
+                errors_.push_back(
+                    "Could not recover panel boundary curves for panel "
+                    + std::to_string(panel.panelIndex));
+                return;
+            }
             ribSegments[panel.panelIndex].push_back(
-                {panel.firstPoint, panel.lastPoint});
+                {panel.firstPoint, panel.lastPoint, firstRibCurve});
             if (!capturedPanels.contains(panel.panelIndex - 1)) {
                 ribSegments[panel.panelIndex - 1].push_back(
-                    {panel.firstPoint, panel.lastPoint});
+                    {panel.firstPoint, panel.lastPoint, lastRibCurve});
             }
         }
 
@@ -3146,6 +3234,7 @@ private:
             bool hasFace = false;
             bool onCenter = false;
             int edgeCount = 0;
+            RibBoundaryDiagnostics boundaryDiagnostics;
             std::vector<std::string> warnings;
             std::vector<std::string> errors;
         };
@@ -3169,6 +3258,7 @@ private:
                         *job.segments,
                         *job.rib,
                         build.edgeCount,
+                        build.boundaryDiagnostics,
                         outlineCurves,
                         build.warnings,
                         build.errors);
@@ -3226,6 +3316,14 @@ private:
                                build.errors.end());
                 return;
             }
+
+            result.sharedRibBoundaryCount +=
+                build.boundaryDiagnostics.sharedCurveCount;
+            result.maximumRibSkinBoundaryDeviationMillimetres =
+                std::max(
+                    result.maximumRibSkinBoundaryDeviationMillimetres,
+                    build.boundaryDiagnostics
+                        .maximumSkinDeviationMillimetres);
 
             const std::string partName =
                 "Rib " + std::to_string(jobs[index].ribIndex);

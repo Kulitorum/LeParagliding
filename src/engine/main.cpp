@@ -156,6 +156,11 @@ int runEngine(const std::filesystem::path &inputArgument,
             << step.partCount << " parts, "
             << step.ribCount << " ribs, "
             << step.lineCount << " labeled lines\n"
+            << "Rib/skin profiles: "
+            << step.sharedRibBoundaryCount
+            << " shared NURBS boundaries, maximum deviation "
+            << step.maximumRibSkinBoundaryDeviationMillimetres
+            << " mm\n"
             << "Sewn topology: "
             << step.sewnEdgeCount << " shared edges, "
             << step.freeEdgeCount << " designed free edges\n"
