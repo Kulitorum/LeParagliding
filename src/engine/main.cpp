@@ -161,6 +161,11 @@ int runEngine(const std::filesystem::path &inputArgument,
             << " shared NURBS boundaries, maximum deviation "
             << step.maximumRibSkinBoundaryDeviationMillimetres
             << " mm\n"
+            << "Mini-rib shaping: "
+            << step.constrainedMiniribCount
+            << " constrained ribs, maximum skin pull "
+            << step.maximumMiniribSkinPullMillimetres
+            << " mm\n"
             << "Sewn topology: "
             << step.sewnEdgeCount << " shared edges, "
             << step.freeEdgeCount << " designed free edges\n"

@@ -39,7 +39,8 @@ void lep_nurbs_capture_panel(const doublereal *u,
                              integer ventPointCount,
                              integer segmentCount,
                              integer includeVentSurface,
-                             integer singleSkin);
+                             integer singleSkin,
+                             doublereal miniribPercent);
 void lep_nurbs_capture_rib(const doublereal *u,
                            const doublereal *v,
                            const doublereal *w,
@@ -13549,7 +13550,8 @@ L12:
 			    np[i__ + 101], np[i__ + 202], nsegments,
 			    rib[i__ + 1313] == 0. ||
 				s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2) == 0,
-			    s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2) == 0);
+			    s_cmp(atp, "ss", (ftnlen)2, (ftnlen)2) == 0,
+			    rib[i__ + 5555]);
 		}
 	    }
 	    /* Rib stations for the OCCT model: planar profile (vector 3),

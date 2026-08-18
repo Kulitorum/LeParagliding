@@ -31,9 +31,9 @@
 * 2. AIRFOILS
 ***************************************************************
 * Airfoil name, intake in, intake out, open, disp. rrw, minirib
-1 softwing-profile-001.txt 25 25 1 0 1 1
-2 softwing-profile-002.txt 25 25 1 0 1 1
-3 softwing-profile-003.txt 25 25 1 0 1 1
+1 softwing-profile-001.txt 25 25 1 0 1 15
+2 softwing-profile-002.txt 25 25 1 0 1 15
+3 softwing-profile-003.txt 25 25 1 0 1 15
 ***************************************************************
 * 3. ANCHOR POINTS
 ***************************************************************

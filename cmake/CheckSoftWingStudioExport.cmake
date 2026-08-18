@@ -35,6 +35,21 @@ if(shared_rib_boundary_count LESS 6
         "${maximum_rib_skin_deviation} mm deviation")
 endif()
 
+string(REGEX MATCH
+    "Mini-rib shaping: ([0-9]+) constrained ribs, maximum skin pull ([0-9.eE+-]+) mm"
+    minirib_profile_summary "${engine_output}")
+if(NOT minirib_profile_summary)
+    message(FATAL_ERROR
+        "Engine did not report constrained mini-rib shaping")
+endif()
+set(constrained_minirib_count "${CMAKE_MATCH_1}")
+set(maximum_minirib_skin_pull "${CMAKE_MATCH_2}")
+if(constrained_minirib_count LESS 2)
+    message(FATAL_ERROR
+        "Mini-ribs did not enter the prescribed ballooning model: "
+        "${constrained_minirib_count} ribs, ${maximum_minirib_skin_pull} mm pull")
+endif()
+
 foreach(required_file lep-3d.step lep-sim.json lep-out.txt lines.txt run-log.txt)
     set(required_path "${OUTPUT_DIR}/${required_file}")
     if(NOT EXISTS "${required_path}")
@@ -80,7 +95,10 @@ endif()
 file(READ "${OUTPUT_DIR}/lep-3d.step" step_model)
 string(FIND "${step_model}" "PRODUCT('Intrados'" step_intrados_index)
 string(FIND "${step_model}" "PRODUCT('VH-rib 1'" step_vh_rib_index)
-if(step_intrados_index EQUAL -1 OR step_vh_rib_index EQUAL -1)
+string(FIND "${step_model}" "PRODUCT('Mini-rib 1'" step_minirib_index)
+if(step_intrados_index EQUAL -1 OR step_vh_rib_index EQUAL -1
+   OR step_minirib_index EQUAL -1)
     message(FATAL_ERROR
-        "Generated STEP is missing the lower skin or native Section 12 VH-rib")
+        "Generated STEP is missing the lower skin, native Section 12 VH-rib, "
+        "or attached mini-rib")
 endif()

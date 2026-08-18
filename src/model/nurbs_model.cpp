@@ -17,6 +17,8 @@
 #include <GCPnts_QuasiUniformDeflection.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GeomConvert.hxx>
+#include <GeomConvert_CompCurveToBSplineCurve.hxx>
+#include <GeomFill_BSplineCurves.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
@@ -89,6 +91,11 @@ constexpr double millimetresPerCentimetre = 10.0;
 constexpr double pointToleranceMillimetres = 0.005;
 constexpr double maximumSourceDeviationMillimetres = 0.01;
 constexpr double maximumLegacyAgreementMillimetres = 0.00001;
+// A trailing-edge mini-rib fixes the mid-cell skin to the unloaded profile.
+// Recover ordinary ballooning gradually ahead of its forward edge; this is a
+// STEP-only geometric approximation, deliberately independent of section 37's
+// much shorter flat-pattern tip treatment.
+constexpr double miniribSkinRelaxationPercent = 24.0;
 // A curve whose points all stay this close to the symmetry plane is on the
 // wing centre; its mirror copy would coincide with it.
 constexpr double symmetryPlaneToleranceMillimetres = 0.5;
@@ -233,6 +240,11 @@ struct CapturedStrip
     std::string label;
     std::vector<gp_Pnt> curveA;
     std::vector<gp_Pnt> curveB;
+    // A constrained mini-rib is built from the same mid-cell curves that
+    // deform the skin. Diagonal strips continue to use sampled boundaries.
+    occ::handle<Geom_BSplineCurve> skinCurveA;
+    occ::handle<Geom_BSplineCurve> skinCurveB;
+    double maximumSkinPullMillimetres = 0.0;
 };
 
 struct SourcePanel
@@ -244,6 +256,10 @@ struct SourcePanel
     const double *legacyTessellation = nullptr;
     int panelIndex = 0;
     int segmentCount = 0;
+    int totalPointCount = 0;
+    int upperPointCount = 0;
+    int ventPointCount = 0;
+    double miniribPercent = 0.0;
 };
 
 // One skin region of one panel, sampled coarsely on the exact ballooning
@@ -850,6 +866,7 @@ public:
         currentLineTag_ = {};
         maximumSourceDeviation_ = 0.0;
         maximumLegacyAgreement_ = 0.0;
+        miniribMaximumSkinPull_.fill(0.0);
     }
 
     void capturePanel(const double *u,
@@ -863,7 +880,8 @@ public:
                       int ventPointCount,
                       int segmentCount,
                       bool includeVentSurface,
-                      bool singleSkin)
+                      bool singleSkin,
+                      double miniribPercent)
     {
         if (u == nullptr
             || v == nullptr
@@ -901,7 +919,32 @@ public:
             legacyTessellation,
             panelIndex,
             segmentCount,
+            totalPointCount,
+            upperPointCount,
+            ventPointCount,
+            miniribPercent,
         };
+        if (!singleSkin && miniribPercent > 1.0) {
+            double maximumPull = 0.0;
+            for (int point = 1; point <= upperPointCount; ++point) {
+                maximumPull = std::max(
+                    maximumPull,
+                    sourceShapingHeight(source, point)
+                        - miniribTargetHeight(source,
+                                              point,
+                                              Region::Extrados));
+            }
+            for (int point = ventLast; point <= totalPointCount; ++point) {
+                maximumPull = std::max(
+                    maximumPull,
+                    sourceShapingHeight(source, point)
+                        - miniribTargetHeight(source,
+                                              point,
+                                              Region::Intrados));
+            }
+            miniribMaximumSkinPull_[static_cast<std::size_t>(panelIndex)] =
+                std::max(0.0, maximumPull);
+        }
         addRegion(source,
                   panelIndex,
                   1,
@@ -1189,18 +1232,19 @@ public:
                 const double before = chordwise(section[fromIndex]);
                 const double after = chordwise(section[toIndex]);
                 if (after <= before + Precision::Confusion()) {
-                    return;
+                    return 0.0;
                 }
                 const double t =
                     std::clamp((cut - before) / (after - before), 0.0, 1.0);
                 if (t <= Precision::Confusion()) {
-                    return;
+                    return 0.0;
                 }
                 const gp_Pnt &from = section[fromIndex];
                 const gp_Pnt &to = section[toIndex];
                 curve.emplace_back(from.X() + t * (to.X() - from.X()),
                                    from.Y() + t * (to.Y() - from.Y()),
                                    from.Z() + t * (to.Z() - from.Z()));
+                return t;
             };
 
             CapturedStrip strip;
@@ -1214,9 +1258,12 @@ public:
                 ++j;
                 strip.curveA.push_back(section[j]);
             }
+            double upperCutAmount = 0.0;
             if (j + 1 <= upperPoints) {
-                appendCut(strip.curveA, j, j + 1);
+                upperCutAmount = appendCut(strip.curveA, j, j + 1);
             }
+            const double upperEndParameter =
+                static_cast<double>(j - 1) + upperCutAmount;
             // Lower boundary: trailing edge forward along the intrados,
             // continuing across the vent contour when a 100% rib reaches
             // the leading edge.
@@ -1227,8 +1274,31 @@ public:
                 --j;
                 strip.curveB.push_back(section[j]);
             }
+            double lowerCutAmount = 0.0;
             if (j - 1 > upperPoints) {
-                appendCut(strip.curveB, j, j - 1);
+                lowerCutAmount = appendCut(strip.curveB, j, j - 1);
+            }
+            const int ventPoints = np[i + 202];
+            const int intradosFirst = upperPoints + ventPoints - 1;
+            const double lowerStartParameter =
+                static_cast<double>(j) - lowerCutAmount - intradosFirst;
+            const double lowerEndParameter =
+                static_cast<double>(totalPoints - intradosFirst);
+
+            strip.skinCurveA = miniribSkinCurve(i,
+                                                Region::Extrados,
+                                                0.0,
+                                                upperEndParameter,
+                                                false);
+            strip.skinCurveB = miniribSkinCurve(i,
+                                                Region::Intrados,
+                                                lowerStartParameter,
+                                                lowerEndParameter,
+                                                true);
+            if (!strip.skinCurveA.IsNull()
+                && !strip.skinCurveB.IsNull()) {
+                strip.maximumSkinPullMillimetres =
+                    miniribMaximumSkinPull_[static_cast<std::size_t>(i)];
             }
             if (strip.curveA.size() >= 2 && strip.curveB.size() >= 2) {
                 capturedStrips_.push_back(std::move(strip));
@@ -1370,9 +1440,261 @@ private:
                * millimetresPerCentimetre;
     }
 
+    static gp_Pnt sourceMidPoint(const SourcePanel &source, int pointIndex)
+    {
+        const gp_Pnt first = sourceControlPoint(
+            source, source.panelIndex, pointIndex, 47);
+        const gp_Pnt second = sourceControlPoint(
+            source, source.panelIndex - 1, pointIndex, 47);
+        return gp_Pnt(0.5 * (first.X() + second.X()),
+                      0.5 * (first.Y() + second.Y()),
+                      0.5 * (first.Z() + second.Z()));
+    }
+
+    static bool miniribChordFrame(const SourcePanel &source,
+                                  Region region,
+                                  gp_Pnt &trailing,
+                                  gp_Dir &direction,
+                                  double &length)
+    {
+        if (region == Region::Vent
+            || source.totalPointCount < 2
+            || source.upperPointCount < 2) {
+            return false;
+        }
+        const int trailingIndex = region == Region::Extrados
+                                      ? 1
+                                      : source.totalPointCount;
+        trailing = sourceMidPoint(source, trailingIndex);
+        const gp_Pnt leading =
+            sourceMidPoint(source, source.upperPointCount);
+        const gp_Vec chord(trailing, leading);
+        length = chord.Magnitude();
+        if (length <= Precision::Confusion()) {
+            return false;
+        }
+        direction = gp_Dir(chord);
+        return true;
+    }
+
+    static double miniribChordDistance(const SourcePanel &source,
+                                       int pointIndex,
+                                       const gp_Pnt &trailing,
+                                       const gp_Dir &direction)
+    {
+        return gp_Vec(trailing, sourceMidPoint(source, pointIndex))
+            .Dot(direction);
+    }
+
+    // The mini-rib itself remains the undeformed intermediate profile. Only
+    // the skin changes: it is fixed to that seam over the mini-rib and then
+    // recovers its ordinary ballooning with zero slope at both ends of a long
+    // forward transition. This is a bounded visual/CFD approximation, not an
+    // inflation solve.
+    static double miniribTargetHeight(const SourcePanel &source,
+                                      int pointIndex,
+                                      Region region)
+    {
+        const double originalHeight =
+            sourceShapingHeight(source, pointIndex);
+        if (region == Region::Vent
+            || source.miniribPercent <= 1.0
+            || source.miniribPercent > 100.0) {
+            return originalHeight;
+        }
+
+        gp_Pnt trailing;
+        gp_Dir chordDirection;
+        double chordLength = 0.0;
+        if (!miniribChordFrame(source,
+                               region,
+                               trailing,
+                               chordDirection,
+                               chordLength)) {
+            return originalHeight;
+        }
+        const double distance = miniribChordDistance(
+            source, pointIndex, trailing, chordDirection);
+        const double cut = chordLength
+                           * std::clamp(source.miniribPercent, 0.0, 100.0)
+                           / 100.0;
+        if (distance <= cut + pointToleranceMillimetres
+            || source.miniribPercent >= 100.0) {
+            return 0.0;
+        }
+
+        const double relaxationLength =
+            chordLength * miniribSkinRelaxationPercent / 100.0;
+        const double amount = std::clamp(
+            (distance - cut) / relaxationLength, 0.0, 1.0);
+        const double smoothAmount = amount * amount * (3.0 - 2.0 * amount);
+        return originalHeight * smoothAmount;
+    }
+
+    static double circularArcLength(double chord, double sag)
+    {
+        if (chord <= Precision::Confusion()
+            || sag <= Precision::Confusion()) {
+            return chord;
+        }
+        const double radius = chord * chord / (8.0 * sag) + 0.5 * sag;
+        return radius * 4.0 * std::atan2(2.0 * sag, chord);
+    }
+
+    static double sagForArcLength(double chord, double arcLength)
+    {
+        if (arcLength <= chord + Precision::Confusion()) {
+            return 0.0;
+        }
+        double low = 0.0;
+        double high = std::max(1.0, 0.5 * chord);
+        while (circularArcLength(chord, high) < arcLength) {
+            high *= 2.0;
+        }
+        for (int iteration = 0; iteration < 80; ++iteration) {
+            const double middle = 0.5 * (low + high);
+            if (circularArcLength(chord, middle) < arcLength) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        return 0.5 * (low + high);
+    }
+
+    static void normaliseCurveWeights(
+        const occ::handle<Geom_BSplineCurve> &curve)
+    {
+        if (curve.IsNull() || !curve->IsRational()) {
+            return;
+        }
+        const double endWeight = curve->Weight(1);
+        if (endWeight <= 0.0) {
+            return;
+        }
+        for (int poleIndex = 1;
+             poleIndex <= curve->NbPoles();
+             ++poleIndex) {
+            curve->SetWeight(poleIndex,
+                             curve->Weight(poleIndex) / endWeight);
+        }
+    }
+
+    static void reparameteriseCurve(
+        const occ::handle<Geom_BSplineCurve> &curve,
+        double first,
+        double last)
+    {
+        NCollection_Array1<double> knots(1, curve->NbKnots());
+        curve->Knots(knots);
+        BSplCLib::Reparametrize(first, last, knots);
+        curve->SetKnots(knots);
+    }
+
+    static occ::handle<Geom_BSplineCurve> transformedCircularArc(
+        const gp_Pnt &localStart,
+        const gp_Pnt &localMiddle,
+        const gp_Pnt &localEnd,
+        const gp_Pnt &origin,
+        const gp_Vec &spanDirection,
+        const gp_Vec &normalDirection)
+    {
+        GC_MakeArcOfCircle makeArc(localStart, localMiddle, localEnd);
+        if (!makeArc.IsDone()) {
+            return {};
+        }
+        occ::handle<Geom_BSplineCurve> curve =
+            GeomConvert::CurveToBSplineCurve(
+                makeArc.Value(), Convert_TgtThetaOver2);
+        if (curve.IsNull()) {
+            return {};
+        }
+        normaliseCurveWeights(curve);
+        for (int poleIndex = 1;
+             poleIndex <= curve->NbPoles();
+             ++poleIndex) {
+            const gp_Pnt localPole = curve->Pole(poleIndex);
+            gp_Vec offset = spanDirection.Multiplied(localPole.X());
+            offset += normalDirection.Multiplied(localPole.Z());
+            curve->SetPole(poleIndex, origin.Translated(offset));
+        }
+        return curve;
+    }
+
+    static occ::handle<Geom_BSplineCurve> makePinchedSpanCurve(
+        const gp_Pnt &start,
+        const gp_Vec &spanDirection,
+        const gp_Vec &normalDirection,
+        double spanLength,
+        double originalHeight,
+        double targetHeight)
+    {
+        const double q = spanLength * spanLength
+                             / (8.0 * originalHeight)
+                         - 0.5 * originalHeight;
+        const double radius = q + originalHeight;
+        const double theta = std::atan(q / (0.5 * spanLength));
+        const double halfArcLength =
+            0.5 * radius
+            * (std::numbers::pi - 2.0 * theta);
+        const double halfSpan = 0.5 * spanLength;
+        const double halfChord = std::hypot(halfSpan, targetHeight);
+        const double lobeSag = sagForArcLength(halfChord, halfArcLength);
+        if (lobeSag <= Precision::Confusion()) {
+            return {};
+        }
+
+        const double normalX = -targetHeight / halfChord;
+        const double normalZ = halfSpan / halfChord;
+        const gp_Pnt localStart(0.0, 0.0, 0.0);
+        const gp_Pnt localSeam(halfSpan, 0.0, targetHeight);
+        const gp_Pnt localEnd(spanLength, 0.0, 0.0);
+        const gp_Pnt firstMiddle(
+            0.5 * halfSpan + lobeSag * normalX,
+            0.0,
+            0.5 * targetHeight + lobeSag * normalZ);
+        const gp_Pnt secondMiddle(
+            halfSpan + 0.5 * halfSpan - lobeSag * normalX,
+            0.0,
+            0.5 * targetHeight + lobeSag * normalZ);
+        const occ::handle<Geom_BSplineCurve> first =
+            transformedCircularArc(localStart,
+                                   firstMiddle,
+                                   localSeam,
+                                   start,
+                                   spanDirection,
+                                   normalDirection);
+        const occ::handle<Geom_BSplineCurve> second =
+            transformedCircularArc(localSeam,
+                                   secondMiddle,
+                                   localEnd,
+                                   start,
+                                   spanDirection,
+                                   normalDirection);
+        if (first.IsNull() || second.IsNull()) {
+            return {};
+        }
+        reparameteriseCurve(first, 0.0, 0.5);
+        reparameteriseCurve(second, 0.5, 1.0);
+        GeomConvert_CompCurveToBSplineCurve joined(
+            first, Convert_TgtThetaOver2);
+        if (!joined.Add(second,
+                        pointToleranceMillimetres,
+                        true,
+                        false,
+                        2)) {
+            return {};
+        }
+        occ::handle<Geom_BSplineCurve> result = joined.BSplineCurve();
+        normaliseCurveWeights(result);
+        return result;
+    }
+
     gp_Pnt sourceShapePoint(const SourcePanel &source,
                             int pointIndex,
-                            double spanParameter) const
+                            double spanParameter,
+                            Region region,
+                            bool constrainMinirib) const
     {
         const gp_Pnt start =
             sourceControlPoint(
@@ -1396,6 +1718,47 @@ private:
         spanDirection.Normalize();
 
         const double height = sourceShapingHeight(source, pointIndex);
+        const double targetHeight = constrainMinirib
+                                        ? miniribTargetHeight(source,
+                                                              pointIndex,
+                                                              region)
+                                        : height;
+        if (constrainMinirib
+            && height >= 0.01 * millimetresPerCentimetre
+            && targetHeight
+                   < height - pointToleranceMillimetres) {
+            gp_Vec normalDirection(
+                sourceControlPoint(source,
+                                   source.panelIndex,
+                                   pointIndex,
+                                   48),
+                sourceControlPoint(source,
+                                   source.panelIndex,
+                                   pointIndex,
+                                   49));
+            if (normalDirection.Magnitude()
+                <= Precision::Confusion()) {
+                throw Standard_ConstructionError(
+                    "Zero source shaping direction");
+            }
+            normalDirection.Normalize();
+            const occ::handle<Geom_BSplineCurve> pinched =
+                makePinchedSpanCurve(start,
+                                     spanDirection,
+                                     normalDirection,
+                                     spanLength,
+                                     height,
+                                     targetHeight);
+            if (pinched.IsNull()) {
+                throw Standard_ConstructionError(
+                    "Could not construct mini-rib skin lobes");
+            }
+            const double parameter = pinched->FirstParameter()
+                                     + std::clamp(spanParameter, 0.0, 1.0)
+                                           * (pinched->LastParameter()
+                                              - pinched->FirstParameter());
+            return pinched->Value(parameter);
+        }
         double alongSpan = spanParameter * spanLength;
         double normalOffset = 0.0;
 
@@ -1445,9 +1808,64 @@ private:
         return start.Translated(offset);
     }
 
+    // The skin construction gives every constrained span curve an explicit
+    // knot at its mini-rib seam. Extract the chordwise isocurve at that knot
+    // and trim it using the source airfoil parameters, rather than projecting
+    // a separate free-standing profile onto the completed skin.
+    occ::handle<Geom_BSplineCurve> miniribSkinCurve(
+        int panelIndex,
+        Region region,
+        double requestedFirst,
+        double requestedLast,
+        bool reverse) const
+    {
+        const PanelSurface *skin = nullptr;
+        for (const PanelSurface &panel : panels_) {
+            if (panel.panelIndex == panelIndex && panel.region == region) {
+                skin = &panel;
+                break;
+            }
+        }
+        if (skin == nullptr || skin->surface.IsNull()) {
+            return {};
+        }
+
+        double uFirst = 0.0;
+        double uLast = 0.0;
+        double vFirst = 0.0;
+        double vLast = 0.0;
+        skin->surface->Bounds(uFirst, uLast, vFirst, vLast);
+        const occ::handle<Geom_BSplineCurve> fullCurve =
+            occ::handle<Geom_BSplineCurve>::DownCast(
+                skin->surface->UIso(0.5 * (uFirst + uLast)));
+        if (fullCurve.IsNull()) {
+            return {};
+        }
+
+        const double first = std::clamp(requestedFirst, vFirst, vLast);
+        const double last = std::clamp(requestedLast, vFirst, vLast);
+        if (last - first <= Precision::PConfusion()) {
+            return {};
+        }
+
+        occ::handle<Geom_BSplineCurve> boundary =
+            occ::handle<Geom_BSplineCurve>::DownCast(fullCurve->Copy());
+        if (boundary.IsNull()) {
+            return {};
+        }
+        boundary->Segment(first,
+                          last,
+                          Precision::PConfusion());
+        if (reverse) {
+            boundary->Reverse();
+        }
+        return boundary;
+    }
+
     bool sourcePanelMirrorsOntoItself(const SourcePanel &source,
                                       int firstPoint,
-                                      int lastPoint) const
+                                      int lastPoint,
+                                      Region region) const
     {
         // Check the two rib boundaries, not the declared cell parity or panel
         // number. Even-cell wings have a real half-panel next to a centre rib,
@@ -1460,9 +1878,9 @@ private:
              pointIndex <= lastPoint;
              ++pointIndex) {
             const gp_Pnt point = sourceShapePoint(
-                source, pointIndex, 0.0);
+                source, pointIndex, 0.0, region, true);
             const gp_Pnt opposite = sourceShapePoint(
-                source, pointIndex, 1.0);
+                source, pointIndex, 1.0, region, true);
             if (gp_Pnt(-point.X(), point.Y(), point.Z())
                     .Distance(opposite)
                 > symmetryPlaneToleranceMillimetres) {
@@ -1474,7 +1892,8 @@ private:
 
     occ::handle<Geom_BSplineCurve> makeSourceSpanCurve(
         const SourcePanel &source,
-        int pointIndex) const
+        int pointIndex,
+        Region region) const
     {
         const gp_Pnt start =
             sourceControlPoint(
@@ -1520,6 +1939,18 @@ private:
         }
         normalDirection.Normalize();
 
+        const double targetHeight =
+            miniribTargetHeight(source, pointIndex, region);
+        if (targetHeight
+            < height - pointToleranceMillimetres) {
+            return makePinchedSpanCurve(start,
+                                        spanDirection,
+                                        normalDirection,
+                                        spanLength,
+                                        height,
+                                        targetHeight);
+        }
+
         // A circle converted to a rational B-spline is exact. Transforming
         // its poles by the source span/shaping basis also exactly preserves
         // the source law if that local basis is slightly skewed.
@@ -1538,22 +1969,10 @@ private:
             return {};
         }
 
-        // The conversion leaves an arbitrary uniform scale on the arc's
-        // weights (scaling every weight by one constant is the identity on
-        // a rational curve). Pin the end weights to exactly 1 so the arc
-        // sections agree with the unit-weight straight sections at the
-        // strip boundaries and the loft's chordwise weight function has no
-        // step where straight and ballooned spans meet.
-        const double endWeight = curve->Weight(1);
-        if (endWeight > 0.0) {
-            for (int poleIndex = 1;
-                 poleIndex <= curve->NbPoles();
-                 ++poleIndex) {
-                curve->SetWeight(
-                    poleIndex,
-                    curve->Weight(poleIndex) / endWeight);
-            }
-        }
+        // Scaling every weight by one constant is the identity on a
+        // rational curve. Unit end weights let straight, circular and
+        // pinched sections share one stable chordwise weight field.
+        normaliseCurveWeights(curve);
 
         for (int poleIndex = 1;
              poleIndex <= curve->NbPoles();
@@ -1819,7 +2238,7 @@ private:
                  pointIndex <= lastPoint;
                  ++pointIndex) {
                 occ::handle<Geom_BSplineCurve> curve =
-                    makeSourceSpanCurve(source, pointIndex);
+                    makeSourceSpanCurve(source, pointIndex, region);
                 if (curve.IsNull()) {
                     errors_.push_back(
                         "Could not create the analytical "
@@ -1830,7 +2249,11 @@ private:
                 }
 
                 const gp_Pnt midpoint =
-                    sourceShapePoint(source, pointIndex, 0.5);
+                    sourceShapePoint(source,
+                                     pointIndex,
+                                     0.5,
+                                     region,
+                                     true);
                 if (!isFinite(midpoint)) {
                     errors_.push_back(
                         "Non-finite " + std::string(regionName)
@@ -1855,6 +2278,7 @@ private:
                                panelIndex,
                                firstPoint,
                                lastPoint,
+                               region,
                                regionName);
             }
             if (surface.IsNull()) {
@@ -1873,6 +2297,7 @@ private:
                 firstPoint,
                 lastPoint,
                 panelIndex,
+                region,
                 regionName);
             if (!errors_.empty()) {
                 return;
@@ -1899,7 +2324,7 @@ private:
             }
 
             const bool selfMirrored = sourcePanelMirrorsOntoItself(
-                source, firstPoint, lastPoint);
+                source, firstPoint, lastPoint, region);
             TopoDS_Face leftFace;
             if (!selfMirrored) {
                 const TopoDS_Shape mirroredFace = mirrored(face);
@@ -1950,6 +2375,7 @@ private:
                         int panelIndex,
                         int firstPoint,
                         int lastPoint,
+                        Region region,
                         const char *regionName) const
     {
         const char *debugPanels = std::getenv("LEP_DEBUG_PANEL");
@@ -1974,7 +2400,7 @@ private:
             const double spanLength = start.Distance(end);
             const double height = sourceShapingHeight(source, pointIndex);
             const occ::handle<Geom_BSplineCurve> section =
-                makeSourceSpanCurve(source, pointIndex);
+                makeSourceSpanCurve(source, pointIndex, region);
             dump << "j=" << pointIndex
                  << " L=" << spanLength
                  << " h=" << height;
@@ -2046,7 +2472,11 @@ private:
                         static_cast<double>(column)
                         / (simSpanColumnCount - 1);
                     row[column] =
-                        sourceShapePoint(source, kept, spanParameter);
+                        sourceShapePoint(source,
+                                         kept,
+                                         spanParameter,
+                                         surface,
+                                         false);
                     if (!isFinite(row[column])) {
                         return;
                     }
@@ -2072,6 +2502,7 @@ private:
         int firstPoint,
         int lastPoint,
         int panelIndex,
+        Region region,
         const char *regionName)
     {
         double uFirst = 0.0;
@@ -2110,7 +2541,9 @@ private:
                     sourceShapePoint(
                         source,
                         pointIndex,
-                        spanParameter);
+                        spanParameter,
+                        region,
+                        true);
                 const gp_Pnt actual =
                     surface->Value(
                         uFirst
@@ -2172,9 +2605,17 @@ private:
             for (int sample = 0; sample <= 4; ++sample) {
                 const double spanParameter = sample / 4.0;
                 const gp_Pnt nearLaw =
-                    sourceShapePoint(source, pointIndex, spanParameter);
+                    sourceShapePoint(source,
+                                     pointIndex,
+                                     spanParameter,
+                                     region,
+                                     true);
                 const gp_Pnt farLaw =
-                    sourceShapePoint(source, pointIndex + 1, spanParameter);
+                    sourceShapePoint(source,
+                                     pointIndex + 1,
+                                     spanParameter,
+                                     region,
+                                     true);
                 const gp_Pnt midpoint(
                     (nearLaw.XYZ() + farLaw.XYZ()) * 0.5);
                 const gp_Pnt actual =
@@ -2201,6 +2642,15 @@ private:
         for (int pointIndex = firstPoint;
              pointIndex <= lastPoint;
              ++pointIndex) {
+            // The old tessellation deliberately has no mini-rib feedback.
+            // Retain it as an oracle everywhere the prescribed law is
+            // unchanged, but do not classify the intentional skin pinch as
+            // a disagreement with that historical shape.
+            if (miniribTargetHeight(source, pointIndex, region)
+                < sourceShapingHeight(source, pointIndex)
+                      - pointToleranceMillimetres) {
+                continue;
+            }
             for (int segment = 0;
                  segment <= source.segmentCount;
                  ++segment) {
@@ -2211,7 +2661,9 @@ private:
                     sourceShapePoint(
                         source,
                         pointIndex,
-                        spanParameter);
+                        spanParameter,
+                        region,
+                        true);
                 const gp_Pnt legacy =
                     tessellationPoint(
                         source.legacyTessellation,
@@ -3499,6 +3951,25 @@ private:
     // face.
     static TopoDS_Face makeStripFace(const CapturedStrip &strip)
     {
+        if (!strip.skinCurveA.IsNull()
+            && !strip.skinCurveB.IsNull()) {
+            const GeomFill_BSplineCurves fill(
+                strip.skinCurveA,
+                strip.skinCurveB,
+                GeomFill_StretchStyle);
+            const occ::handle<Geom_BSplineSurface> surface =
+                fill.Surface();
+            if (surface.IsNull()) {
+                return {};
+            }
+            BRepBuilderAPI_MakeFace makeFace(
+                surface, Precision::Confusion());
+            if (!makeFace.IsDone()) {
+                return {};
+            }
+            return makeFace.Face();
+        }
+
         std::vector<gp_Pnt> a = strip.curveA;
         std::vector<gp_Pnt> b = strip.curveB;
         if (a.size() != b.size()) {
@@ -3677,11 +4148,24 @@ private:
             part->shapes.push_back(shape);
             part->hasFaces = part->hasFaces || face;
             result.surfaceCount += face ? 1 : 0;
+            const bool constrainedMinirib =
+                face && strip.minirib
+                && !strip.skinCurveA.IsNull()
+                && !strip.skinCurveB.IsNull();
+            if (constrainedMinirib) {
+                ++result.constrainedMiniribCount;
+                result.maximumMiniribSkinPullMillimetres =
+                    std::max(result.maximumMiniribSkinPullMillimetres,
+                             strip.maximumSkinPullMillimetres);
+            }
             if (!onCenter && !mirrorsOntoItself()) {
                 const TopoDS_Shape mirroredShape = mirrored(shape);
                 if (!mirroredShape.IsNull()) {
                     part->shapes.push_back(mirroredShape);
                     result.surfaceCount += face ? 1 : 0;
+                    if (constrainedMinirib) {
+                        ++result.constrainedMiniribCount;
+                    }
                 }
             }
         }
@@ -4196,6 +4680,7 @@ private:
     LineTag currentLineTag_;
     double maximumSourceDeviation_ = 0.0;
     double maximumLegacyAgreement_ = 0.0;
+    std::array<double, 101> miniribMaximumSkinPull_{};
 };
 
 NurbsModel &model()
@@ -4237,7 +4722,8 @@ extern "C" void lep_nurbs_capture_panel(const double *u,
                                          int ventPointCount,
                                          int segmentCount,
                                          int includeVentSurface,
-                                         int singleSkin)
+                                         int singleSkin,
+                                         double miniribPercent)
 {
     model().capturePanel(
         u,
@@ -4251,7 +4737,8 @@ extern "C" void lep_nurbs_capture_panel(const double *u,
         ventPointCount,
         segmentCount,
         includeVentSurface != 0,
-        singleSkin != 0);
+        singleSkin != 0,
+        miniribPercent);
 }
 
 extern "C" void lep_nurbs_capture_rib(const double *u,

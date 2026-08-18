@@ -42,6 +42,21 @@ if(NOT engine_stdout MATCHES "excluded embedded Studio version history")
         "stdout:\n${engine_stdout}")
 endif()
 
+string(REGEX MATCH
+    "Mini-rib shaping: ([0-9]+) constrained ribs, maximum skin pull ([0-9.eE+-]+) mm"
+    minirib_shape_summary "${engine_stdout}")
+if(NOT minirib_shape_summary)
+    message(FATAL_ERROR
+        "Engine did not report constrained mini-rib shaping")
+endif()
+set(constrained_minirib_count "${CMAKE_MATCH_1}")
+set(maximum_minirib_skin_pull "${CMAKE_MATCH_2}")
+if(constrained_minirib_count LESS 20 OR maximum_minirib_skin_pull LESS 0.01)
+    message(FATAL_ERROR
+        "Reference wing mini-ribs did not deform the ballooning law: "
+        "${constrained_minirib_count} ribs, ${maximum_minirib_skin_pull} mm pull")
+endif()
+
 foreach(output_name lep-out.txt lines.txt run-log.txt)
     execute_process(
         COMMAND "${REPORT_COMPARATOR}"

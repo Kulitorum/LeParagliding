@@ -17,6 +17,10 @@ struct NurbsWriteResult
     // Profile ranges that reuse the exact adjacent skin-surface NURBS, plus
     // the sampled agreement check on the exported rib edges.
     int sharedRibBoundaryCount = 0;
+    // Partial/full intermediate ribs whose prescribed shortening deforms
+    // the mid-cell skin, counted across the emitted full wing.
+    int constrainedMiniribCount = 0;
+    double maximumMiniribSkinPullMillimetres = 0.0;
     int sewnEdgeCount = 0;
     int freeEdgeCount = 0;
     double maximumRibSkinBoundaryDeviationMillimetres = 0.0;
@@ -61,7 +65,8 @@ void lep_nurbs_capture_panel(const double *u,
                              int ventPointCount,
                              int segmentCount,
                              int includeVentSurface,
-                             int singleSkin);
+                             int singleSkin,
+                             double miniribPercent);
 
 // Captures one rib station: the chord-scaled planar profile (vector 3), its
 // rigidly placed 3D contour (vector 47), and this rib's airfoil-hole table

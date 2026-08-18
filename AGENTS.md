@@ -164,10 +164,14 @@ the core is a C translation unit on non-MSVC platforms.
   ballooning data, legacy tessellation for comparison, ribs/holes, diagonals,
   mini-ribs, and labelled line segments.
 - `NurbsModel` constructs exact rational span curves and lofted
-  Extrados/Vents/Intrados faces, mirrors the half wing, sews topology while
-  preserving designed intake openings, adds ribs/holes/diagonals/lines to a
-  named XCAF assembly, validates source/legacy agreement, and writes AP242 STEP
-  or binary XCAF.
+  Extrados/Vents/Intrados faces. Partial/full mini-ribs replace the affected
+  circular span with two equal-length rational lobes meeting at the unloaded
+  intermediate-profile seam. The mini-rib face reuses that fixed seam while
+  the skin recovers ordinary ballooning over a long, STEP-only chordwise
+  transition. The builder mirrors the half wing, sews topology while preserving
+  designed intake openings, adds ribs/holes/diagonals/lines to a named XCAF
+  assembly, validates source/legacy agreement, and writes AP242 STEP or binary
+  XCAF.
 - `writeSimMesh` serializes a deliberately coarse full-wing JSON mesh in
   millimetres, Z-up: welded skin quads with surface tags, rib/hole loops,
   diagonal straps, and labelled suspension lines.
