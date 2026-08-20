@@ -160,6 +160,8 @@ the core is a C translation unit on non-MSVC platforms.
 
 ### Exact model and viewport
 
+- Read `docs/cfd-solid-export.md` before changing exterior-solid capture,
+  conditional closure topology, or `lep-solid.step` validation.
 - `src/model/nurbs_model.{h,cpp}` owns the capture state and all OCCT model
   construction. Legacy callbacks provide transformed profiles, analytical
   ballooning data, legacy tessellation for comparison, ribs/holes, diagonals,
@@ -527,6 +529,9 @@ an explicitly launched instance. The detailed machine recipe lives in
   load-field evolution, and free-flight architecture.
 - `docs/flat-part-orientation.md`: unresolved fabric-grain problem and proposed
   data/UI solution.
+- `docs/cfd-solid-export.md`: exterior-only CFD STEP contract, conditional
+  wingtip/trailing-edge/centreline closure rules, limitations, and verification
+  evidence.
 - `third_party/xflr5/PROVENANCE.md` and `src/softwing/README.md`: vendor origins
   and local divergence contracts.
 
