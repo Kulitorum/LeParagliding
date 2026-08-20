@@ -14,6 +14,7 @@ files can be written to a separate folder:
 
 - `leparagliding.dxf` — 2D manufacturing plans
 - `lep-3d.step` — exact OCCT NURBS wing model
+- `lep-solid.step` — closed exterior-only OCCT solid for CFD
 - `lep-3d.dxf` — legacy 3D wireframe retained as a reference
 - `lep-out.txt` — calculated design data
 - `lines.txt` — suspension line data
@@ -113,9 +114,18 @@ The main Qt executable exposes the same operation in headless mode:
 ```
 
 Both commands return the engine's exit code and generate `leparagliding.dxf`,
-`lep-3d.step`, the reference `lep-3d.dxf`, `lep-out.txt`, `lines.txt`, and
-`run-log.txt` in the selected output directory. Relative airfoil paths are
-resolved from the design file's directory.
+`lep-3d.step`, the exterior-only CFD `lep-solid.step`, the reference
+`lep-3d.dxf`, `lep-out.txt`, `lines.txt`, and `run-log.txt` in the selected
+output directory. Relative airfoil paths are resolved from the design file's
+directory. The CFD file contains no ribs, mini-ribs, diagonals or lines; its
+vent/intake regions close the exact upper and lower NURBS skins into one solid.
+Open physical wingtips receive hole-free end caps made from the exact skin
+boundary; already closed or collapsed tips are detected and left unchanged.
+Likewise, an airfoil with distinct upper and lower trailing-edge curves gets
+an exact ruled closure there, while an already closed trailing edge is reused.
+A mirrored innermost profile that falls within centre-plane tolerance but is
+not numerically coincident receives narrow exact bridges between corresponding
+skin regions; a materially off-centre boundary is rejected instead.
 
 The 3.28 input format adds sections 33–37 for detailed risers, line
 characteristics, equilibrium calculations, XFLR5 export, and special

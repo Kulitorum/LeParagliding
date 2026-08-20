@@ -121,9 +121,10 @@ int nearestMeshResolutionIndex(double deflectionScale)
     return best;
 }
 
-constexpr std::array<OutputDescription, 6> outputs{{
+constexpr std::array<OutputDescription, 7> outputs{{
     {"leparagliding.dxf", "2D manufacturing plans"},
     {"lep-3d.step", "OCCT NURBS 3D model"},
+    {"lep-solid.step", "Closed exterior solid for CFD"},
     {"lep-3d.dxf", "Legacy 3D wireframe (reference)"},
     {"lep-out.txt", "Design calculations"},
     {"lines.txt", "Suspension line data"},

@@ -1,5 +1,9 @@
-if(NOT DEFINED ENGINE OR NOT DEFINED INPUT OR NOT DEFINED OUTPUT_DIR)
-    message(FATAL_ERROR "ENGINE, INPUT, and OUTPUT_DIR are required")
+if(NOT DEFINED ENGINE
+   OR NOT DEFINED SOLID_CHECKER
+   OR NOT DEFINED INPUT
+   OR NOT DEFINED OUTPUT_DIR)
+    message(FATAL_ERROR
+        "ENGINE, SOLID_CHECKER, INPUT, and OUTPUT_DIR are required")
 endif()
 
 get_filename_component(input_directory "${INPUT}" DIRECTORY)
@@ -35,6 +39,13 @@ if(shared_rib_boundary_count LESS 6
         "${maximum_rib_skin_deviation} mm deviation")
 endif()
 
+if(NOT engine_output MATCHES
+   "CFD solid: [0-9]+ exterior faces, 2 generated wingtip caps, 0 trailing-edge closures, 3 centreline closures, [0-9]+ shared edges, 0 free edges")
+    message(FATAL_ERROR
+        "SoftWingStudio CFD solid did not apply only its required bounded "
+        "closures:\n${engine_output}\n${engine_error}")
+endif()
+
 string(REGEX MATCH
     "Mini-rib shaping: ([0-9]+) constrained ribs, maximum skin pull ([0-9.eE+-]+) mm"
     minirib_profile_summary "${engine_output}")
@@ -50,7 +61,13 @@ if(constrained_minirib_count LESS 2)
         "${constrained_minirib_count} ribs, ${maximum_minirib_skin_pull} mm pull")
 endif()
 
-foreach(required_file lep-3d.step lep-sim.json lep-out.txt lines.txt run-log.txt)
+foreach(required_file
+        lep-3d.step
+        lep-solid.step
+        lep-sim.json
+        lep-out.txt
+        lines.txt
+        run-log.txt)
     set(required_path "${OUTPUT_DIR}/${required_file}")
     if(NOT EXISTS "${required_path}")
         message(FATAL_ERROR "Engine did not create ${required_file}")
@@ -114,6 +131,34 @@ foreach(strap_index RANGE 0 ${last_strap})
             endif()
         endforeach()
     endforeach()
+endforeach()
+
+execute_process(
+    COMMAND "${SOLID_CHECKER}" "${OUTPUT_DIR}/lep-solid.step"
+    RESULT_VARIABLE solid_result
+    OUTPUT_VARIABLE solid_output
+    ERROR_VARIABLE solid_error
+    TIMEOUT 30
+)
+if(NOT solid_result EQUAL 0)
+    message(FATAL_ERROR
+        "SoftWingStudio CFD STEP validation failed (${solid_result}):\n"
+        "${solid_output}\n${solid_error}")
+endif()
+file(READ "${OUTPUT_DIR}/lep-solid.step" solid_model)
+foreach(forbidden_product
+        "Ribs"
+        "Mini-ribs"
+        "Diagonals"
+        "Lines"
+        "Brake lines"
+        "Extrados curves"
+        "Vent curves"
+        "Intrados curves")
+    if(solid_model MATCHES "PRODUCT[(]'${forbidden_product}'")
+        message(FATAL_ERROR
+            "CFD STEP contains internal product '${forbidden_product}'")
+    endif()
 endforeach()
 if(simulation_minirib_count LESS 2)
     message(FATAL_ERROR

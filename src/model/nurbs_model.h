@@ -21,6 +21,15 @@ struct NurbsWriteResult
     // the mid-cell skin, counted across the emitted full wing.
     int constrainedMiniribCount = 0;
     double maximumMiniribSkinPullMillimetres = 0.0;
+    // Hole-free exterior end caps added only when the skin/vent shell leaves
+    // a physical wingtip open. Normally 0 for collapsed tips or 2 otherwise.
+    int solidEndCapCount = 0;
+    // Exterior ruled faces added only where the upper and lower source
+    // profiles have distinct trailing-edge curves.
+    int solidTrailingEdgeClosureCount = 0;
+    // Narrow exterior bridges used only when mirroring leaves the innermost
+    // profile within centre-plane tolerance but not quite coincident.
+    int solidCenterlineClosureCount = 0;
     int sewnEdgeCount = 0;
     int freeEdgeCount = 0;
     double maximumRibSkinBoundaryDeviationMillimetres = 0.0;
@@ -38,6 +47,11 @@ void resetNurbsModel();
 // lines and part boundary edges are always written.
 NurbsWriteResult writeNurbsStep(const std::filesystem::path &path,
                                 bool includeConstructionCurves = true);
+
+// Writes one closed exterior solid for CFD: exact upper/lower NURBS skins
+// plus the vent regions that are deliberately open in the normal assembly.
+// Ribs, mini-ribs, diagonals, lines and construction curves are excluded.
+NurbsWriteResult writeNurbsSolidStep(const std::filesystem::path &path);
 
 // Writes the coarse Playground simulation mesh (welded full-wing skin
 // quads sampled from the ballooning law, rib outline loops, labelled

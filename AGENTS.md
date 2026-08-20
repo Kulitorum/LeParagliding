@@ -103,7 +103,8 @@ design.txt + relative airfoil files
 
 Preview: temporary output + binary `lep-3d.xbf`; the directory is discarded
 after the GUI has loaded XCAF/simulation/flat-part data.
-Export: user output directory + `lep-3d.step`; files remain on disk.
+Export: user output directory + `lep-3d.step` and exterior-only
+`lep-solid.step`; files remain on disk.
 ```
 
 The GUI never calls the translated core in-process. The child-process boundary
@@ -256,10 +257,20 @@ relative airfoil references resolve correctly.
   `lep-2d-parts.json` is loaded into Print state before the temporary directory
   disappears.
 
-The six user-facing export files are:
+The seven user-facing export files are:
 
 - `leparagliding.dxf`: 2D manufacturing plans.
 - `lep-3d.step`: exact named OCCT model.
+- `lep-solid.step`: closed exterior-only OCCT solid for CFD, with vent/intake
+  regions capped and no ribs, mini-ribs, diagonals, lines, or construction
+  curves. A non-collapsed open wingtip gets a hole-free exterior cap from its
+  exact skin boundary; already closed tips do not. Unsupported single-skin
+  geometry keeps the traditional exports and reports a warning instead.
+  Distinct upper/lower trailing-edge curves receive exact ruled exterior
+  closures; coincident trailing edges do not.
+  A mirrored innermost profile within symmetry-plane tolerance may receive
+  narrow region-by-region centre bridges; do not bridge a materially
+  off-centre boundary.
 - `lep-3d.dxf`: legacy reference wireframe.
 - `lep-out.txt`: calculation report.
 - `lines.txt`: suspension data.

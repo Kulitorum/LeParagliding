@@ -3,11 +3,13 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepCheck_Result.hxx>
+#include <BRepLib.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -36,6 +38,7 @@
 #include <STEPControl_StepModelType.hxx>
 #include <Standard_ConstructionError.hxx>
 #include <Standard_Failure.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <TDF_Label.hxx>
 #include <TDataStd_Name.hxx>
@@ -46,6 +49,8 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopoDS.hxx>
 #include <XCAFApp_Application.hxx>
@@ -108,6 +113,8 @@ constexpr int maximumDisplayedChordSamples = 10;
 // Stable part-tree vocabulary. The viewport recognises these exact names in
 // the STEP assembly, so change them only together with the GUI.
 constexpr const char *wingGroupName = "Wing";
+constexpr const char *solidWingGroupName = "Wing solid";
+constexpr const char *solidWingPartName = "Closed exterior";
 constexpr const char *extradosGroupName = "Extrados";
 constexpr const char *ventsGroupName = "Vents";
 constexpr const char *intradosGroupName = "Intrados";
@@ -857,6 +864,7 @@ public:
     void reset()
     {
         panels_.clear();
+        solidClosurePanels_.clear();
         capturedRibs_.clear();
         capturedLines_.clear();
         capturedStrips_.clear();
@@ -957,6 +965,16 @@ public:
                       upperPointCount,
                       ventLast,
                       Region::Vent);
+        } else {
+            // Keep the normal named assembly's intake open, while retaining
+            // the exact analytical vent region solely for the exterior-only
+            // CFD solid.
+            addRegion(source,
+                      panelIndex,
+                      upperPointCount,
+                      ventLast,
+                      Region::Vent,
+                      true);
         }
         if (!singleSkin && ventLast < totalPointCount) {
             addRegion(source,
@@ -1365,6 +1383,12 @@ public:
         return result;
     }
 
+    lep::NurbsWriteResult writeSolidStep(
+        const std::filesystem::path &path)
+    {
+        return buildSolidStep(path);
+    }
+
 private:
     struct LineTag
     {
@@ -1692,6 +1716,495 @@ private:
         }
         occ::handle<Geom_BSplineCurve> result = joined.BSplineCurve();
         normaliseCurveWeights(result);
+        return result;
+    }
+
+    lep::NurbsWriteResult buildSolidStep(
+        const std::filesystem::path &path)
+    {
+        warnings_.clear();
+        lep::NurbsWriteResult result;
+        result.maximumSourceDeviationMillimetres =
+            maximumSourceDeviation_;
+        result.maximumLegacyAgreementMillimetres =
+            maximumLegacyAgreement_;
+
+        if (!errors_.empty()) {
+            result.error = errors_.front();
+            return result;
+        }
+        if (panels_.empty()) {
+            result.error = "The calculation produced no NURBS surfaces.";
+            return result;
+        }
+        if (std::none_of(
+                panels_.begin(),
+                panels_.end(),
+                [](const PanelSurface &panel) {
+                    return panel.region == Region::Intrados;
+                })) {
+            result.error =
+                "A closed CFD solid requires a double-skin wing with an "
+                "intrados.";
+            return result;
+        }
+
+        try {
+            struct TrailingEdgePair
+            {
+                const PanelSurface *upper = nullptr;
+                const PanelSurface *lower = nullptr;
+            };
+            std::map<int, TrailingEdgePair> trailingEdges;
+            for (const PanelSurface &panel : panels_) {
+                TrailingEdgePair &pair = trailingEdges[panel.panelIndex];
+                if (panel.region == Region::Extrados) {
+                    pair.upper = &panel;
+                } else if (panel.region == Region::Intrados) {
+                    pair.lower = &panel;
+                }
+            }
+
+            std::vector<TopoDS_Face> trailingEdgeClosures;
+            std::vector<TopoDS_Face> centerlineClosures;
+            std::vector<const PanelSurface *> exteriorRegions;
+            exteriorRegions.reserve(
+                panels_.size() + solidClosurePanels_.size());
+            for (const PanelSurface &panel : panels_) {
+                exteriorRegions.push_back(&panel);
+            }
+            for (const PanelSurface &panel : solidClosurePanels_) {
+                exteriorRegions.push_back(&panel);
+            }
+            const auto curvesCoincide = [](const occ::handle<Geom_Curve>
+                                               &first,
+                                           const occ::handle<Geom_Curve>
+                                               &second) {
+                if (first.IsNull() || second.IsNull()) {
+                    return false;
+                }
+                constexpr int sampleCount = 8;
+                for (int sample = 0; sample <= sampleCount; ++sample) {
+                    const double fraction =
+                        static_cast<double>(sample)
+                        / static_cast<double>(sampleCount);
+                    const double firstParameter =
+                        first->FirstParameter()
+                        + (first->LastParameter()
+                           - first->FirstParameter())
+                              * fraction;
+                    const double secondParameter =
+                        second->FirstParameter()
+                        + (second->LastParameter()
+                           - second->FirstParameter())
+                              * fraction;
+                    if (first->Value(firstParameter).Distance(
+                            second->Value(secondParameter))
+                        > pointToleranceMillimetres) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+            const int innermostPanelIndex = std::min_element(
+                panels_.begin(),
+                panels_.end(),
+                [](const PanelSurface &left, const PanelSurface &right) {
+                    return left.panelIndex < right.panelIndex;
+                })->panelIndex;
+            for (const PanelSurface *panelPointer : exteriorRegions) {
+                const PanelSurface &panel = *panelPointer;
+                if (panel.panelIndex != innermostPanelIndex
+                    || panel.selfMirrored) {
+                    continue;
+                }
+                double uFirst = 0.0;
+                double uLast = 0.0;
+                double vFirst = 0.0;
+                double vLast = 0.0;
+                panel.surface->Bounds(uFirst, uLast, vFirst, vLast);
+                const occ::handle<Geom_BSplineCurve> boundary =
+                    occ::handle<Geom_BSplineCurve>::DownCast(
+                        panel.surface->UIso(uLast));
+                if (boundary.IsNull()) {
+                    result.error =
+                        "An innermost skin boundary is not a NURBS curve.";
+                    return result;
+                }
+                occ::handle<Geom_BSplineCurve> opposite =
+                    occ::handle<Geom_BSplineCurve>::DownCast(
+                        boundary->Copy());
+                opposite->Transform(mirrorTransform());
+                if (curvesCoincide(boundary, opposite)) {
+                    continue;
+                }
+                constexpr int centerSamples = 8;
+                bool withinCenterTolerance = true;
+                for (int sample = 0; sample <= centerSamples; ++sample) {
+                    const double fraction =
+                        static_cast<double>(sample)
+                        / static_cast<double>(centerSamples);
+                    const double parameter =
+                        boundary->FirstParameter()
+                        + (boundary->LastParameter()
+                           - boundary->FirstParameter())
+                              * fraction;
+                    withinCenterTolerance =
+                        withinCenterTolerance
+                        && std::abs(boundary->Value(parameter).X())
+                               <= symmetryPlaneToleranceMillimetres;
+                }
+                if (!withinCenterTolerance) {
+                    result.error =
+                        "The innermost skin boundary is too far from the "
+                        "symmetry plane to close safely.";
+                    return result;
+                }
+                CapturedStrip closure;
+                closure.skinCurveA = boundary;
+                closure.skinCurveB = opposite;
+                const TopoDS_Face closureFace = makeStripFace(closure);
+                if (closureFace.IsNull()
+                    || !BRepCheck_Analyzer(closureFace, true).IsValid()) {
+                    result.error =
+                        "Could not close the mirrored skin at the centreline.";
+                    return result;
+                }
+                centerlineClosures.push_back(closureFace);
+                ++result.solidCenterlineClosureCount;
+            }
+
+            for (const auto &[panelIndex, pair] : trailingEdges) {
+                if (pair.upper == nullptr || pair.lower == nullptr) {
+                    result.error =
+                        "A closed CFD solid is missing an upper or lower "
+                        "surface for panel "
+                        + std::to_string(panelIndex) + '.';
+                    return result;
+                }
+                double upperUFirst = 0.0;
+                double upperULast = 0.0;
+                double upperVFirst = 0.0;
+                double upperVLast = 0.0;
+                pair.upper->surface->Bounds(
+                    upperUFirst,
+                    upperULast,
+                    upperVFirst,
+                    upperVLast);
+                double lowerUFirst = 0.0;
+                double lowerULast = 0.0;
+                double lowerVFirst = 0.0;
+                double lowerVLast = 0.0;
+                pair.lower->surface->Bounds(
+                    lowerUFirst,
+                    lowerULast,
+                    lowerVFirst,
+                    lowerVLast);
+                const occ::handle<Geom_Curve> upperCurve =
+                    pair.upper->surface->VIso(upperVFirst);
+                const occ::handle<Geom_Curve> lowerCurve =
+                    pair.lower->surface->VIso(lowerVLast);
+                if (curvesCoincide(upperCurve, lowerCurve)) {
+                    continue;
+                }
+                CapturedStrip closure;
+                closure.skinCurveA =
+                    occ::handle<Geom_BSplineCurve>::DownCast(upperCurve);
+                closure.skinCurveB =
+                    occ::handle<Geom_BSplineCurve>::DownCast(lowerCurve);
+                if (closure.skinCurveA.IsNull()
+                    || closure.skinCurveB.IsNull()) {
+                    result.error =
+                        "A trailing-edge boundary is not a NURBS curve for "
+                        "panel "
+                        + std::to_string(panelIndex) + '.';
+                    return result;
+                }
+                const TopoDS_Face closureFace = makeStripFace(closure);
+                if (closureFace.IsNull()
+                    || !BRepCheck_Analyzer(closureFace, true).IsValid()) {
+                    result.error =
+                        "Could not close the trailing edge of panel "
+                        + std::to_string(panelIndex) + '.';
+                    return result;
+                }
+                trailingEdgeClosures.push_back(closureFace);
+                ++result.solidTrailingEdgeClosureCount;
+                if (!pair.upper->selfMirrored) {
+                    const TopoDS_Shape oppositeClosure =
+                        mirrored(closureFace);
+                    if (oppositeClosure.IsNull()
+                        || oppositeClosure.ShapeType() != TopAbs_FACE) {
+                        result.error =
+                            "Could not mirror the trailing-edge closure of "
+                            "panel "
+                            + std::to_string(panelIndex) + '.';
+                        return result;
+                    }
+                    trailingEdgeClosures.push_back(
+                        TopoDS::Face(oppositeClosure));
+                    ++result.solidTrailingEdgeClosureCount;
+                }
+            }
+
+            BRepBuilderAPI_Sewing sewing(
+                pointToleranceMillimetres,
+                true,
+                true,
+                true,
+                false);
+            const auto addFaces = [](
+                                      BRepBuilderAPI_Sewing &target,
+                                      const std::vector<PanelSurface> &panels) {
+                for (const PanelSurface &panel : panels) {
+                    target.Add(panel.rightFace);
+                    if (!panel.selfMirrored) {
+                        target.Add(panel.leftFace);
+                    }
+                }
+            };
+            addFaces(sewing, panels_);
+            addFaces(sewing, solidClosurePanels_);
+            for (const TopoDS_Face &closure : trailingEdgeClosures) {
+                sewing.Add(closure);
+            }
+            for (const TopoDS_Face &closure : centerlineClosures) {
+                sewing.Add(closure);
+            }
+
+            BRepBuilderAPI_Sewing skinOnlySewing(
+                pointToleranceMillimetres,
+                true,
+                true,
+                true,
+                false);
+            addFaces(skinOnlySewing, panels_);
+            addFaces(skinOnlySewing, solidClosurePanels_);
+            for (const TopoDS_Face &closure : trailingEdgeClosures) {
+                skinOnlySewing.Add(closure);
+            }
+            for (const TopoDS_Face &closure : centerlineClosures) {
+                skinOnlySewing.Add(closure);
+            }
+            skinOnlySewing.Perform();
+            const bool needsTipCaps = skinOnlySewing.NbFreeEdges() != 0;
+
+            // The skin regions end on the outermost calculated rib station.
+            // Close that physical wingtip with a hole-free NURBS face made
+            // from the exact surface boundary curves, and mirror it for the
+            // other tip. The cap may be gently warped when the boundary is
+            // not planar. This is an exterior cap only: it never appears in
+            // the normal assembly as a structural rib. If the skin-only
+            // topology already has no free edge (for example a collapsed
+            // tip), do not introduce a coincident artificial face.
+            if (needsTipCaps) {
+                const int tipRibIndex = std::max_element(
+                    panels_.begin(),
+                    panels_.end(),
+                    [](const PanelSurface &left, const PanelSurface &right) {
+                        return left.panelIndex < right.panelIndex;
+                    })->panelIndex;
+                std::array<occ::handle<Geom_BSplineCurve>, 3>
+                    tipBoundaries;
+                const auto collectTipBoundaries =
+                    [tipRibIndex, &tipBoundaries](
+                        const std::vector<PanelSurface> &panels) {
+                        for (const PanelSurface &panel : panels) {
+                            if (panel.panelIndex != tipRibIndex) {
+                                continue;
+                            }
+                            double uFirst = 0.0;
+                            double uLast = 0.0;
+                            double vFirst = 0.0;
+                            double vLast = 0.0;
+                            panel.surface->Bounds(
+                                uFirst, uLast, vFirst, vLast);
+                            const occ::handle<Geom_Curve> tipCurve =
+                                panel.surface->UIso(uFirst);
+                            if (!tipCurve.IsNull()) {
+                                tipBoundaries[static_cast<std::size_t>(
+                                    panel.region)] =
+                                    occ::handle<Geom_BSplineCurve>::DownCast(
+                                        tipCurve);
+                            }
+                        }
+                    };
+                collectTipBoundaries(panels_);
+                collectTipBoundaries(solidClosurePanels_);
+                if (std::any_of(
+                        tipBoundaries.begin(),
+                        tipBoundaries.end(),
+                        [](const occ::handle<Geom_BSplineCurve> &curve) {
+                            return curve.IsNull();
+                        })) {
+                    result.error =
+                        "Could not recover the outer wingtip profile for the "
+                        "closed CFD solid.";
+                    return result;
+                }
+                GeomConvert_CompCurveToBSplineCurve lowerBoundary(
+                    tipBoundaries[static_cast<std::size_t>(Region::Vent)]);
+                if (!lowerBoundary.Add(
+                        tipBoundaries[static_cast<std::size_t>(
+                            Region::Intrados)],
+                        pointToleranceMillimetres,
+                        true,
+                        false,
+                        2)) {
+                    result.error =
+                        "Could not join the wingtip vent and intrados "
+                        "boundaries.";
+                    return result;
+                }
+                occ::handle<Geom_BSplineCurve> lowerTip =
+                    lowerBoundary.BSplineCurve();
+                lowerTip->Reverse();
+                CapturedStrip tipClosure;
+                tipClosure.skinCurveA =
+                    tipBoundaries[static_cast<std::size_t>(
+                        Region::Extrados)];
+                tipClosure.skinCurveB = lowerTip;
+                const TopoDS_Face tipFace = makeStripFace(tipClosure);
+                if (tipFace.IsNull()
+                    || !BRepCheck_Analyzer(tipFace, true).IsValid()) {
+                    result.error =
+                        "Could not span the exact wingtip boundary with a "
+                        "valid end cap.";
+                    return result;
+                }
+                sewing.Add(tipFace);
+                const TopoDS_Shape oppositeTip = mirrored(tipFace);
+                if (oppositeTip.IsNull()
+                    || oppositeTip.ShapeType() != TopAbs_FACE) {
+                    result.error =
+                        "Could not mirror the CFD wingtip cap.";
+                    return result;
+                }
+                sewing.Add(oppositeTip);
+                result.solidEndCapCount = 2;
+            }
+            sewing.Perform();
+
+            result.sewnEdgeCount = sewing.NbContigousEdges();
+            result.freeEdgeCount = sewing.NbFreeEdges();
+            if (result.freeEdgeCount != 0) {
+                if (std::getenv("LEP_DEBUG_SOLID") != nullptr) {
+                    for (int edgeIndex = 1;
+                         edgeIndex <= result.freeEdgeCount;
+                         ++edgeIndex) {
+                        const TopoDS_Edge &edge =
+                            sewing.FreeEdge(edgeIndex);
+                        double first = 0.0;
+                        double last = 0.0;
+                        const occ::handle<Geom_Curve> curve =
+                            BRep_Tool::Curve(edge, first, last);
+                        if (!curve.IsNull()) {
+                            const gp_Pnt start = curve->Value(first);
+                            const gp_Pnt end = curve->Value(last);
+                            std::cerr
+                                << "CFD free edge " << edgeIndex
+                                << " from (" << start.X() << ','
+                                << start.Y() << ',' << start.Z()
+                                << ") to (" << end.X() << ','
+                                << end.Y() << ',' << end.Z() << ")\n";
+                        }
+                    }
+                }
+                result.error =
+                    "The closed CFD exterior still has "
+                    + std::to_string(result.freeEdgeCount)
+                    + " free edges after applying its bounded closures.";
+                return result;
+            }
+
+            const TopoDS_Shape sewed = sewing.SewedShape();
+            if (sewed.IsNull()
+                || !BRepCheck_Analyzer(sewed, true).IsValid()) {
+                result.error =
+                    "OCCT could not sew the closed CFD exterior into valid "
+                    "topology.";
+                return result;
+            }
+
+            std::vector<TopoDS_Shell> shells;
+            if (sewed.ShapeType() == TopAbs_SHELL) {
+                shells.push_back(TopoDS::Shell(sewed));
+            } else {
+                for (TopExp_Explorer explorer(sewed, TopAbs_SHELL);
+                     explorer.More();
+                     explorer.Next()) {
+                    shells.push_back(TopoDS::Shell(explorer.Current()));
+                }
+            }
+            if (shells.size() != 1) {
+                result.error =
+                    "The closed CFD exterior produced "
+                    + std::to_string(shells.size())
+                    + " shells instead of one connected wing shell.";
+                return result;
+            }
+
+            BRepBuilderAPI_MakeSolid makeSolid(shells.front());
+            if (!makeSolid.IsDone()) {
+                result.error =
+                    "OCCT could not turn the closed wing shell into a solid.";
+                return result;
+            }
+            TopoDS_Solid solid = makeSolid.Solid();
+            BRepLib::SameParameter(
+                solid, pointToleranceMillimetres, true);
+            ShapeFix_Shape healer(solid);
+            healer.SetPrecision(pointToleranceMillimetres);
+            healer.SetMinTolerance(Precision::Confusion());
+            healer.SetMaxTolerance(0.05);
+            healer.Perform();
+            const TopoDS_Shape healed = healer.Shape();
+            if (healed.IsNull()
+                || healed.ShapeType() != TopAbs_SOLID) {
+                result.error =
+                    "OCCT shape healing did not preserve one CFD solid.";
+                return result;
+            }
+            solid = TopoDS::Solid(healed);
+            if (!BRepLib::OrientClosedSolid(solid)) {
+                result.error =
+                    "OCCT could not orient the closed CFD wing solid.";
+                return result;
+            }
+            if (!BRepCheck_Analyzer(solid, true).IsValid()) {
+                result.error = "OCCT rejected the closed CFD wing solid.";
+                return result;
+            }
+
+            for (TopExp_Explorer explorer(solid, TopAbs_FACE);
+                 explorer.More();
+                 explorer.Next()) {
+                ++result.surfaceCount;
+            }
+            AssemblyGroup wing{solidWingGroupName, {}, {}};
+            wing.parts.push_back(
+                {solidWingPartName,
+                 solid,
+                 extradosColor,
+                 wireframeColor,
+                 true});
+            writeAssembly(wing, path, result, false);
+        } catch (const Standard_Failure &failure) {
+            result.error =
+                std::string("OCCT solid STEP export failed: ")
+                + (failure.GetMessageString() != nullptr
+                       ? failure.GetMessageString()
+                       : "unknown OCCT error");
+            return result;
+        } catch (const std::exception &exception) {
+            result.error =
+                std::string("Solid STEP export failed: ") + exception.what();
+            return result;
+        }
+
+        result.warnings = warnings_;
+        result.success = result.error.empty();
         return result;
     }
 
@@ -2212,7 +2725,8 @@ private:
                    int panelIndex,
                    int firstPoint,
                    int lastPoint,
-                   Region region)
+                   Region region,
+                   bool solidClosureOnly = false)
     {
         if (lastPoint - firstPoint + 1 < 2) {
             return;
@@ -2222,14 +2736,16 @@ private:
                    panelIndex,
                    firstPoint,
                    lastPoint,
-                   region);
+                   region,
+                   solidClosureOnly);
     }
 
     void addSurface(const SourcePanel &source,
                     int panelIndex,
                     int firstPoint,
                     int lastPoint,
-                    Region region)
+                    Region region,
+                    bool solidClosureOnly)
     {
         const char *regionName = regionDiagnosticName(region);
         const int chordPointCount = lastPoint - firstPoint + 1;
@@ -2358,7 +2874,11 @@ private:
                 panel,
                 maximumDisplayedSpanSamples,
                 std::min(chordPointCount, maximumDisplayedChordSamples));
-            panels_.push_back(std::move(panel));
+            if (solidClosureOnly) {
+                solidClosurePanels_.push_back(std::move(panel));
+            } else {
+                panels_.push_back(std::move(panel));
+            }
         } catch (const Standard_Failure &failure) {
             std::ostringstream message;
             message << "OCCT failed to fit the " << regionName
@@ -3629,7 +4149,8 @@ private:
 
     // Every captured panel spans rib i to rib i-1, so panel i declares the
     // panel-covered chord ranges of rib i, and of rib i-1 only when panel
-    // i-1 was not built (which also yields the centre rib 0 from panel 1).
+    // i-1 was not built. The exception is a self-mirrored odd centre cell:
+    // its opposite boundary is the mirror of rib i, not a separate rib 0.
     // Each rib station becomes a closed planar face over its full captured
     // contour, with its airfoil holes cut out.
     void addRibParts(AssemblyGroup &wing,
@@ -3659,7 +4180,8 @@ private:
             }
             ribSegments[panel.panelIndex].push_back(
                 {panel.firstPoint, panel.lastPoint, firstRibCurve});
-            if (!capturedPanels.contains(panel.panelIndex - 1)) {
+            if (!panel.selfMirrored
+                && !capturedPanels.contains(panel.panelIndex - 1)) {
                 ribSegments[panel.panelIndex - 1].push_back(
                     {panel.firstPoint, panel.lastPoint, lastRibCurve});
             }
@@ -4188,7 +4710,8 @@ private:
 
     void writeAssembly(const AssemblyGroup &wing,
                        const std::filesystem::path &path,
-                       lep::NurbsWriteResult &result) const
+                       lep::NurbsWriteResult &result,
+                       bool writeSurfaceCurves = true) const
     {
         // A .xbf target serializes the XCAF document in OCCT's binary
         // format: identical geometry and assembly names, but no STEP
@@ -4239,7 +4762,8 @@ private:
         // recreate the model with those parameters.
         Interface_Static::SetIVal("write.step.schema", 5); // AP242DIS
         Interface_Static::SetCVal("write.step.unit", "MM");
-        Interface_Static::SetIVal("write.surfacecurve.mode", 1);
+        Interface_Static::SetIVal(
+            "write.surfacecurve.mode", writeSurfaceCurves ? 1 : 0);
         writer.ChangeWriter().Model(true);
         writer.ChangeWriter().SetTolerance(pointToleranceMillimetres);
         writer.SetColorMode(true);
@@ -4367,6 +4891,7 @@ public:
             ribColumns;
 
         for (const SimRegionCapture &region : simRegions_) {
+            const bool selfMirrored = region.selfMirrored();
             for (const bool mirror : {false, true}) {
                 // A panel that straddles the centreline (the centre cell of
                 // a wing whose innermost ribs sit either side of x=0) is its
@@ -4375,7 +4900,7 @@ public:
                 // than from panelIndex == 1: wings whose innermost rib sits
                 // *on* the centreline have a genuine second half-panel there
                 // that must be mirrored.
-                if (mirror && region.selfMirrored()) {
+                if (mirror && selfMirrored) {
                     continue;
                 }
                 std::vector<std::array<int, simSpanColumnCount>> grid;
@@ -4403,20 +4928,24 @@ public:
                             static_cast<int>(region.surface));
                     }
                 }
-                // Span column 0 lies on rib panelIndex, the last column on
-                // rib panelIndex-1. Both edges are registered: on wings
-                // whose innermost rib sits on the centreline that rib is no
-                // panel's column 0, and harvesting only column 0 dropped it
-                // — leaving the two centre bays joined into one, which then
-                // ballooned as a single double-width cell. Ribs shared by
-                // neighbouring panels yield identical loops and are removed
-                // by the uniqueLoops filter below.
+                // Span column 0 lies on rib panelIndex, the last column
+                // normally on rib panelIndex-1. For a self-mirrored odd
+                // centre cell, however, that last column is the mirrored
+                // copy of rib panelIndex; key it that way so its hole table
+                // is mirrored too instead of borrowing synthetic rib 0.
+                // Both edges are registered because a genuine centre rib is
+                // no panel's column 0. Ribs shared by neighbouring panels
+                // yield identical loops and are removed below.
                 for (std::size_t rowIndex = 0;
                      rowIndex < grid.size();
                      ++rowIndex) {
                     ribColumns[{region.panelIndex, mirror}].emplace_back(
                         region.stations[rowIndex], grid[rowIndex][0]);
-                    ribColumns[{region.panelIndex - 1, mirror}].emplace_back(
+                    const std::pair<int, bool> oppositeRib =
+                        selfMirrored
+                            ? std::make_pair(region.panelIndex, !mirror)
+                            : std::make_pair(region.panelIndex - 1, mirror);
+                    ribColumns[oppositeRib].emplace_back(
                         region.stations[rowIndex],
                         grid[rowIndex][simSpanColumnCount - 1]);
                 }
@@ -4810,6 +5339,9 @@ public:
 
 private:
     std::vector<PanelSurface> panels_;
+    // Vent faces omitted from the normal open-intake assembly but retained
+    // for the separate, exterior-only CFD solid.
+    std::vector<PanelSurface> solidClosurePanels_;
     std::map<int, CapturedRib> capturedRibs_;
     std::vector<CapturedLine> capturedLines_;
     std::vector<CapturedStrip> capturedStrips_;
@@ -4842,6 +5374,11 @@ NurbsWriteResult writeNurbsStep(const std::filesystem::path &path,
                                 bool includeConstructionCurves)
 {
     return model().writeStep(path, includeConstructionCurves);
+}
+
+NurbsWriteResult writeNurbsSolidStep(const std::filesystem::path &path)
+{
+    return model().writeSolidStep(path);
 }
 
 bool writeSimMesh(const std::filesystem::path &path, std::string &error)

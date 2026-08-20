@@ -88,6 +88,7 @@ set(LEP_OCCT_TOOLKITS
     TKBRep
     TKGeomAlgo
     TKTopAlgo
+    TKShHealing
     TKMesh
     TKService
     TKV3d
@@ -441,6 +442,11 @@ add_executable(flatparts-export-test
 )
 target_link_libraries(flatparts-export-test PRIVATE flatparts Qt6::Gui)
 
+add_executable(solid-step-test
+    tests/solid_step_test.cpp
+)
+target_link_libraries(solid-step-test PRIVATE lep_occt)
+
 qt_add_executable(LEparagliding WIN32
     src/gui/airfoil_file.cpp
     src/gui/airfoil_file.h
@@ -546,6 +552,7 @@ set_target_properties(
     playground-contact-test
     playground-contact-integration-test
     flatparts-export-test
+    solid-step-test
     nesting-bench
     softwing-bench
     PROPERTIES
@@ -572,6 +579,7 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
         playground-contact-test
         playground-contact-integration-test
         flatparts-export-test
+        solid-step-test
         nesting-bench
         softwing-bench
         PROPERTIES
@@ -704,6 +712,7 @@ add_test(NAME gui_headless_help COMMAND LEparagliding --headless --help)
 add_test(NAME preset_gnua7_calculates
     COMMAND "${CMAKE_COMMAND}"
         "-DENGINE=$<TARGET_FILE:leparagliding-engine>"
+        "-DSOLID_CHECKER=$<TARGET_FILE:solid-step-test>"
         "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/resources/presets/gnuA7/24/leparagliding.txt"
         "-DOUTPUT_DIR=${CMAKE_BINARY_DIR}/preset-test-output"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckOddCellCenterPanel.cmake"
@@ -719,6 +728,7 @@ set(softwingstudio_export_input
 add_test(NAME softwingstudio_export_calculates
     COMMAND "${CMAKE_COMMAND}"
         "-DENGINE=$<TARGET_FILE:leparagliding-engine>"
+        "-DSOLID_CHECKER=$<TARGET_FILE:solid-step-test>"
         "-DINPUT=${softwingstudio_export_input}"
         "-DOUTPUT_DIR=${CMAKE_BINARY_DIR}/softwingstudio-export-test-output"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckSoftWingStudioExport.cmake"

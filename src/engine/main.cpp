@@ -15,10 +15,11 @@ extern "C" void f_exit();
 
 namespace {
 
-constexpr std::array<std::string_view, 6> outputFiles{
+constexpr std::array<std::string_view, 7> outputFiles{
     "leparagliding.dxf",
     "lep-3d.dxf",
     "lep-3d.step",
+    "lep-solid.step",
     "lep-3d.xbf",
     "lep-out.txt",
     "lines.txt",
@@ -175,6 +176,37 @@ int runEngine(const std::filesystem::path &inputArgument,
             << step.maximumLegacyAgreementMillimetres << " mm\n"
             << (preview ? "Preview model: " : "STEP model: ")
             << pathToUtf8(output / modelFileName) << '\n';
+
+        if (!preview) {
+            const lep::NurbsWriteResult solid =
+                lep::writeNurbsSolidStep(output / "lep-solid.step");
+            for (const std::string &warning : solid.warnings) {
+                std::cerr << "CFD solid warning: " << warning << '\n';
+            }
+            if (solid.success) {
+                std::cout
+                    << "CFD solid: "
+                    << solid.surfaceCount
+                    << " exterior faces, "
+                    << solid.solidEndCapCount
+                    << " generated wingtip caps, "
+                    << solid.solidTrailingEdgeClosureCount
+                    << " trailing-edge closures, "
+                    << solid.solidCenterlineClosureCount
+                    << " centreline closures, "
+                    << solid.sewnEdgeCount
+                    << " shared edges, "
+                    << solid.freeEdgeCount
+                    << " free edges\n"
+                    << "Solid STEP model: "
+                    << pathToUtf8(output / "lep-solid.step") << '\n';
+            } else {
+                // The traditional exports remain useful for unsupported
+                // single-skin designs or an unusual topology that cannot be
+                // closed. Never let this additive CFD output suppress them.
+                std::cerr << "CFD solid warning: " << solid.error << '\n';
+            }
+        }
 
         // Companion mesh for the Studio's Playground simulation; losing it
         // never fails the calculation.
